@@ -14,7 +14,7 @@ import path from "node:path";
 
 import { asDigest } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
-import { asId, newId, nowInstant } from "../../packages/domain/identity.ts";
+import { asId, asInstant, newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id, Instant } from "../../packages/domain/identity.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import type { Result } from "../../packages/domain/result.ts";
@@ -38,6 +38,7 @@ import { VectorService } from "../../packages/application/vector-service.ts";
 import { ContractService } from "../../packages/application/contract-service.ts";
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
+import { BuilderService } from "../../packages/application/builder-service.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 
 import { acquireWorkerLock, applyMigrations, openWriteConnection, planMigrations } from "../../packages/adapters/storage/database.ts";
@@ -48,6 +49,7 @@ import { ReaSession } from "../../packages/adapters/rea/session.ts";
 import { ReaCaptureInspector } from "../../packages/adapters/rea/capture-inspection.ts";
 import { WebCaptureEvidenceFacts } from "../../packages/adapters/rea/web-capture-records.ts";
 import { createProjectRequestSchema } from "../../packages/contracts/resources.ts";
+import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
 //
@@ -93,6 +95,10 @@ export const COMMAND_NAMES = [
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
+  // The Builder's own operation (§7.3, §10 / issue #19). It is a command like any
+  // other, so the actor kind arrives on the frame and the service — not this table —
+  // decides whether that kind may generate.
+  "candidate.generate",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
@@ -376,6 +382,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
+  const builder = new BuilderService({ storage: writer, artifacts: store, limits: LIMITS });
 
   let session: ReaSession | null = null;
   function providerSession(): Result<ReaSession, GateFailure> {
@@ -559,6 +566,26 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const refused = missing(blueprintId);
       if (refused !== null) return refused;
       return relay(await blueprints.readSourceManifest(projectIdOr(payload), actor, blueprintId as Id));
+    },
+    "candidate.generate": async (payload, actor) => {
+      // The command carries a blueprint id, a job id and a budget — nothing else. A
+      // request that tried to name a vector, a target or an artifact key would be
+      // refused by the strict schema before the Builder saw it (§7.3: the handoff is
+      // the whole input). `projectId` stays outside the DTO, as with the other
+      // service-backed commands, because it selects the owner rather than the input.
+      const parsed = candidateGenerateRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "candidate-generate", "the generation request was rejected");
+      const deadline = parsed.data.budget.deadlineAt;
+      return relay(
+        await builder.generate(projectIdOr(payload), actor, asId(parsed.data.blueprintId), {
+          budget: {
+            maxAttemptsPerBlueprint: parsed.data.budget.maxAttemptsPerBlueprint,
+            deadlineAt: deadline === null ? null : asInstant(deadline),
+          },
+          generator: parsed.data.generator,
+          jobId: asId(parsed.data.jobId),
+        }),
+      );
     },
     "health.effectiveProfiles": () => relay({ ok: true, value: profiles.healthView() }),
     "doctor.run": async () => relay({ ok: true, value: (await doctorReport()) as unknown as JsonValue }),

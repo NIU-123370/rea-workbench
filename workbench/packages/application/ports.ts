@@ -309,6 +309,15 @@ export type StorageTransaction = {
   findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null;
   insertArtifact(row: ArtifactRow): void;
   getArtifact(projectId: Id, artifactId: Id): ArtifactRow | null;
+  // Content is deduped inside (project, class), so a caller that publishes bytes it
+  // has already stored must reference the existing row rather than mint a second one
+  // for the same digest (§5).
+  findArtifactByDigest(
+    projectId: Id,
+    // `class_` because `class` is reserved in a parameter position; the column stays `class`.
+    class_: ArtifactClass,
+    sha256: Digest,
+  ): ArtifactRow | null;
   insertEvidence(row: EvidenceRow): void;
   getEvidence(projectId: Id, evidenceId: string): EvidenceRow | null;
   insertVector(row: VectorRow): void;
@@ -338,6 +347,10 @@ export type StorageTransaction = {
   // the verification gate, which must bind a candidate digest it did not choose.
   insertCandidate(row: CandidateRow): void;
   getCandidate(projectId: Id, candidateId: Id): CandidateRow | null;
+  // The generation budget is counted per blueprint, so this is the only candidate
+  // read a caller may make: there is no listing across blueprints and no way to ask
+  // for another project's work.
+  listCandidatesForBlueprint(projectId: Id, blueprintId: Id): CandidateRow[];
   insertVerification(row: VerificationRow): void;
   getVerification(projectId: Id, verificationId: Id): VerificationRow | null;
   listVerificationsForCandidate(projectId: Id, candidateId: Id): VerificationRow[];

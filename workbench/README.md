@@ -36,14 +36,37 @@ npm ci
 
 | 模块                                        | 现在真正负责的事                                                                                                                                          |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/domain`                           | 主张三色投影、canonical JSON 与两类摘要、不透明 Id / Instant、向量与契约语义                                                                               |
+| `packages/domain`                           | 主张三色投影、canonical JSON 与两类摘要、不透明 Id / Instant、向量与契约语义、目标 SDK 的 OpenAPI 3.1.1 文档与候选 ABI（`openapi.ts`）                        |
 | `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略）、`rea-analysis-view.ts` / `rea-evidence-bundle.ts`（保留与导入导出）、`verification.ts`（比较器具名版本与 evaluator 完成回执） |
-| `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、`verification-service.ts`（验证报告的唯一生产者）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
+| `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、`builder-service.ts`（蓝图 → 候选的唯一生成口）、`verification-service.ts`（验证报告的唯一生产者）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
 | `packages/adapters/rea`                     | MCP 回复解码、Evidence 索引投影、HTTP 抓包事实读取、session 身份、具名 schema 对账（`schema-reconciliation.ts`）与按引用保留（`retention.ts`）                    |
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
-| `tests/{unit,integration,fixtures}`         | 纯逻辑门禁、真 SQLite / 真文件门禁与固定 envelope fixture                                                                                                   |
+| `tests/{unit,integration,fixtures,support}` | 纯逻辑门禁、真 SQLite / 真文件门禁、固定 envelope fixture，以及跨套件共用的交接数据播种（`support/blueprint-seed.ts`）                                       |
+
+Builder 生成支路（F08 / A07 / issue #19）的边界：
+
+- 唯一入口是已冻结的蓝图交接（`builder-service.ts`）。请求里没有 target id、没有向量
+  id、没有 artifact key，因此 holdout 样本在结构上无法被这里点名（§7.1 / §7.3）；只有
+  `builder` 这一种 actor 能调用，其余 actor 在读取任何东西之前就被拒绝并记一条 `deny`。
+  worker 侧只有一个具名命令 `candidate.generate` 通向它（§14：命令表是边界，测试里另写
+  一份名单，新增名字必须同时改两处），命令只把帧上的 actor 原样交给服务，不自带身份。
+- 候选只是「这些字节、这个摘要」的声明，不是结论：`candidates` 表没有 result / verdict /
+  passed 列，本模块既不写也不 import 验证服务，门禁 `M10` 会杀掉任何往
+  `generatorJson` 里塞判定字段的做法。
+- 预算与截止时间都是拒绝而不是静默降级：`maxAttemptsPerBlueprint` 在事务前的预读与事务内
+  的重新计数各查一次（并发的那条由后者拦下），`deadlineAt` 过期直接 `RESOURCE_LIMIT`；
+  三次生成用完两条后，第三条连一个字节都不会发布。
+- 文档里只有评审过的契约说过的事：schema 对象逐字透传，不补 `additionalProperties:false`
+  装严格；`/api/cart/42` 不做模板泛化；`x-rea-error-cases` / `x-rea-limitations` /
+  `x-rea-unknowns` 一并带着，不丢。适配器按评审的 method 与 path 建路由表，base URL 走
+  `context` 参数而不是模块级状态。
+- **未验证 / 未实现的部分**：生成的 `adapter.ts` 从未被执行，`openapi.json` 也没喂给任何
+  第三方 OpenAPI 校验器（本机不装依赖）——两条都只由本仓的单测断言其内容与摘要，「SDK
+  真的能调用成功」不属于已证事实。另外 Builder 目前是 worker 命令表里的一个具名命令与
+  一种 actor，还没有独立进程与自己的落地文件视图（issue #19 的第一条完成条件），候选字节
+  仍只存在 worker 的 artifact store 里。
 
 ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
 

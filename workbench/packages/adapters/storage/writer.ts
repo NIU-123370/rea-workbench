@@ -9,6 +9,7 @@ import type { Result } from "../../domain/result.ts";
 import { TransactionRefused } from "../../application/decision.ts";
 import type { CleanupState, JobState } from "../../contracts/jobs.ts";
 import type {
+  ArtifactClass,
   ArtifactRow,
   CandidateRow,
   AuditRow,
@@ -635,6 +636,25 @@ class SqliteTransaction implements StorageTransaction {
     };
   }
 
+  findArtifactByDigest(projectId: Id, class_: ArtifactClass, sha256: Digest): ArtifactRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM artifacts WHERE project_id = ? AND class = ? AND sha256 = ?")
+      .get(projectId, class_, sha256) as Row | undefined;
+    if (row === undefined) return null;
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      jobId: row["job_id"] === null ? null : asId(String(row["job_id"])),
+      class: String(row["class"]) as ArtifactClass,
+      sha256: row["sha256"] === null ? null : asDigest(String(row["sha256"])),
+      digestReason: row["digest_reason"] === null ? null : String(row["digest_reason"]),
+      byteLength: Number(row["byte_length"]),
+      storageKey: String(row["storage_key"]),
+      mediaType: String(row["media_type"]),
+      createdAt: asInstant(String(row["created_at"])),
+    };
+  }
+
   insertCandidate(row: CandidateRow): void {
     this.db
       .prepare(
@@ -668,6 +688,22 @@ class SqliteTransaction implements StorageTransaction {
       generatorJson: parseJson(String(row["generator_json"])),
       dependencyManifestJson: parseJson(String(row["dependency_manifest_json"])),
     };
+  }
+
+  listCandidatesForBlueprint(projectId: Id, blueprintId: Id): CandidateRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM candidates WHERE project_id = ? AND blueprint_id = ? ORDER BY rowid")
+      .all(projectId, blueprintId) as Row[];
+    return rows.map((row) => ({
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      blueprintId: asId(String(row["blueprint_id"])),
+      jobId: asId(String(row["job_id"])),
+      artifactId: asId(String(row["artifact_id"])),
+      digest: asDigest(String(row["digest"])),
+      generatorJson: parseJson(String(row["generator_json"])),
+      dependencyManifestJson: parseJson(String(row["dependency_manifest_json"])),
+    }));
   }
 
   insertVerification(row: VerificationRow): void {
