@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { asDigest } from "../../packages/domain/canonical-json.ts";
-import { newId, nowInstant } from "../../packages/domain/identity.ts";
+import { isId, newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id, Instant } from "../../packages/domain/identity.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import {
@@ -17,6 +17,8 @@ import {
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
+import { CANDIDATE_BODY_LIMIT_BYTES, CandidateReadService } from "../../packages/application/candidate-read.ts";
+import { digestBytes } from "../../packages/domain/canonical-json.ts";
 import { readAudit } from "../../packages/application/audit.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { JobRow } from "../../packages/application/ports.ts";
@@ -331,5 +333,138 @@ describe("generating a candidate from a frozen blueprint (§7.3, §10)", () => {
     expect(refused.code).toBe("NOT_FOUND");
     expect(refused.reason).toBe("blueprint-unreadable");
     expect(journal("builder.generate", "deny")).toContain("blueprint-unreadable");
+  });
+});
+
+describe("reading a committed candidate back (§8 lines 295-296, issue #19)", () => {
+  const reads = () => new CandidateReadService({ storage: writer, artifacts: store });
+
+  it("lists exactly the files the Builder committed, by manifest id", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-list" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const view = unwrap(reads().get(projectId, inspector, committed.candidateId));
+    expect(view.id).toBe(committed.candidateId);
+    expect(view.blueprintId).toBe(blueprintId);
+    expect(view.digest).toBe(committed.digest);
+    expect(view.files.map((file) => file.path).sort()).toEqual([
+      "adapter.ts",
+      "candidate-manifest.json",
+      "openapi.json",
+    ]);
+    // Language is derived from the media type the store holds for those bytes, and the
+    // digests are the ones the manifest promised - not recomputed names.
+    expect(view.files.find((file) => file.path === "adapter.ts")?.language).toBe("typescript");
+    expect(view.files.find((file) => file.path === "openapi.json")?.language).toBe("json");
+    for (const file of view.files) {
+      const promised = committed.files.find((entry) => entry.sha256 === file.sha256);
+      expect(promised?.path, `no committed file carries ${file.sha256}`).toBe(file.path);
+      expect(file.byteLength).toBe(promised?.byteLength);
+      expect(file.byteLength).toBeGreaterThan(0);
+    }
+    // §5: the storage key is server-side only. A reply that carried it would name a host
+    // path in a browser-visible body.
+    expect(JSON.stringify(view)).not.toContain("storageKey");
+    expect(JSON.stringify(view)).not.toContain(`projects/${projectId}/artifacts`);
+  });
+
+  it("returns file bytes that hash to the digest the manifest promised", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-content" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const view = unwrap(reads().get(projectId, inspector, committed.candidateId));
+    for (const file of view.files) {
+      const content = await reads().file(projectId, inspector, committed.candidateId, file.id);
+      if (!content.ok) throw new Error(`${content.error.code}:${content.error.reason}`);
+      expect(content.value.fileId).toBe(file.id);
+      expect(content.value.sha256).toBe(file.sha256);
+      expect(content.value.content.length).toBeGreaterThan(0);
+      // The re-hash is the point: the bytes shown are proven to be the bytes the candidate
+      // digest was computed over, so a reviewer cannot be handed a swapped file.
+      expect(digestBytes(new TextEncoder().encode(content.value.content))).toBe(file.sha256);
+      if (file.path === "openapi.json") expect(content.value.content).toContain('"openapi":"3.1.1"');
+    }
+  });
+
+  it("resolves only ids the candidate's own manifest names", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-foreign-file" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const view = unwrap(reads().get(projectId, inspector, committed.candidateId));
+    const refused = await failureOf(reads().file(projectId, inspector, committed.candidateId, newId()));
+    expect(refused.code).toBe("NOT_FOUND");
+    expect(refused.reason).toBe("candidate-file-unknown");
+    // A path is not even expressible as a selector at this boundary: `Id` is a branded
+    // opaque UUID, so `asId` refuses the string before any lookup happens. The route-level
+    // answer to a malformed `:f` segment is pinned in web-api.test.ts.
+    expect(isId("../../../etc/passwd")).toBe(false);
+    // §5's dedupe is inside (project, class), so a second generation of the same blueprint
+    // reuses the same artifact rows. That is the designed answer, and it is worth pinning:
+    // the candidate *manifest* is the authority on which files it published, not the
+    // existence of a row.
+    const again = unwrap(await service.generate(projectId, builder, blueprintId, budget(3)));
+    const second = unwrap(reads().get(projectId, inspector, again.candidateId));
+    expect(second.files.map((file) => file.id)).toEqual(view.files.map((file) => file.id));
+    const strangerProject = newId();
+    const notMine = reads().get(strangerProject, inspector, committed.candidateId);
+    if (notMine.ok) throw new Error("a candidate resolved from a project that does not own it");
+    expect(notMine.error.reason).toBe("candidate-unknown");
+  });
+
+  it("keeps the Builder out of the read side", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-actor" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const denied = reads().get(projectId, builder, committed.candidateId);
+    if (denied.ok) throw new Error("the Builder read a committed candidate back");
+    expect(denied.error.code).toBe("ACCESS_DENIED");
+    expect(denied.error.reason).toBe("builder-may-not-read-candidate");
+    const deniedFile = await failureOf(reads().file(projectId, builder, committed.candidateId, newId()));
+    expect(deniedFile.reason).toBe("builder-may-not-read-candidate");
+  });
+
+  it("does not resolve a candidate that belongs to another project", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-project" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const stranger = newId();
+    const refused = reads().get(stranger, inspector, committed.candidateId);
+    if (refused.ok) throw new Error("a candidate leaked across the project boundary");
+    expect(refused.error.reason).toBe("candidate-unknown");
+    expect(JSON.stringify(refused.error.details)).not.toContain("artifacts");
+  });
+
+  it("refuses when the artifact row no longer matches the manifest that names it", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-drift" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const view = unwrap(reads().get(projectId, inspector, committed.candidateId));
+    const target = view.files[0];
+    if (target === undefined) throw new Error("no file to tamper with");
+    // Simulate index/bytes drift the way an operator would find it: a row whose digest was
+    // rewritten under a candidate that already promised another one.
+    // The tamper has to be undone: the store dedupes candidate bytes by (project, class,
+    // sha256), so leaving a row pointing at a digest no file hashes to makes a later
+    // publish of the same bytes collide on the content-addressed storage key.
+    const original = target.sha256;
+    db.prepare("update artifacts set sha256 = ? where id = ?").run("f".repeat(64), target.id);
+    try {
+      const refused = reads().get(projectId, inspector, committed.candidateId);
+      if (refused.ok) throw new Error("a manifest that disagrees with its own rows was read as if it matched");
+      expect(refused.error.code).toBe("STALE_INPUT");
+      expect(refused.error.reason).toBe("candidate-artifact-disagrees");
+      const fileRefused = await failureOf(reads().file(projectId, inspector, committed.candidateId, target.id));
+      expect(fileRefused.reason).toBe("candidate-artifact-disagrees");
+    } finally {
+      db.prepare("update artifacts set sha256 = ? where id = ?").run(original, target.id);
+    }
+    expect(reads().get(projectId, inspector, committed.candidateId).ok).toBe(true);
+  });
+
+  it("names the inline body limit instead of truncating a file", async () => {
+    // The limit exists so a huge file is a refusal the UI can explain, not a half-string.
+    expect(CANDIDATE_BODY_LIMIT_BYTES).toBeGreaterThan(0);
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "read-limit" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const view = unwrap(reads().get(projectId, inspector, committed.candidateId));
+    for (const file of view.files) {
+      // Every generated file in this fixture is under the limit, so the read answers; the
+      // refusal branch itself is pinned with a fake port in tests/unit/candidate-read.ts.
+      expect(file.byteLength).toBeLessThanOrEqual(CANDIDATE_BODY_LIMIT_BYTES);
+    }
   });
 });

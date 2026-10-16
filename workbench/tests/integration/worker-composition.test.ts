@@ -51,6 +51,8 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "export.download",
   "export.list",
   "graph.read",
+  "candidate.get",
+  "candidate.file",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",

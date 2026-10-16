@@ -829,3 +829,62 @@ describe("degraded behaviour (§14)", () => {
     expect(refused.status).toBe(401);
   });
 });
+
+describe("the candidate file routes (§8 lines 295-296 / issue #19)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: body.data?.csrfToken ?? body.csrfToken ?? "",
+    };
+  }
+
+  it("mounts exactly two candidate routes and holds both behind a session", async () => {
+    const project = newId();
+    const candidate = newId();
+    const anonymousList = await call("GET", `${API_PREFIX}/projects/${project}/candidates/${candidate}`);
+    expect(anonymousList.status).toBe(401);
+    const anonymousFile = await call("GET", `${API_PREFIX}/projects/${project}/candidates/${candidate}/files/${newId()}`);
+    expect(anonymousFile.status).toBe(401);
+    // A near-miss path is not a route: these two GETs do not open a read-anything door
+    // under `/candidates/`.
+    const neighbour = await call("GET", `${API_PREFIX}/projects/${project}/candidates/${candidate}/source`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: (await pairSession()).cookie },
+    });
+    expect(neighbour.status, neighbour.text).toBe(404);
+    expect(neighbour.text).toContain("route-unknown");
+  });
+
+  it("refuses a path segment that is not an opaque id before asking the worker", async () => {
+    const session = await pairSession();
+    const bad = await call("GET", `${API_PREFIX}/projects/${newId()}/candidates/not-a-uuid/files/not-a-uuid`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(bad.status, bad.text).toBe(404);
+    expect(bad.text).toContain("candidate-file-unknown");
+    // The refused text was a path-shaped string; repeating it would put it in a log line
+    // and back into the page (§12.1).
+    expect(bad.text).not.toContain("not-a-uuid");
+  });
+
+  it("relays the worker's named refusals onto the closed codes", async () => {
+    const session = await pairSession();
+    const missing = await call("GET", `${API_PREFIX}/projects/${newId()}/candidates/${newId()}`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(missing.status, missing.text).toBe(404);
+    expect(missing.text).toContain("candidate-unknown");
+
+    const missingFile = await call("GET", `${API_PREFIX}/projects/${newId()}/candidates/${newId()}/files/${newId()}`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(missingFile.status, missingFile.text).toBe(404);
+    expect(missingFile.text).toContain("candidate-unknown");
+  });
+});

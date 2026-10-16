@@ -41,6 +41,7 @@ import { BlueprintService } from "../../packages/application/blueprint-service.t
 import { BuilderService } from "../../packages/application/builder-service.ts";
 import { ExportService } from "../../packages/application/export-service.ts";
 import { GraphReadService } from "../../packages/application/graph-read.ts";
+import { CandidateReadService } from "../../packages/application/candidate-read.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
 
@@ -55,6 +56,7 @@ import { createProjectRequestSchema } from "../../packages/contracts/resources.t
 import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
 import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
 import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
+import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../packages/contracts/candidate.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
 //
@@ -112,6 +114,10 @@ export const COMMAND_NAMES = [
   // The canvas read (§6 / F04 / issue #18): claims, edges and their stored evidence ids, with no
   // status computed here.
   "graph.read",
+  // The candidate file read (§8 lines 295-296 / F08, issue #19). `:f` resolves a manifest
+  // file id, never a path, so no string a client sends can reach the filesystem.
+  "candidate.get",
+  "candidate.file",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
@@ -409,6 +415,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const builder = new BuilderService({ storage: writer, artifacts: store, limits: LIMITS });
   const verifications = new VerificationService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
   const graph = new GraphReadService({ storage: writer });
+  const candidateRead = new CandidateReadService({ storage: writer, artifacts: store });
   const exports_ = new ExportService({
     storage: writer,
     artifacts: store,
@@ -662,6 +669,16 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
           ? graph.read(projectIdOr(payload), actor)
           : graph.read(projectIdOr(payload), actor, asId(target)),
       );
+    },
+    "candidate.get": (payload, actor) => {
+      const parsed = candidateReadRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "candidate-read", "the candidate read request was rejected");
+      return relay(candidateRead.get(projectIdOr(payload), actor, asId(parsed.data.candidateId)));
+    },
+    "candidate.file": async (payload, actor) => {
+      const parsed = candidateFileRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "candidate-file-read", "the candidate file request was rejected");
+      return relay(await candidateRead.file(projectIdOr(payload), actor, asId(parsed.data.candidateId), asId(parsed.data.fileId)));
     },
     "health.effectiveProfiles": () => relay({ ok: true, value: profiles.healthView() }),
     "doctor.run": async () => relay({ ok: true, value: (await doctorReport()) as unknown as JsonValue }),

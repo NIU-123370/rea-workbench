@@ -11,6 +11,7 @@ import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, expor
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
+import { candidateFileContentSchema, candidateViewSchema } from "../../packages/contracts/candidate.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
@@ -85,6 +86,11 @@ const ROUTES: readonly RouteSpec[] = [
   // for the same view the tested headless renderer gets without inventing a second
   // place where a claim's status is decided.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/graph`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:
+  // the first lists the files a candidate published, the second returns one file's content
+  // selected by manifest file id. Neither takes a path.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId/files/:fileId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // Delivery (§8 lines 299-300 / issue #22). The POST creates a *new* package rather than
   // taking an idempotency key: §5's rule is that an old package is never overwritten, and
   // a retried request therefore has to make a second record, not replay the first.
@@ -376,6 +382,42 @@ async function listExports(ctx: Context, deps: ApiDependencies): Promise<ApiResp
   return jsonSuccess(ctx.requestId, 200, listed.value);
 }
 
+function pathId(ctx: Context, name: string): Id | null {
+  const raw = ctx.params[name] ?? "";
+  return isId(raw) ? asId(raw) : null;
+}
+
+async function readCandidate(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const candidateId = pathId(ctx, "candidateId");
+  if (projectId === null || candidateId === null) return unknownProject(ctx);
+  const outcome = await deps.worker.call("candidate.get", { projectId, request: { candidateId } }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const view = parseStrict(candidateViewSchema, outcome.value);
+  if (!view.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "candidate-view-shape", "the worker did not answer with a candidate file list", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, view.value);
+}
+
+async function readCandidateFile(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const candidateId = pathId(ctx, "candidateId");
+  const fileId = pathId(ctx, "fileId");
+  if (projectId === null || candidateId === null || fileId === null) {
+    // A segment that is not an opaque id is not a resource: §8 authorises a path id by
+    // matching the project, not by believing the caller.
+    return refused(ctx.requestId, "NOT_FOUND", "candidate-file-unknown", "no candidate file is addressed by that identifier", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("candidate.file", { projectId, request: { candidateId, fileId } }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const content = parseStrict(candidateFileContentSchema, outcome.value);
+  if (!content.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "candidate-file-shape", "the worker did not answer with candidate file content", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, content.value);
+}
+
 async function readGraph(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
@@ -633,6 +675,10 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createExport(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/exports")) {
       response = await listExports(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/files/:fileId")) {
+      response = await readCandidateFile(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/candidates/:candidateId")) {
+      response = await readCandidate(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/graph")) {
       response = await readGraph(ctx, deps);
     } else if (route.template.endsWith("/events")) {
