@@ -5,6 +5,20 @@ import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
 import type { RequestSide, ResponseSide, VectorSource } from "../domain/vector.ts";
 import type { CleanupState, JobKind, JobState } from "../contracts/jobs.ts";
+import type {
+  CancelOwnedBrokerRequest,
+  CancelOwnedBrokerResponse,
+  CleanupOwnedBrokerRequest,
+  CleanupOwnedBrokerResponse,
+  EgressAddressClass,
+  EgressDestination,
+  EgressPolicy,
+  InspectOwnedBrokerRequest,
+  InspectOwnedBrokerResponse,
+  SandboxHostFacts,
+  StartProfileBrokerRequest,
+  StartProfileBrokerResponse,
+} from "../contracts/sandbox.ts";
 
 // Ports that `packages/adapters/storage` implements (DESIGN §3). They exist so
 // the application layer can hold a transaction without knowing SQLite exists:
@@ -400,4 +414,91 @@ export type EvidenceFactsPort = {
     evidenceId: string;
     coordinate: VectorSource;
   }): Promise<Result<EvidenceRecordFacts, EvidenceFactsFailure>>;
+};
+
+// ---------------------------------------------------------------------------
+// Sandbox broker seam (DESIGN §3, §11, §12 / D17, D18 — issue #21)
+// ---------------------------------------------------------------------------
+
+// The broker speaks a closed command vocabulary, so the port that reaches it is
+// written as four named methods rather than `invoke(name, args)`. That is not a
+// style choice: a method set with no slot for an argument list is the only shape
+// of this port that cannot be talked into running an image, a shell or a mount
+// the workbench never asked for (D17: 目标和 UI 均不接触 Docker socket).
+//
+// The port is also the answer to "this machine has no Docker": nothing here
+// spawns a process. A real implementation writes one JSON frame per command to
+// the broker's socket, and only `apps/broker` — a separate process — may hold
+// the scheduling privilege.
+export type BrokerTransportErrorCode =
+  | "CAPABILITY_UNAVAILABLE"
+  | "ACCESS_DENIED"
+  | "INVALID_INPUT"
+  | "NOT_FOUND"
+  | "RESOURCE_LIMIT";
+
+export type BrokerTransportFailure = {
+  code: BrokerTransportErrorCode;
+  // Named, stable reason; the caller journalls it verbatim.
+  reason: string;
+  // Untrusted text from the supervisor. The service must pass it through
+  // DiagnosticsSanitizer before it reaches an audit row, an error or a log
+  // (§12.1) — this port comment is the contract that makes that mandatory.
+  message: string;
+  // A transiently unavailable broker keeps the job queued with a visible
+  // retryAt; a permanent capability failure fails it before start (§11).
+  retryable: boolean;
+  retryAt: Instant | null;
+};
+
+export type SandboxBrokerTransportPort = {
+  startProfile(
+    request: StartProfileBrokerRequest,
+  ): Promise<Result<StartProfileBrokerResponse, BrokerTransportFailure>>;
+  inspectOwned(
+    request: InspectOwnedBrokerRequest,
+  ): Promise<Result<InspectOwnedBrokerResponse, BrokerTransportFailure>>;
+  cancelOwned(
+    request: CancelOwnedBrokerRequest,
+  ): Promise<Result<CancelOwnedBrokerResponse, BrokerTransportFailure>>;
+  cleanupOwned(
+    request: CleanupOwnedBrokerRequest,
+  ): Promise<Result<CleanupOwnedBrokerResponse, BrokerTransportFailure>>;
+};
+
+// The host the broker supervises. Reported, never inferred inside a policy: the
+// assembly seam (apps/worker) reads the real platform, and a test injects one,
+// so the unsupported-platform path is exercised on any machine (issue #21
+// checkbox 4) while the production rule still cannot be bypassed.
+export type SandboxHostProbePort = {
+  observeHost(): SandboxHostFacts;
+};
+
+// Egress decisions need byte-level IP and mask arithmetic, which the sandbox
+// adapter owns. The application layer asks two questions and never re-implements
+// either, so "default deny" cannot mean different things in two places.
+export type EgressDecision =
+  // `grantId` is the wire id of the grant that matched; a host may not claim a
+  // grant that the policy never named.
+  | { decision: "allow"; grantId: string; addressClass: EgressAddressClass }
+  | {
+      decision: "deny";
+      addressClass: EgressAddressClass;
+      reasons: string[];
+    };
+
+export type EgressReview = {
+  admissible: boolean;
+  reasons: string[];
+};
+
+export type EgressPolicyPort = {
+  // Whether a policy is internally honest: a grant to a blocked class, a
+  // fixture exception widened to a whole private range, or a wildcard prefix.
+  review(policy: EgressPolicy): EgressReview;
+  evaluate(input: {
+    policy: EgressPolicy;
+    destination: EgressDestination;
+    port: number;
+  }): EgressDecision;
 };
