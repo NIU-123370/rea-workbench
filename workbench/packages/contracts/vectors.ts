@@ -154,6 +154,25 @@ export const vectorReviewRequestSchema = z.strictObject({
   }
 });
 
+// The vector review route's own body and receipt (§8 line 285 / issue #58). Same two rules as
+// the contract and plan review surface: `expectedDigest` is the document's name for what the
+// service calls `digest`, and no caller may name its own reviewer - the session does that.
+export const vectorReviewHttpRequestSchema = z.strictObject({
+  decision: z.enum(["approved", "rejected"]),
+  expectedDigest: digestSchema.nullable(),
+  expectedInventoryRevision: z.int().nonnegative(),
+});
+
+export const vectorReviewReceiptSchema = z.strictObject({
+  vectorId: idSchema,
+  digest: digestSchema,
+  eligibility: z.enum(["usable", "blocked"]),
+  reasons: z.array(nonEmptyString),
+  inventoryRevision: z.int().nonnegative(),
+  auditSeq: z.int().nonnegative(),
+  eventSeq: z.int().nonnegative().nullable(),
+});
+
 // --- The inventory page (§8 line 283 / issue #58) ------------------------------------
 //
 // §8 gives this route three query slots - `targetId`, an optional `cursor` and an optional

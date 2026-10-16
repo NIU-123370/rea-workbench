@@ -268,14 +268,19 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **20 条**，仍缺 **20 条**。
-缺的这 23 条里，`GET /projects/:p`、`GET .../jobs/:j`、`GET .../evidence/:e`、`GET .../vectors/:v`、
-`GET .../verification-plans/:v` 这五条已经补上——它们的命令一直都在，只是没有 HTTP 的门。
-缺的 20 条里只有一条是读（`GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v`
-三条连命令都还没有，其余全是写动作）：`POST /imports`、`POST /vectors*`、`/contracts*`、`/verification-plans*`、
-`/blueprints`、`/jobs/:j/cancel`、`/jobs/:j/cleanup-retry`、`POST /jobs`、`POST /verifications`）：
-命令侧有实现，页面上点不到，所以「审阅样本 → 批契约 → 批计划 → 冻蓝图」这条真正改变项目状态的链
-仍然只能由测试或脚本走完。注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **23 条**，仍缺 **17 条**。
+这 23 条里最近补上的是三个审阅动作（`POST .../vectors/:v/review`、`.../contracts/:c/review`、
+`.../verification-plans/:v/review`，§8 的 285／287／291 行）——它们的命令一直都在，缺的只是门，
+所以「审阅样本 → 批契约 → 批计划」这一段现在可以由一次 HTTP 请求走完；`POST /blueprints`（冻蓝图）
+仍在那缺的 17 条里。审阅门有三处与文档不一致，都是本轮裁决并写进代码的，等 #58 上由你确认：
+①**审阅者是会话，不是请求体**——三个服务都把 reviewerId 存进冻结蓝图要引用的那条持久记录里，
+照 §8 原样把体里的名字转发出去就等于让任一会话替别人签批，所以体的 schema 里没有这个键，
+发它就来 400 并报出键名；②§8 写的 `note:string` 在存储模型与 §12.2 的日志字段表里都没有归属，
+所以门拒绝它而不是收下后丢掉（页面不能以为自己记下了一个没人保存的理由）；③§8 的三条回包写的是
+「200 TestVector／ContractRevision／VerificationPlan」，而封闭命令表里 `contract.*`／`plan.*` 都没有
+读命令，门只能出服务真正回答的那份回执（receipt），它是一份具名契约而不是命令返回值的转储。
+缺的 17 条里 `GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v` 三条连命令都还没有；
+注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
 
 拒绝回包里的数字现在能到操作者（issue #59 已闭合）。做法是一份**具名键白名单**
 （`packages/contracts/errors.ts` 的 `SAFE_DETAIL_KEYS`，21 个键：字节数、上限、代数、修订号两侧、
