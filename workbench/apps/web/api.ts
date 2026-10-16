@@ -8,6 +8,7 @@ import {
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { contractReviewHttpRequestSchema, contractReviewReceiptSchema, planReviewHttpRequestSchema, planReviewReceiptSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorPageSchema, vectorReviewHttpRequestSchema, vectorReviewReceiptSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
@@ -118,6 +119,10 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/contracts/:contractId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  // The freeze (§8 line 292). Unlike the three review doors, this one is a *creation* named in
+  // §8 line 261, so it carries an Idempotency-Key: a retried freeze must replay the blueprint it
+  // already made rather than mint a second one beside it.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/blueprints`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
   // selected by manifest file id. Neither takes a path.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
@@ -667,6 +672,52 @@ function reviewRequest(ctx: Context, request: ReviewInput): JsonObject {
   return stored;
 }
 
+// POST /projects/:p/blueprints (§8 line 292). The journal work mirrors `createProject` exactly:
+// the key is only given back when nothing was produced, so a refusal the caller can correct stays
+// retryable while a committed freeze replays its own 201.
+async function freezeBlueprint(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(blueprintFreezeHttpRequestSchema, body.value);
+  if (!parsed.ok) {
+    return errorResponse(ctx.requestId, {
+      code: "INVALID_INPUT",
+      message: "the freeze request does not match the named schema",
+      // Only the plan is named here; §7.4 derives the rest. Naming the rejected keys tells a
+      // caller exactly which fields to take out (§12.1 publishes names, never values).
+      details: { fields: parsed.error.issues.map((issue) => issue.path), rejectedKeys: parsed.error.issues.flatMap((issue) => issue.keys ?? []) },
+    }, ctx.declaration);
+  }
+  const route = `${API_PREFIX}/projects/${String(projectId)}/blueprints`;
+  const digest = idempotencyDigest({ route: `${API_PREFIX}/projects/:projectId/blueprints`, method: "POST", body: parsed.value }, ctx.declaration, deps.limits);
+  if (!digest.ok) return refused(ctx.requestId, digest.error.code, digest.error.reason, digest.error.message, ctx.declaration);
+  const scope = journalScope(String((ctx.session as CurrentSession).reviewerId), route);
+  const claim = deps.journal.claim(scope, key, digest.value);
+  if (claim.kind === "divergent") {
+    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-reused", "that idempotency key already carries a different request", ctx.declaration);
+  }
+  if (claim.kind === "inFlight") {
+    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-in-flight", "the first request with that key has not produced a result yet", ctx.declaration);
+  }
+  if (claim.kind === "replay") {
+    return jsonSuccess(ctx.requestId, claim.recorded.status, claim.recorded.body);
+  }
+  const outcome = await deps.worker.call("blueprint.freeze", { projectId, request: { planId: parsed.value.verificationPlanId } }, ctx.actor);
+  if (!outcome.ok) {
+    deps.journal.abandon(scope, key);
+    return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  }
+  const receipt = parseStrict(blueprintFreezeReceiptSchema, pickFields(outcome.value, ["blueprintId", "digest", "manifestDigest", "planId", "publicVectorCount", "holdoutVectorCount", "contractCount", "auditSeq"]));
+  if (!receipt.ok) {
+    deps.journal.abandon(scope, key);
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "blueprint-freeze-shape", "the worker did not answer with a frozen blueprint", ctx.declaration);
+  }
+  deps.journal.record(scope, key, digest.value, { status: 201, body: receipt.value });
+  return jsonSuccess(ctx.requestId, 201, receipt.value);
+}
+
 async function reviewVector(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
@@ -979,6 +1030,17 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       return response;
     }
 
+    // 4. The Idempotency-Key, for the routes that declare one. Until now this was a field on the
+    //    route table that nothing read: each creation re-checked the header by hand, so a route
+    //    that forgot to was silently accepting an unkeyed creation - and the two checks that did
+    //    exist were not even the same rule (one validated the key's shape, mine only its
+    //    presence). One owner now, validating the shape §8 line 261 assumes.
+    if (route.requiresIdempotencyKey && !isIdempotencyKey(request.headers["idempotency-key"])) {
+      const response = refused(requestId, "INVALID_INPUT", "idempotency-key-required", "this creation needs an Idempotency-Key header", declaration);
+      record(routeName, response.status, session === null ? "anonymous" : "paired");
+      return response;
+    }
+
     const ctx: Context = {
       request,
       requestId,
@@ -999,15 +1061,13 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     } else if (route.template === `${API_PREFIX}/health`) {
       response = await readHealth(ctx, deps);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects`) {
-      if (!isIdempotencyKey(request.headers["idempotency-key"])) {
-        response = refused(requestId, "INVALID_INPUT", "idempotency-key-required", "this creation needs an Idempotency-Key header", declaration);
-      } else {
-        response = await createProject(ctx, deps, request.headers["idempotency-key"] as string);
-      }
+      response = await createProject(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "GET" && route.template.endsWith("/exports/:exportId/download")) {
       response = await downloadExport(ctx, deps);
     } else if (route.method === "POST" && route.template.endsWith("/exports")) {
       response = await createExport(ctx, deps);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/blueprints`) {
+      response = await freezeBlueprint(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/review")) {
       // One branch for three routes, chosen by the resource the path names: the commands take
       // different ids, and two of the three are inventory-bound while the contract one is not.

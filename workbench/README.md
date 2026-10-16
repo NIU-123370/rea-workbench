@@ -268,18 +268,30 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **23 条**，仍缺 **17 条**。
-这 23 条里最近补上的是三个审阅动作（`POST .../vectors/:v/review`、`.../contracts/:c/review`、
-`.../verification-plans/:v/review`，§8 的 285／287／291 行）——它们的命令一直都在，缺的只是门，
-所以「审阅样本 → 批契约 → 批计划」这一段现在可以由一次 HTTP 请求走完；`POST /blueprints`（冻蓝图）
-仍在那缺的 17 条里。审阅门有三处与文档不一致，都是本轮裁决并写进代码的，等 #58 上由你确认：
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **24 条**，仍缺 **16 条**。
+这 24 条里最近补上的是四个改变状态的动作（`POST .../vectors/:v/review`、`.../contracts/:c/review`、
+`.../verification-plans/:v/review`、`POST .../blueprints`，§8 的 285／287／291／292 行）——它们的命令
+一直都在，缺的只是门，所以「审阅样本 → 批契约 → 批计划 → **冻蓝图**」这条链现在可以由一次 HTTP 请求
+从头走到尾（浏览器实测见下）。冻结是 §8 line 261 点名的创建动作，所以它带 `Idempotency-Key`。
+顺带把一条**没人读的声明**变成了规则：路由表上的 `requiresIdempotencyKey` 此前无任何消费者，
+每个创建自己复述一遍检查（而且两处不一致——一处校验键的形状、一处只看有没有）；现在流水线统一
+按声明校验形状（§8 的 200 字符上限），门不再各写一份。审阅门有三处与文档不一致，都是本轮裁决并写进代码的，等 #58 上由你确认：
 ①**审阅者是会话，不是请求体**——三个服务都把 reviewerId 存进冻结蓝图要引用的那条持久记录里，
 照 §8 原样把体里的名字转发出去就等于让任一会话替别人签批，所以体的 schema 里没有这个键，
 发它就来 400 并报出键名；②§8 写的 `note:string` 在存储模型与 §12.2 的日志字段表里都没有归属，
 所以门拒绝它而不是收下后丢掉（页面不能以为自己记下了一个没人保存的理由）；③§8 的三条回包写的是
 「200 TestVector／ContractRevision／VerificationPlan」，而封闭命令表里 `contract.*`／`plan.*` 都没有
 读命令，门只能出服务真正回答的那份回执（receipt），它是一份具名契约而不是命令返回值的转储。
-缺的 17 条里 `GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v` 三条连命令都还没有；
+缺的 16 条里 `GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v` 三条连命令都还没有；
+冻结的回包同样是一张**具名回执**（blueprintId／两份摘要／planId／三个计数／auditSeq），因为 §8 那一行还
+写了 `planDigest`、`scope`、`limitations`——它们在蓝图 artifact 的正文里，读回来要等 `GET /blueprints/:b`
+那条命令；调用体里 §8 列的 `targetId`、`contractRevisionIds`、`expectedGraphRevision` 一律**拒收**并报出
+键名，因为 §7.4 把这三样定义为「已批准计划的函数」，让调用方重述就等于让它替服务决定（并发令牌也换成
+服务自己存的计划 revision）。真浏览器读数（同一会话）：未批准时冻结 **422 `BLUEPRINT_BLOCKED`**，
+`details = {reason: "plan-not-approved", reasonCount: 1}`（理由列表本身不过界，issue #59）；依次批准
+样本／契约／计划后冻结 **201** `publicVectorCount 1 · holdoutVectorCount 0 · contractCount 1 · auditSeq 7`，
+同键重发得到**逐字段相同**的回执与**新的** `x-request-id`，审计日志里 `blueprint.freeze` 的 allow 只有
+**一条**；200 字符的键正常受理，201 字符 **400 `idempotency-key-required`**。
 注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
 
 拒绝回包里的数字现在能到操作者（issue #59 已闭合）。做法是一份**具名键白名单**

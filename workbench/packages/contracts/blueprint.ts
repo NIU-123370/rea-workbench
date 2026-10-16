@@ -104,6 +104,37 @@ export const blueprintFreezeRequestSchema = z.strictObject({
   planId: idSchema,
 });
 
+// --- The freeze route (§8 line 292 / issue #58) --------------------------------------
+//
+// §8 pictures this body as `{targetId, contractRevisionIds, verificationPlanId,
+// expectedGraphRevision, sensitiveValues?}`. The service takes one field, and §7.4 is why: the
+// target, the contracts and the graph revision are all *functions of the approved plan* - the
+// freeze re-reads them inside its own transaction and refuses when the graph has moved since the
+// plan was cut. A caller that could restate them would be handing the route facts it is not
+// allowed to decide, and `strictObject` is what makes that a named refusal rather than an ignored
+// extra field. §8's `expectedGraphRevision` is therefore subsumed: the plan row's own revision is
+// the concurrency token, and it is server-held.
+export const blueprintFreezeHttpRequestSchema = z.strictObject({
+  verificationPlanId: idSchema,
+});
+
+// The receipt is what the freeze proves at the moment it commits: which plan became a blueprint,
+// the digest the Builder will be handed, the manifest digest, and the three counts the gate
+// verified. §8's third column also names `planDigest`, `scope` and `limitations`; those live in
+// the blueprint artifact's payload rather than in the commit, and reading the artifact back is
+// `GET /blueprints/:b` - which still has no command (issue #58, category 2). Inventing them here
+// would put words in a reply the command did not answer.
+export const blueprintFreezeReceiptSchema = z.strictObject({
+  blueprintId: idSchema,
+  digest: digestSchema,
+  manifestDigest: digestSchema,
+  planId: idSchema,
+  publicVectorCount: z.int().nonnegative(),
+  holdoutVectorCount: z.int().nonnegative(),
+  contractCount: z.int().nonnegative(),
+  auditSeq: z.int().nonnegative(),
+});
+
 export const sourceManifestClaimSchema = z.strictObject({
   contractDigest: digestSchema,
   claimId: idSchema,
