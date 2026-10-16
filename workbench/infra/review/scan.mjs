@@ -30,6 +30,11 @@ function walk(rootDir, relativeDir) {
   if (!statSync(absolute, { throwIfNoEntry: false })?.isDirectory()) return [];
   const found = [];
   for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+    // Tool output is not source. A build directory (`apps/web/.next`, `.turbo`, `.swc`)
+    // is full of generated files that carry suppressions and shapes no rule was written
+    // for, and scanning them turns a green tree red for reasons nobody can fix in a
+    // review. Dot-directories are the convention for exactly that output.
+    if (entry.isDirectory() && entry.name.startsWith(".")) continue;
     const relative = path.posix.join(relativeDir, entry.name);
     if (entry.isDirectory()) found.push(...walk(rootDir, relative));
     else if (EXTENSIONS.some((extension) => entry.name.endsWith(extension))) found.push(relative);
