@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workbench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: workbench/.nvmrc
+          cache: npm
+          cache-dependency-path: workbench/package-lock.json
+      - name: toolchain
+        run: |
+          node -v
+          npm -v
+          test "$(node -v)" = "v24.18.0" || { echo "node must be 24.18.0"; exit 1; }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run test:integration

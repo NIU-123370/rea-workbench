@@ -1,0 +1,25 @@
+{
+  "name": "rea-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local single-user software archaeology workbench on REA 6.4.0",
+  "engines": {
+    "node": "24.18.0",
+    "npm": "11.16.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts --passWithNoTests",
+    "test": "npm run test:unit && npm run test:integration"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}
