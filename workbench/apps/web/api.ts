@@ -7,11 +7,14 @@ import {
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema } from "../../packages/contracts/resources.ts";
+import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
+import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
 import { asId, asInstant, isId, newId } from "../../packages/domain/identity.ts";
+import type { Id } from "../../packages/domain/identity.ts";
 import type { JsonObject, JsonValue } from "../../packages/domain/json-value.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { ListenAddress, LocalSession } from "../../packages/application/session.ts";
@@ -76,6 +79,12 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "GET", template: `${API_PREFIX}/health`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/events`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // Delivery (§8 lines 299-300 / issue #22). The POST creates a *new* package rather than
+  // taking an idempotency key: §5's rule is that an old package is never overwritten, and
+  // a retried request therefore has to make a second record, not replay the first.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/exports`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/exports`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/exports/:exportId/download`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
 ];
 
 export type Matched = { route: RouteSpec; params: Record<string, string> };
@@ -349,6 +358,118 @@ async function createProject(ctx: Context, deps: ApiDependencies, key: string): 
   return jsonSuccess(ctx.requestId, 201, created.value);
 }
 
+async function listExports(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const outcome = await deps.worker.call("export.list", { projectId, limit: 50 }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const listed = parseStrict(exportListSchema, outcome.value);
+  if (!listed.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "export-list-shape", "the worker did not answer with a list of exports", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, listed.value);
+}
+
+async function createExport(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(exportCreateRequestSchema, body.value);
+  if (!parsed.ok) {
+    return errorResponse(
+      ctx.requestId,
+      {
+        code: "INVALID_INPUT",
+        message: "the export request does not match the named schema",
+        details: { fields: parsed.error.issues.map((issue) => issue.path) },
+      },
+      ctx.declaration,
+    );
+  }
+  const outcome = await deps.worker.call(
+    "export.create",
+    { projectId, request: { candidateId: parsed.value.candidateId, verificationId: parsed.value.verificationId ?? null, label: parsed.value.label } },
+    ctx.actor,
+  );
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  // §8's 201 body is five named fields; the command's reply is checked against that
+  // contract rather than forwarded as whatever the worker happened to return.
+  const created = parseStrict(exportRecordSchema, pickFields(outcome.value, ["id", "label", "downloadUrl", "sha256", "manifest"]));
+  if (!created.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "export-shape", "the worker did not answer with a created export", ctx.declaration);
+  }
+  if (!isRelativeDownloadUrl(String(created.value.downloadUrl))) {
+    // A package that names somewhere other than this workbench's own route would be a way
+    // for the worker's reply to point a browser elsewhere.
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "download-url-not-relative", "the download route must be relative to this API", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 201, created.value);
+}
+
+async function downloadExport(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const rawExportId = ctx.params.exportId ?? "";
+  if (!isId(rawExportId)) return unknownExport(ctx);
+  const outcome = await deps.worker.call(
+    "export.download",
+    { projectId, request: { exportId: asId(rawExportId) } },
+    ctx.actor,
+  );
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const archive = parseStrict(exportArchiveSchema, outcome.value);
+  if (!archive.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "archive-shape", "the worker did not answer with a package archive", ctx.declaration);
+  }
+  const decoded = canonicalBase64Bytes(archive.value.bytesBase64);
+  if (decoded === null) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "archive-base64", "the package bytes were not canonical base64", ctx.declaration);
+  }
+  if (decoded.byteLength !== archive.value.byteLength) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "archive-byte-length", "the package length the worker recorded does not match its bytes", ctx.declaration);
+  }
+  return {
+    kind: "response",
+    status: 200,
+    headers: [
+      ["content-type", archive.value.mediaType],
+      ["content-length", String(archive.value.byteLength)],
+      ["x-content-type-options", "nosniff"],
+      ["content-disposition", `attachment; filename="rea-export-${archive.value.exportId}.zip"`],
+      ["x-rea-export-sha256", archive.value.sha256],
+      ["x-request-id", ctx.requestId],
+      ["referrer-policy", "no-referrer"],
+      ["cache-control", "no-store"],
+    ],
+    body: decoded,
+  };
+}
+
+// Base64 that is not canonical in both directions is refused rather than decoded
+// leniently: the same bytes under two spellings would mean a package identity that
+// depends on how the transport happened to encode it (§4).
+function canonicalBase64Bytes(value: string): Uint8Array | null {
+  if (value.length === 0 || value.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null;
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) return null;
+  return new Uint8Array(bytes);
+}
+
+function projectFromPath(ctx: Context): Id | null {
+  const raw = ctx.params.projectId ?? "";
+  return isId(raw) ? asId(raw) : null;
+}
+
+function unknownProject(ctx: Context): ApiResponse {
+  return refused(ctx.requestId, "NOT_FOUND", "project-unknown", "no project is addressed by that identifier", ctx.declaration);
+}
+
+function unknownExport(ctx: Context): ApiResponse {
+  return refused(ctx.requestId, "NOT_FOUND", "export-unknown", "no export is addressed by that identifier", ctx.declaration);
+}
+
 async function streamEvents(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const raw = ctx.params.projectId ?? "";
   if (!isId(raw)) {
@@ -477,6 +598,12 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       } else {
         response = await createProject(ctx, deps, request.headers["idempotency-key"] as string);
       }
+    } else if (route.method === "GET" && route.template.endsWith("/exports/:exportId/download")) {
+      response = await downloadExport(ctx, deps);
+    } else if (route.method === "POST" && route.template.endsWith("/exports")) {
+      response = await createExport(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/exports")) {
+      response = await listExports(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {

@@ -17,6 +17,7 @@ import type {
   CommittedEvent,
   EventDraft,
   EvidenceRow,
+  ExportRow,
   JobIdempotency,
   JobRow,
   LeaseRow,
@@ -68,6 +69,19 @@ function verificationFrom(row: Row): VerificationRow {
     currentness: String(row["currentness"]) as VerificationRow["currentness"],
     summaryJson: parseJson(String(row["summary_json"])),
     reportArtifactId: asId(String(row["report_artifact_id"])),
+  };
+}
+
+function exportFrom(row: Row): ExportRow {
+  return {
+    id: asId(String(row["id"])),
+    projectId: asId(String(row["project_id"])),
+    candidateId: asId(String(row["candidate_id"])),
+    verificationId: row["verification_id"] === null ? null : asId(String(row["verification_id"])),
+    label: String(row["label"]) as ExportRow["label"],
+    artifactId: asId(String(row["artifact_id"])),
+    manifestJson: parseJson(String(row["manifest_json"])),
+    createdAt: asInstant(String(row["created_at"])),
   };
 }
 
@@ -748,6 +762,40 @@ class SqliteTransaction implements StorageTransaction {
       )
       .all(projectId, candidateId) as Row[];
     return rows.map(verificationFrom);
+  }
+
+  insertExport(row: ExportRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO exports (id, project_id, candidate_id, verification_id, label, artifact_id, manifest_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.candidateId,
+        row.verificationId,
+        row.label,
+        row.artifactId,
+        JSON.stringify(row.manifestJson),
+        row.createdAt,
+      );
+  }
+
+  getExport(projectId: Id, exportId: Id): ExportRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM exports WHERE project_id = ? AND id = ?")
+      .get(projectId, exportId) as Row | undefined;
+    return row === undefined ? null : exportFrom(row);
+  }
+
+  // Ordered by creation so a caller can see the sequence of packages, and bounded
+  // because a project's export list is not a place to stream unbounded rows (§8).
+  listExportsForProject(projectId: Id, limit: number): ExportRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM exports WHERE project_id = ? ORDER BY created_at ASC, id ASC LIMIT ?")
+      .all(projectId, limit) as Row[];
+    return rows.map(exportFrom);
   }
 
   insertGraphEdge(row: GraphEdgeRow): void {

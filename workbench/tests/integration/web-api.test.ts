@@ -441,6 +441,111 @@ describe("the SSE read side (§8)", () => {
   });
 });
 
+describe("the export routes (§8 lines 299-300 / issue #22)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const setCookie = paired.headers.getSetCookie()[0] ?? "";
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return { cookie: setCookie.split(";")[0] ?? "", csrf: body.data?.csrfToken ?? body.csrfToken ?? "" };
+  }
+
+  function headersFor(session: { cookie: string; csrf: string }, extra: Record<string, string> = {}): Record<string, string> {
+    return {
+      host: `127.0.0.1:${String(address.port)}`,
+      origin: `http://127.0.0.1:${String(address.port)}`,
+      cookie: session.cookie,
+      "x-csrf-token": session.csrf,
+      "content-type": "application/json",
+      ...extra,
+    };
+  }
+
+  it("mounts exactly three export routes and holds every one behind a session", async () => {
+    const project = newId();
+    // A caller with neither cookie nor CSRF token is stopped at the CSRF check, which runs
+    // first for a mutating route (§14 order); with a token and no session it is the session
+    // check that answers. Both refusals come before the worker is asked anything.
+    const anonymous = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, "content-type": "application/json" },
+      body: JSON.stringify({ candidateId: newId(), label: "draft" }),
+    });
+    expect(anonymous.status).toBe(403);
+    const noSession = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: {
+        host: `127.0.0.1:${String(address.port)}`,
+        origin: `http://127.0.0.1:${String(address.port)}`,
+        "x-csrf-token": "not-a-session-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ candidateId: newId(), label: "draft" }),
+    });
+    expect(noSession.status).toBe(401);
+    const list = await call("GET", `${API_PREFIX}/projects/${project}/exports`);
+    expect(list.status).toBe(401);
+    const download = await call("GET", `${API_PREFIX}/projects/${project}/exports/${newId()}/download`);
+    expect(download.status).toBe(401);
+  });
+
+  it("keeps the mutating create behind the CSRF header and a strict body", async () => {
+    const session = await pairSession();
+    const project = newId();
+    const body = JSON.stringify({ candidateId: newId(), label: "draft" });
+    const noCsrf = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: { ...headersFor(session), "x-csrf-token": "" },
+      body,
+    });
+    expect(noCsrf.status).toBe(403);
+    expect(noCsrf.text).toContain("csrf-token-missing");
+
+    // A body that names a field the contract does not have is refused before the worker
+    // is asked — including the field that would point a package at a path.
+    const extraField = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: headersFor(session),
+      body: JSON.stringify({ candidateId: newId(), label: "draft", output: `${dataDir}/evil.zip` }),
+    });
+    expect(extraField.status).toBe(400);
+    // The refusal names the shape problem without echoing the value it rejected.
+    expect(extraField.text).not.toContain("evil.zip");
+    expect(extraField.text).not.toContain(dataDir);
+  });
+
+  it("relays the worker's refusals onto named codes and answers the list with a contract", async () => {
+    const session = await pairSession();
+    const project = newId();
+    const unknown = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: headersFor(session),
+      body: JSON.stringify({ candidateId: newId(), label: "draft" }),
+    });
+    expect(unknown.status).toBe(404);
+    expect(unknown.text).toContain("candidate-unknown");
+    expect(unknown.text).not.toContain(dataDir);
+
+    const listed = await call("GET", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(listed.status, listed.text).toBe(200);
+    expect(JSON.parse(listed.text) as unknown[]).toEqual([]);
+
+    const download = await call("GET", `${API_PREFIX}/projects/${project}/exports/${newId()}/download`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(download.status).toBe(404);
+    expect(download.text).toContain("export-unknown");
+
+    // A path id that is not an opaque id never reaches a command at all.
+    const badId = await call("GET", `${API_PREFIX}/projects/${project}/exports/not-a-uuid/download`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(badId.status).toBe(404);
+    expect(badId.text).toContain("export-unknown");
+  });
+});
+
 describe("degraded behaviour (§14)", () => {
   it("answers health through the worker and refuses an unpaired caller", async () => {
     const refused = await call("GET", `${API_PREFIX}/health`, {

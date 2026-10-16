@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -353,6 +354,24 @@ describe("artifact store (DESIGN §5 line 126, §12)", () => {
     expect(read.ok).toBe(false);
     if (read.ok) return;
     expect(read.error.code).toBe("ARTIFACT_MISMATCH");
+  });
+
+  it("resolves an absolute path that points at the bytes read returns", async () => {
+    // The store's own key is the only thing a caller may hand to a producer process. A
+    // slice that is off by one character resolves `artifacts/...` as `rtifacts/...`, so the
+    // path it returns names a file that does not exist while `read` still works — the two
+    // views have to agree on the same bytes.
+    const projectId = newId();
+    const published = await store.publish(projectId, "export", bytes);
+    expect(published.ok).toBe(true);
+    if (!published.ok) return;
+    const target = store.absolutePathFor(projectId, published.value.storageKey);
+    expect(target).not.toBeNull();
+    expect(target).toContain("/artifacts/export/");
+    expect(readFileSync(target as string)).toEqual(Buffer.from(bytes));
+    const read = await store.read(projectId, published.value.storageKey);
+    expect(read.ok && Buffer.from(read.value).equals(readFileSync(target as string))).toBe(true);
+    expect(store.absolutePathFor(newId(), published.value.storageKey)).toBeNull();
   });
 
   it("rejects a traversal id instead of touching the host filesystem", async () => {

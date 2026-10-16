@@ -15,6 +15,10 @@ import type { ArtifactClass } from "../../application/ports.ts";
 
 export const OWNERSHIP_MARKER = ".rea-workbench-owned";
 
+// The classes the store will write for, kept next to the port that names them so a new
+// class is a deliberate change in one place (§5).
+const ARTIFACT_CLASSES: readonly ArtifactClass[] = ["inspector", "blueprint", "candidate", "report", "export"];
+
 export type ArtifactError = {
   code: "STAGING_UNVERIFIED" | "ARTIFACT_MISMATCH" | "ARTIFACT_WRITE_FAILED";
   message: string;
@@ -108,14 +112,23 @@ export class ArtifactStore {
     bytes: Uint8Array,
     declaredSha256?: Digest,
   ): Promise<Result<PublishedArtifact, ArtifactError>> {
-    if (!["inspector", "blueprint", "candidate", "report"].includes(class_)) {
+    if (!ARTIFACT_CLASSES.includes(class_)) {
       return fail("ARTIFACT_MISMATCH", `unknown artifact class ${class_}`);
     }
+    return this.publishInPartition(projectId, path.join("artifacts", class_), bytes, declaredSha256);
+  }
+
+  private async publishInPartition(
+    projectId: Id,
+    directory: string,
+    bytes: Uint8Array,
+    declaredSha256?: Digest,
+  ): Promise<Result<PublishedArtifact, ArtifactError>> {
     const sha256 = digestOf(bytes);
     if (declaredSha256 !== undefined && declaredSha256 !== sha256) {
       return fail("ARTIFACT_MISMATCH", "declared digest does not match the bytes");
     }
-    const relative = path.join("artifacts", class_, `${sha256}.bin`);
+    const relative = path.join(directory, `${sha256}.bin`);
     const target = this.resolveInside(projectId, relative);
     if (target === null) return fail("ARTIFACT_MISMATCH", "artifact path escaped the store");
     try {
@@ -151,8 +164,11 @@ export class ArtifactStore {
   // needs an absolute capture path, and handing it a caller-supplied one would
   // turn the analysis request into a path traversal.
   absolutePathFor(projectId: Id, storageKey: string): string | null {
+    // The same slice `read` applies: the prefix already ends in its separator, so skipping
+    // one more character resolves `artifacts/...` as `rtifacts/...` and hands the caller a
+    // path to a file that does not exist.
     const relative = storageKey.startsWith(`projects/${projectId}/`)
-      ? storageKey.slice(`projects/${projectId}/`.length + 1)
+      ? storageKey.slice(`projects/${projectId}/`.length)
       : null;
     if (relative === null) return null;
     return this.resolveInside(projectId, relative);

@@ -7,6 +7,7 @@ import * as canonicalJson from "../../packages/domain/canonical-json.ts";
 import * as blueprint from "../../packages/domain/blueprint.ts";
 import * as contract from "../../packages/domain/contract.ts";
 import * as evidence from "../../packages/domain/evidence.ts";
+import * as exportDomain from "../../packages/domain/export.ts";
 import * as identity from "../../packages/domain/identity.ts";
 import * as openApi from "../../packages/domain/openapi.ts";
 import * as plan from "../../packages/domain/plan.ts";
@@ -15,6 +16,7 @@ import * as jsonValue from "../../packages/domain/json-value.ts";
 import * as report from "../../packages/domain/report.ts";
 import * as result from "../../packages/domain/result.ts";
 import * as vector from "../../packages/domain/vector.ts";
+import * as zip from "../../packages/domain/zip.ts";
 
 // DESIGN §3 keeps `packages/domain` free of UI, database, REA SDK and container
 // dependencies; §6, §7.4 and §10 name the rules that must exist there. This
@@ -29,6 +31,7 @@ const MODULES: Record<string, unknown> = {
   "blueprint.ts": blueprint,
   "contract.ts": contract,
   "evidence.ts": evidence,
+  "export.ts": exportDomain,
   "identity.ts": identity,
   "openapi.ts": openApi,
   "plan.ts": plan,
@@ -37,6 +40,7 @@ const MODULES: Record<string, unknown> = {
   "report.ts": report,
   "result.ts": result,
   "vector.ts": vector,
+  "zip.ts": zip,
 };
 
 const SPEC_NAMED_EXPORTS: [string, string][] = [
@@ -96,6 +100,17 @@ const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["openapi.ts", "openApiDigest"],
   ["openapi.ts", "candidateManifest"],
   ["openapi.ts", "adapterSource"],
+  ["zip.ts", "buildZipArchive"],
+  ["zip.ts", "readZipArchive"],
+  ["zip.ts", "crc32"],
+  ["zip.ts", "entryNameDefects"],
+  ["export.ts", "statusNoteFor"],
+  ["export.ts", "exportStatusDefects"],
+  ["export.ts", "downloadUrlFor"],
+  ["export.ts", "isRelativeDownloadUrl"],
+  ["export.ts", "declaredPackageEntries"],
+  ["export.ts", "packageEntryDefects"],
+  ["export.ts", "coverageOf"],
 ];
 
 function domainFiles(): string[] {
