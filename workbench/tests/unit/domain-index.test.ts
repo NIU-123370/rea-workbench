@@ -4,8 +4,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import * as canonicalJson from "../../packages/domain/canonical-json.ts";
+import * as contract from "../../packages/domain/contract.ts";
 import * as evidence from "../../packages/domain/evidence.ts";
 import * as identity from "../../packages/domain/identity.ts";
+import * as plan from "../../packages/domain/plan.ts";
 import * as inventory from "../../packages/domain/inventory.ts";
 import * as jsonValue from "../../packages/domain/json-value.ts";
 import * as report from "../../packages/domain/report.ts";
@@ -22,8 +24,10 @@ const DOMAIN_DIR = path.join(ROOT, "packages/domain");
 
 const MODULES: Record<string, unknown> = {
   "canonical-json.ts": canonicalJson,
+  "contract.ts": contract,
   "evidence.ts": evidence,
   "identity.ts": identity,
+  "plan.ts": plan,
   "inventory.ts": inventory,
   "json-value.ts": jsonValue,
   "report.ts": report,
@@ -60,6 +64,13 @@ const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["report.ts", "staleReasons"],
   ["report.ts", "deliverability"],
   ["vector.ts", "deriveEligibility"],
+  ["contract.ts", "contractDigest"],
+  ["contract.ts", "contractDigestInput"],
+  ["contract.ts", "contractGateReasons"],
+  ["plan.ts", "deriveSelectedVectorIds"],
+  ["plan.ts", "inventorySnapshotDigest"],
+  ["plan.ts", "planDigest"],
+  ["plan.ts", "planGateReasons"],
   ["vector.ts", "vectorDigest"],
   ["vector.ts", "vectorDigestInput"],
   ["vector.ts", "vectorIntegrityDefects"],

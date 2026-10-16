@@ -20,6 +20,10 @@ import type {
   StoragePortError,
   StorageTransaction,
   StorageWriterPort,
+  ClaimEvidenceRow,
+  ClaimRow,
+  ContractRow,
+  PlanRow,
   TargetRow,
   VectorRow,
 } from "../../application/ports.ts";
@@ -394,6 +398,206 @@ class SqliteTransaction implements StorageTransaction {
       reviewStatus: String(row["review_status"]) as VectorRow["reviewStatus"],
       reviewRecordJson: parseJson(row["review_record_json"] === null ? null : String(row["review_record_json"])),
     };
+  }
+
+  listVectorsForSnapshot(projectId: Id, targetId: Id, snapshotDigest: Digest, limit: number): VectorRow[] {
+    // The frozen inventory of one plan is exactly its target plus its capture
+    // snapshot (§7.4); vectors of another snapshot never enter the denominator.
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM test_vectors WHERE project_id = ? AND target_id = ? AND snapshot_digest = ? ORDER BY id ASC LIMIT ?",
+      )
+      .all(projectId, targetId, snapshotDigest, limit) as Row[];
+    return rows.map((row) => this.rowToVector(row));
+  }
+
+  insertContract(row: ContractRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO contract_revisions (id, project_id, target_id, contract_key, revision, payload_json, digest, review_status, review_record_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.targetId,
+        row.contractKey,
+        row.revision,
+        jsonOf(row.payloadJson),
+        row.digest,
+        row.reviewStatus,
+        row.reviewRecordJson === null ? null : jsonOf(row.reviewRecordJson),
+      );
+  }
+
+  updateContractReview(row: ContractRow): void {
+    this.db
+      .prepare("UPDATE contract_revisions SET review_status = ?, review_record_json = ? WHERE project_id = ? AND id = ?")
+      .run(row.reviewStatus, row.reviewRecordJson === null ? null : jsonOf(row.reviewRecordJson), row.projectId, row.id);
+  }
+
+  getContract(projectId: Id, contractId: Id): ContractRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM contract_revisions WHERE project_id = ? AND id = ?")
+      .get(projectId, contractId) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      targetId: asId(String(row["target_id"])),
+      contractKey: String(row["contract_key"]),
+      revision: Number(row["revision"]),
+      payloadJson: parseJson(String(row["payload_json"])),
+      digest: asDigest(String(row["digest"])),
+      reviewStatus: String(row["review_status"]) as ContractRow["reviewStatus"],
+      reviewRecordJson: parseJson(row["review_record_json"] === null ? null : String(row["review_record_json"])),
+    };
+  }
+
+  // A revision number is assigned here, not by the caller, so two concurrent
+  // drafts of the same contract key cannot both claim revision N.
+  latestContractRevision(projectId: Id, contractKey: string): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(revision), 0) AS revision FROM contract_revisions WHERE project_id = ? AND contract_key = ?")
+      .get(projectId, contractKey) as Row;
+    return Number(row["revision"]);
+  }
+
+  insertPlan(row: PlanRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO verification_plans (id, project_id, target_id, snapshot_digest, graph_revision, inventory_revision, inventory_digest, payload_json, digest, review_status, review_record_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.targetId,
+        row.snapshotDigest,
+        row.graphRevision,
+        row.inventoryRevision,
+        row.inventoryDigest,
+        jsonOf(row.payloadJson),
+        row.digest,
+        row.reviewStatus,
+        row.reviewRecordJson === null ? null : jsonOf(row.reviewRecordJson),
+        row.createdAt,
+      );
+  }
+
+  updatePlanReview(row: PlanRow): void {
+    this.db
+      .prepare("UPDATE verification_plans SET review_status = ?, review_record_json = ? WHERE project_id = ? AND id = ?")
+      .run(row.reviewStatus, row.reviewRecordJson === null ? null : jsonOf(row.reviewRecordJson), row.projectId, row.id);
+  }
+
+  getPlan(projectId: Id, planId: Id): PlanRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM verification_plans WHERE project_id = ? AND id = ?")
+      .get(projectId, planId) as Row | undefined;
+    if (!row) return null;
+    return this.rowToPlan(row);
+  }
+
+  listPlans(projectId: Id, filter: { targetId: Id | null; limit: number }): PlanRow[] {
+    const rows = (
+      filter.targetId === null
+        ? this.db
+            .prepare("SELECT * FROM verification_plans WHERE project_id = ? ORDER BY created_at ASC LIMIT ?")
+            .all(projectId, filter.limit)
+        : this.db
+            .prepare(
+              "SELECT * FROM verification_plans WHERE project_id = ? AND target_id = ? ORDER BY created_at ASC LIMIT ?",
+            )
+            .all(projectId, filter.targetId, filter.limit)
+    ) as Row[];
+    return rows.map((row) => this.rowToPlan(row));
+  }
+
+  private rowToPlan(row: Row): PlanRow {
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      targetId: asId(String(row["target_id"])),
+      snapshotDigest: asDigest(String(row["snapshot_digest"])),
+      graphRevision: Number(row["graph_revision"]),
+      inventoryRevision: Number(row["inventory_revision"]),
+      inventoryDigest: asDigest(String(row["inventory_digest"])),
+      payloadJson: parseJson(String(row["payload_json"])),
+      digest: asDigest(String(row["digest"])),
+      reviewStatus: String(row["review_status"]) as PlanRow["reviewStatus"],
+      reviewRecordJson: parseJson(row["review_record_json"] === null ? null : String(row["review_record_json"])),
+      createdAt: asInstant(String(row["created_at"])),
+    };
+  }
+
+  insertClaim(row: ClaimRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO claims (id, project_id, target_id, entity_key, claim_key, assertion, scope_json, basis, source_state, coverage_json, validity, revision, unknown_reasons_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.targetId,
+        row.entityKey,
+        row.claimKey,
+        row.assertion,
+        jsonOf(row.scopeJson),
+        row.basis,
+        row.sourceState,
+        jsonOf(row.coverageJson),
+        row.validity,
+        row.revision,
+        jsonOf(row.unknownReasonsJson),
+      );
+  }
+
+  getClaim(projectId: Id, claimId: Id): ClaimRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM claims WHERE project_id = ? AND id = ?")
+      .get(projectId, claimId) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      targetId: asId(String(row["target_id"])),
+      entityKey: String(row["entity_key"]),
+      claimKey: String(row["claim_key"]),
+      assertion: String(row["assertion"]),
+      scopeJson: parseJson(String(row["scope_json"])),
+      basis: String(row["basis"]) as ClaimRow["basis"],
+      sourceState: row["source_state"] === null ? null : String(row["source_state"]),
+      coverageJson: parseJson(String(row["coverage_json"])),
+      validity: String(row["validity"]) as ClaimRow["validity"],
+      revision: Number(row["revision"]),
+      unknownReasonsJson: parseJson(String(row["unknown_reasons_json"])),
+    };
+  }
+
+  insertClaimEvidence(row: ClaimEvidenceRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO claim_evidence (project_id, claim_id, evidence_id, location_json, role)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(row.projectId, row.claimId, row.evidenceId, jsonOf(row.locationJson), row.role);
+  }
+
+  // A counter-evidence link can never be dropped by excluding the vector that
+  // cites it (§7.4), so the ids are read straight from the link table.
+  contradictingEvidenceIds(projectId: Id, claimIds: readonly Id[]): string[] {
+    if (claimIds.length === 0) return [];
+    const placeholders = claimIds.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT evidence_id FROM claim_evidence
+         WHERE project_id = ? AND role = 'contradict' AND claim_id IN (${placeholders})
+         ORDER BY evidence_id ASC`,
+      )
+      .all(projectId, ...claimIds) as Row[];
+    return rows.map((row) => String(row["evidence_id"]));
   }
 
   appendEvent(draft: EventDraft): number {

@@ -119,6 +119,59 @@ export type VectorRow = {
   reviewRecordJson: JsonValue | null;
 };
 
+export type ContractRow = {
+  id: Id;
+  projectId: Id;
+  targetId: Id;
+  contractKey: string;
+  revision: number;
+  payloadJson: JsonValue;
+  digest: Digest;
+  reviewStatus: "draft" | "approved" | "rejected";
+  reviewRecordJson: JsonValue | null;
+};
+
+export type PlanRow = {
+  id: Id;
+  projectId: Id;
+  targetId: Id;
+  snapshotDigest: Digest;
+  graphRevision: number;
+  inventoryRevision: number;
+  inventoryDigest: Digest;
+  payloadJson: JsonValue;
+  digest: Digest;
+  reviewStatus: "draft" | "approved" | "rejected";
+  reviewRecordJson: JsonValue | null;
+  createdAt: Instant;
+};
+
+// Claims are read by the contract and plan gates (DESIGN §7.2 recomputes every
+// required claim's provenance) and written by the graph projection.
+export type ClaimRow = {
+  id: Id;
+  projectId: Id;
+  targetId: Id;
+  entityKey: string;
+  claimKey: string;
+  assertion: string;
+  scopeJson: JsonValue;
+  basis: "observed" | "derived" | "inferred" | "unknown";
+  sourceState: string | null;
+  coverageJson: JsonValue;
+  validity: "current" | "stale" | "contradicted";
+  revision: number;
+  unknownReasonsJson: JsonValue;
+};
+
+export type ClaimEvidenceRow = {
+  projectId: Id;
+  claimId: Id;
+  evidenceId: string;
+  locationJson: JsonValue;
+  role: "support" | "contradict";
+};
+
 export type StoragePortError = {
   code:
     | "SQLITE_FAILURE"
@@ -160,6 +213,24 @@ export type StorageTransaction = {
     projectId: Id,
     filter: { targetId: Id | null; evidenceId: string | null; limit: number },
   ): VectorRow[];
+  listVectorsForSnapshot(
+    projectId: Id,
+    targetId: Id,
+    snapshotDigest: Digest,
+    limit: number,
+  ): VectorRow[];
+  insertContract(row: ContractRow): void;
+  updateContractReview(row: ContractRow): void;
+  getContract(projectId: Id, contractId: Id): ContractRow | null;
+  latestContractRevision(projectId: Id, contractKey: string): number;
+  insertPlan(row: PlanRow): void;
+  updatePlanReview(row: PlanRow): void;
+  getPlan(projectId: Id, planId: Id): PlanRow | null;
+  listPlans(projectId: Id, filter: { targetId: Id | null; limit: number }): PlanRow[];
+  insertClaim(row: ClaimRow): void;
+  getClaim(projectId: Id, claimId: Id): ClaimRow | null;
+  insertClaimEvidence(row: ClaimEvidenceRow): void;
+  contradictingEvidenceIds(projectId: Id, claimIds: readonly Id[]): string[];
   appendEvent(draft: EventDraft): number;
   eventsAfter(projectId: Id, afterSeq: number, limit: number): CommittedEvent[];
   insertLease(row: LeaseRow): void;
