@@ -77,6 +77,11 @@ const RULES: Record<string, Rule> = {
     allowedPackages: [],
     allowedBuiltins: [
       "node:crypto",
+      // The entrypoint owns its own lifecycle: it reads the declared WB_* names
+      // out of `process.env`, installs SIGTERM handlers, and reports exit codes.
+      // That needs the `process` global as an explicit import rather than an
+      // ambient one, which is also what keeps the no-`console` rule checkable.
+      "node:process",
       "node:fs",
       "node:path",
       "node:net",
