@@ -72,6 +72,13 @@ import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../pa
 
 const LIMITS = { maxDepth: 24, maxCodeUnits: 2_000_000 };
 const RECOVERY_SCAN_LIMIT = 500;
+// §8 line 271's two id lists are "the recent ones", not the whole project: a bounded newest
+// first page is what keeps a screen input from becoming a table dump.
+const PROJECT_VIEW_LIST_BOUND = 20;
+// §8 line 281 caps the evidence body the same way and names the alternative (a download
+// reference). That alternative does not exist yet, so over the cap this refuses by name
+// rather than truncating a provider envelope or inventing a route outside §14.
+export const EVIDENCE_INLINE_LIMIT_BYTES = 1024 * 1024;
 
 export type CompositionRequest = {
   env: Readonly<Record<string, string | undefined>>;
@@ -506,10 +513,35 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const projectId = pickId(payload, "projectId");
       const refused = missing(projectId);
       if (refused !== null) return refused;
-      const read = writer.transact((tx) => tx.getProject(projectId as Id));
+      // §8 line 271 names six fields, and `projectViewSchema` has carried that shape since
+      // the contracts were written while no command served it: `project.get` answered three.
+      // The two id lists are what makes the view a way *into* the project rather than a
+      // receipt, so they come from the project's own newest rows under a bound (§8's reads are
+      // screen inputs, not table dumps).
+      const read = writer.transact((tx) => {
+        const project = tx.getProject(projectId as Id);
+        if (project === null) return null;
+        return {
+          project,
+          targetIds: tx.listTargetsForProject(projectId as Id, PROJECT_VIEW_LIST_BOUND).map((row) => row.id),
+          recentJobIds: tx
+            .listJobsAfter(projectId as Id, { cursor: null, limit: PROJECT_VIEW_LIST_BOUND })
+            .map((row) => row.id),
+        };
+      });
       if (!read.ok) return relayPort(read);
       if (read.value === null) return gateFail("NOT_FOUND", "project-unknown", "project not found");
-      return relay({ ok: true, value: { id: read.value.id, name: read.value.name, inventoryRevision: read.value.inventoryRevision } });
+      return relay({
+        ok: true,
+        value: {
+          id: read.value.project.id,
+          name: read.value.project.name,
+          graphRevision: read.value.project.graphRevision,
+          inventoryRevision: read.value.project.inventoryRevision,
+          targetIds: read.value.targetIds,
+          recentJobIds: read.value.recentJobIds,
+        },
+      });
     },
     "capture.importHar": async (payload, actor) => {
       const projectId = pickId(payload, "projectId");
@@ -553,10 +585,22 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       });
       if (!read.ok) return relayPort(read);
       if (read.value === null) return gateFail("NOT_FOUND", "evidence-unknown", "evidence not found");
-      const bytes = await store.read(projectId, read.value.storageKey);
+      const artifact = read.value;
+      if (artifact.byteLength > EVIDENCE_INLINE_LIMIT_BYTES) {
+        return gateFail(
+          "RESOURCE_LIMIT",
+          "evidence-over-inline-limit",
+          `this envelope is ${String(artifact.byteLength)} bytes and the inline body caps at ${String(EVIDENCE_INLINE_LIMIT_BYTES)}`,
+          { byteLength: artifact.byteLength, limit: EVIDENCE_INLINE_LIMIT_BYTES },
+        );
+      }
+      const bytes = await store.read(projectId, artifact.storageKey);
       if (!bytes.ok) return relayPort(bytes);
+      // The stored bytes are the provider envelope; §8 line 281 puts it under `evidence`
+      // rather than loose at the top level, so the reply says which of its own fields it is.
       try {
-        return relay({ ok: true, value: JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(bytes.value)) as JsonValue });
+        const envelope = JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(bytes.value)) as JsonValue;
+        return relay({ ok: true, value: { evidence: envelope, mediaType: artifact.mediaType, byteLength: artifact.byteLength, sha256: artifact.sha256 } });
       } catch {
         return gateFail("REA_CONTRACT_MISMATCH", "evidence-unreadable", "the stored envelope is not JSON");
       }

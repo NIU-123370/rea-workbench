@@ -22,6 +22,8 @@ import { VectorService } from "../../packages/application/vector-service.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
 import { readAudit } from "../../packages/application/audit.ts";
+import { verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { ClaimRow, EvidenceRow, JobRow, TargetRow, VectorRow } from "../../packages/application/ports.ts";
 import type { Result } from "../../packages/domain/result.ts";
 
@@ -851,6 +853,7 @@ describe("PlanService frozen denominator (DESIGN §7.4)", () => {
     expect(built.inventoryRevision).toBe(inventoryRevision());
 
     const plan = unwrap(plans.read(projectId, reviewer, built.planId));
+    expect(parseStrict(verificationPlanSchema, plan).ok).toBe(true);
     expect(plan.selectedVectorIds).toEqual([requiredVector.id]);
     expect(plan.excludedVectors[0]?.vectorId).toBe(legacyVector.id);
     expect(plan.review.status).toBe("draft");

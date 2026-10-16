@@ -250,6 +250,20 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 - 左栏的"任务/清理"现在来自作业页的第一行（§8：GET job、GET jobs 与 job.updated 用同一组
   具名时间字段，**左栏不从日志推断重试时间**）；在此之前它写死 `job: null`，所以那一格永远空着。
 
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **17 条**，仍缺 **23 条**。
+缺的这 23 条里，`GET /projects/:p`、`GET .../jobs/:j`、`GET .../evidence/:e`、`GET .../vectors/:v`、
+`GET .../verification-plans/:v` 这五条已经补上——它们的命令一直都在，只是没有 HTTP 的门。
+其余多数是**写动作**（`POST /imports`、`POST /vectors*`、`/contracts*`、`/verification-plans*`、
+`/blueprints`、`/jobs/:j/cancel`、`/jobs/:j/cleanup-retry`、`POST /jobs`、`POST /verifications`）：
+命令侧有实现，页面上点不到，所以「审阅样本 → 批契约 → 批计划 → 冻蓝图」这条真正改变项目状态的链
+仍然只能由测试或脚本走完。注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
+
+还有一条同一轮里钉住的现状（issue #59）：`fromWorker()` 把 worker 的拒绝转成 HTTP 回包时，
+`details` 里**只出 `reason` 一个键**。所以「带 `{byteLength, limit}` 的 RESOURCE_LIMIT」这类说法只在
+服务层为真，过 HTTP 这一跳操作者看到的是 code＋message＋reason。本轮没有改它（放行 `details` 需要
+一个具名键白名单，不能默认全透传），但用一条用例把「只出 reason」钉成被审视过的事实，
+而不是没人看过的偶然。
+
 浏览器实测（2026-10-16，真 Chrome 1440×832；worker、`npm run web`、`next dev` 三个真进程）：
 
 - 终端签出的配对码在页面里换到会话（`会话：paired`），图读出 3 节点 / 2 边；
@@ -260,6 +274,22 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   代码给具名空态；三栏几何为 left 280@x=16、middle 821@x=312、right 260@x=1149，画布在 middle 内；
 - **仍未测**：鼠标拖拽平移（只按了控件）、键盘焦点顺序与读屏朗读、`next build` 产物路径
   （本次走的是 `next dev`），以及真 REA provider 导入之后的图。
+
+浏览器实测·第三轮（2026-10-17 04:46–04:52，真 Chrome 1600×1200，三个真进程；这一轮补的是
+「来源」跳转与 §8 的读路由）：
+
+- 中栏「来源 1」现在**读的是正文**：`GET .../evidence/ev_111…` 回 200，页面渲染
+  `application/json · 229 字节 · sha256 1d3195ba…e44`，正文是那 229 字节的 envelope。
+  同一份文件在磁盘上 `shasum -a 256` = `1d3195ba…e44`、229 字节——两个读数各自独立取到。
+- 点击「来源」不再往队列里塞草稿（队列计数 0），而带缺口的格子点「创建定向调查」仍然入队一条
+  `capture-new`（`unmappedReasons: []`）——「读得到」与「还缺证据」在页面上是两件事。
+- 三条新读路由在同一轮里由页面直接取过：`GET /projects/:p` 回 6 个键
+  （`recentJobIds` 有 2 条）、`GET /projects/:p/jobs/:j` 回 9 个键（含 `cleanupRetryAt`、`error`），
+  不存在的 evidence id 回 `evidence-unknown`。
+- 变异 16 支全杀、0 存活；其中一条曾存活（evidence 段的形状检查删掉后行为与 worker 自己的拒绝
+  分不开），把四条读路的畸形段从 `404 *-unknown` 改成 `400 *-id-malformed` 之后才可区分——
+  「你打错了」和「没有这个东西」本来就不该是同一个读数。
+- 这一轮**没测**的：翻页在真实数据上的表现（作业页仍只有 2 行）、拖拽与读屏、`next build` 产物。
 
 浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
 把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：

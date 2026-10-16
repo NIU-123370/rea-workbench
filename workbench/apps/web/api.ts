@@ -6,9 +6,11 @@ import {
   sessionViewSchema,
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
-import { createProjectRequestSchema, createdProjectSchema } from "../../packages/contracts/resources.ts";
+import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
+import { verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { testVectorSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
-import { jobPageSchema } from "../../packages/contracts/jobs.ts";
+import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
@@ -16,7 +18,7 @@ import { candidateFileContentSchema, candidateViewSchema } from "../../packages/
 import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
-import { asId, asInstant, isId, newId } from "../../packages/domain/identity.ts";
+import { asId, asInstant, isId, isReaEvidenceId, newId } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import type { JsonObject, JsonValue } from "../../packages/domain/json-value.ts";
 import type { Actor } from "../../packages/application/actor.ts";
@@ -91,6 +93,14 @@ const ROUTES: readonly RouteSpec[] = [
   // because the read is a page, not a resource: §8 names this route as where a client
   // recovers a build or verification resource id from the persisted resultRef.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/jobs`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The five §8 reads that had a worker command and no HTTP door (issue #58). Each one is a
+  // single resource under the project, session-bound, and answered by the command of the
+  // same name; none of them takes a body, and none of them resolves a path.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/jobs/:jobId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/evidence/:evidenceId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
   // selected by manifest file id. Neither takes a path.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
@@ -445,6 +455,95 @@ async function readCandidateFile(ctx: Context, deps: ApiDependencies): Promise<A
   return jsonSuccess(ctx.requestId, 200, content.value);
 }
 
+// --- The §8 reads that had a command but no route (issue #58) ------------------------
+//
+// Each of these five was already reachable by name inside the worker and already carried a
+// wire schema; what was missing was the HTTP half, so a browser could not ask for any of
+// them. A path segment that is not an opaque identifier is refused as "not a resource"
+// rather than forwarded: §8 authorises a path id by matching the project, not by believing
+// the caller, and echoing the string back would put it in a log line and a page (§12.1).
+
+async function readProject(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const outcome = await deps.worker.call("project.get", { projectId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const view = parseStrict(projectViewSchema, outcome.value);
+  if (!view.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "project-view-shape", "the worker did not answer with the project view", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, view.value);
+}
+
+async function readJob(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const jobId = pathId(ctx, "jobId");
+  if (projectId === null) return unknownProject(ctx);
+  // A segment that is not an opaque id was never a job: that is a malformed request, not a
+  // lookup miss, and the two read differently to an operator fixing a link (the same
+  // distinction `graph-target-id-malformed` makes for the graph read's query).
+  if (jobId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "job-id-malformed", "the job segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("job.get", { projectId, jobId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const record = parseStrict(jobRecordSchema, outcome.value);
+  if (!record.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "job-record-shape", "the worker did not answer with a job record", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, record.value);
+}
+
+async function readEvidence(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  // Upstream evidence ids keep their own shape (`ev_` plus 64 hex); they are not workbench
+  // ids, so the path test is the one §4 names for preserved upstream identifiers.
+  const rawEvidence = ctx.params["evidenceId"] ?? "";
+  if (projectId === null) return unknownProject(ctx);
+  if (!isReaEvidenceId(rawEvidence)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "evidence-id-malformed", "the evidence segment of the path is not an upstream evidence id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("evidence.get", { projectId, evidenceId: rawEvidence }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const view = parseStrict(evidenceViewSchema, outcome.value);
+  if (!view.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "evidence-view-shape", "the worker did not answer with a stored evidence envelope", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, view.value);
+}
+
+async function readVector(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const vectorId = pathId(ctx, "vectorId");
+  if (projectId === null) return unknownProject(ctx);
+  if (vectorId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "vector-id-malformed", "the vector segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("vector.read", { projectId, vectorId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const vector = parseStrict(testVectorSchema, outcome.value);
+  if (!vector.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "vector-shape", "the worker did not answer with a test vector", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, vector.value);
+}
+
+async function readPlan(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const planId = pathId(ctx, "planId");
+  if (projectId === null) return unknownProject(ctx);
+  if (planId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "plan-id-malformed", "the plan segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("plan.read", { projectId, planId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const plan = parseStrict(verificationPlanSchema, outcome.value);
+  if (!plan.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "plan-shape", "the worker did not answer with a verification plan", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, plan.value);
+}
+
 async function readGraph(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
@@ -710,6 +809,16 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readGraph(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/jobs")) {
       response = await listJobs(ctx, deps);
+    } else if (route.method === "GET" && route.template === `${API_PREFIX}/projects/:projectId`) {
+      response = await readProject(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/jobs/:jobId")) {
+      response = await readJob(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/evidence/:evidenceId")) {
+      response = await readEvidence(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/vectors/:vectorId")) {
+      response = await readVector(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/verification-plans/:planId")) {
+      response = await readPlan(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {

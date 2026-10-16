@@ -13,6 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
+  evidenceMetaLine,
   pickCandidateSource,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
@@ -328,5 +329,30 @@ describe("candidate discovery from the job page (§8 line 277)", () => {
       const result = pickCandidateSource([job("j1", "build", "succeeded", ref)]);
       expect(result).toEqual({ found: false, reason: "result-ref-is-not-an-id" });
     }
+  });
+});
+
+// What the evidence reader says about the bytes it fetched (§8 line 281 / issue #58).
+//
+// The withheld digest is the interesting case: the store may legitimately hold a NULL sha256
+// with a reason beside it (§4), and a page that renders that as an empty field reads as a
+// value that got lost in transit rather than a fact that was never published.
+
+describe("evidenceMetaLine (§8 line 281)", () => {
+  it("names the media type, the length and the digest the store recorded", () => {
+    const line = evidenceMetaLine({
+      mediaType: "application/json",
+      byteLength: 1036,
+      sha256: "dc3449a3e08b77e927e6f8e99e4e34c3bb1c9b2405455bd951613579836415c4",
+    });
+    expect(line).toContain("application/json");
+    expect(line).toContain("1036 字节");
+    expect(line).toContain("dc3449a3");
+  });
+
+  it("says the digest is withheld instead of rendering an empty field", () => {
+    const line = evidenceMetaLine({ mediaType: "application/octet-stream", byteLength: 0, sha256: null });
+    expect(line).toContain("未公开");
+    expect(line).not.toMatch(/sha256 (null|undefined)/);
   });
 });
