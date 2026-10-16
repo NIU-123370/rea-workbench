@@ -1,0 +1,90 @@
+name: pr-review-bot
+
+# The in-repo review bot: on every change to an open pull request it runs the
+# gates, scans the tree against the rule table in infra/review/rules.mjs, posts a
+# real GitHub review, and fails the check when a P1 finding is present.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-review-bot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workbench
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: workbench/.nvmrc
+          cache: npm
+          cache-dependency-path: workbench/package-lock.json
+
+      - run: npm ci
+
+      - name: toolchain
+        run: |
+          node -v
+          npm -v
+          test "$(node -v)" = "v24.18.0" || { echo "node must be 24.18.0"; exit 1; }
+
+      - name: typecheck
+        if: ${{ !cancelled() }}
+        run: npm run typecheck
+
+      - name: unit tests
+        if: ${{ !cancelled() }}
+        run: npm run test:unit
+
+      - name: integration tests
+        if: ${{ !cancelled() }}
+        run: npm run test:integration
+
+      - name: lint and design rules
+        id: rules
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          npm run lint
+          npm run review
+
+      - name: post review to the pull request
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          FINDINGS: .review/findings.json
+        run: node infra/review/post.mjs
+
+      - name: block when the rules did not run or found a P1
+        if: ${{ !cancelled() }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const path = ".review/findings.json";
+            if (!fs.existsSync(path)) {
+              // The rules step is continue-on-error so a P1 still gets a posted
+              // review; that also means a crashed scan would otherwise pass.
+              // A missing report can only mean the scan never finished, so fail.
+              console.error("no findings file: the rules scan did not complete");
+              process.exit(1);
+            }
+            const report = JSON.parse(fs.readFileSync(path, "utf8"));
+            console.log(`scanned=${report.scannedFiles} P1=${report.summary.P1} P2=${report.summary.P2}`);
+            if (report.summary.P1 > 0) {
+              console.error(`blocking findings: ${report.summary.P1}`);
+              process.exit(1);
+            }
+          '

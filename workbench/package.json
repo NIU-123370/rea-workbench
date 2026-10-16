@@ -11,11 +11,15 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:unit": "vitest run --config vitest.unit.config.ts",
-    "test:integration": "vitest run --config vitest.integration.config.ts --passWithNoTests",
-    "test": "npm run test:unit && npm run test:integration"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test": "npm run test:unit && npm run test:integration",
+    "lint": "oxlint packages apps tests infra",
+    "review": "node infra/review/scan.mjs --json .review/findings.json --summary .review/summary.md",
+    "review:post": "node infra/review/post.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "oxlint": "1.88.0",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   },
