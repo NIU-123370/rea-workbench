@@ -146,6 +146,18 @@ export class ArtifactStore {
     }
   }
 
+  // The only way a caller obtains an absolute filesystem path: the store resolves
+  // a key it published itself, and refuses anything that escapes its tree. REA
+  // needs an absolute capture path, and handing it a caller-supplied one would
+  // turn the analysis request into a path traversal.
+  absolutePathFor(projectId: Id, storageKey: string): string | null {
+    const relative = storageKey.startsWith(`projects/${projectId}/`)
+      ? storageKey.slice(`projects/${projectId}/`.length + 1)
+      : null;
+    if (relative === null) return null;
+    return this.resolveInside(projectId, relative);
+  }
+
   async read(projectId: Id, storageKey: string): Promise<Result<Uint8Array, ArtifactError>> {
     const relative = storageKey.startsWith(`projects/${projectId}/`)
       ? storageKey.slice(`projects/${projectId}/`.length)

@@ -195,6 +195,40 @@ export type GraphEdgeRow = {
   claimId: Id;
 };
 
+// The producer call the ingestion loop makes. It is a port so the ingestion
+// service cannot reach a network client, a shell or a Docker socket: the only
+// thing it can ask for is an inspection of a file the workbench itself staged
+// (DESIGN §8 ingestion, §9, D25).
+export type CaptureInspectionRequest = {
+  capturePath: string;
+  format: "har";
+  recordOrdinals: number[] | null;
+  // Lives only for this call. Nothing in the persistence path reads it back, and
+  // no field of it is stored or journalled.
+  sensitiveValues: readonly string[];
+};
+
+export type CaptureInspectionOutcome =
+  | { kind: "evidence"; envelopeJson: JsonValue }
+  | {
+      kind: "retained-reference";
+      evidenceId: string;
+      reason: string;
+      // §9 item 7: the producer tells the caller to consume the retained record
+      // instead of re-running the operation.
+      continuationName: string | null;
+    }
+  | {
+      kind: "failure";
+      code: "REA_CONTRACT_MISMATCH" | "CAPABILITY_UNAVAILABLE" | "STALE_INPUT" | "UNSUPPORTED_FORMAT" | "INVALID_INPUT";
+      reason: string;
+      message: string;
+    };
+
+export type CaptureInspectorPort = {
+  inspect(input: CaptureInspectionRequest): Promise<CaptureInspectionOutcome>;
+};
+
 export type StoragePortError = {
   code:
     | "SQLITE_FAILURE"
@@ -225,6 +259,7 @@ export type StorageTransaction = {
   insertJob(row: JobRow): JobIdempotency;
   updateJob(row: JobRow): void;
   getJob(projectId: Id, jobId: Id): JobRow | null;
+  findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null;
   insertArtifact(row: ArtifactRow): void;
   getArtifact(projectId: Id, artifactId: Id): ArtifactRow | null;
   insertEvidence(row: EvidenceRow): void;
@@ -262,6 +297,16 @@ export type StorageTransaction = {
   appendEvent(draft: EventDraft): number;
   eventsAfter(projectId: Id, afterSeq: number, limit: number): CommittedEvent[];
   insertLease(row: LeaseRow): void;
+  getLeaseByJob(projectId: Id, jobId: Id): LeaseRow | null;
+  // CleanupService owns the retry schedule (§5), so the only thing a caller may
+  // change is the recorded state, its safe error and the next retry time.
+  updateLeaseCleanup(
+    leaseId: Id,
+    cleanupState: CleanupState,
+    lastErrorJson: JsonValue | null,
+    retryAt: Instant | null,
+    retryCount: number,
+  ): void;
   insertAudit(row: AuditRow): number;
   auditAfter(afterSeq: number, projectId: Id | null, limit: number): CommittedAudit[];
   latestSeq(projectId: Id): number;
@@ -311,6 +356,9 @@ export type ArtifactPort = {
     declaredSha256?: Digest,
   ): Promise<Result<PublishedFile, ArtifactPortError>>;
   read(projectId: Id, storageKey: string): Promise<Result<Uint8Array, ArtifactPortError>>;
+  // Resolves a key this store published into the absolute path the producer must
+  // be given. Returns null for anything it did not mint.
+  absolutePathFor(projectId: Id, storageKey: string): string | null;
 };
 
 // The parsed facts of one recorded request/response pair, as the producer
