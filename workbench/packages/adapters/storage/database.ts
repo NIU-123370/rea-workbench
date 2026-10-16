@@ -160,9 +160,18 @@ export function applyMigrations(
   const done: string[] = [];
   for (const migration of MIGRATIONS) {
     if (!plan.pending.includes(migration.id)) continue;
+    // A rebuild needs enforcement off *before* the transaction opens, because SQLite
+    // ignores a pragma issued inside one. The transaction still wraps the whole rebuild,
+    // and the schema is checked for dangling references before it commits, so turning
+    // enforcement off cannot leave a half-upgraded database (D23).
+    if (migration.deferForeignKeys === true) db.exec("PRAGMA foreign_keys = OFF");
     try {
       db.exec("BEGIN IMMEDIATE");
       db.exec(migration.sql);
+      const broken = db.prepare("PRAGMA foreign_key_check").all() as { sqlite_err?: string }[];
+      if (broken.length > 0) {
+        throw new Error(`foreign_key_check found ${String(broken.length)} dangling reference(s)`);
+      }
       insert.run(migration.id, checksum(migration.sql), nowInstant());
       db.exec("COMMIT");
       done.push(migration.id);
@@ -172,8 +181,10 @@ export function applyMigrations(
       } catch {
         // The transaction is already gone; the recorded failure is authoritative.
       }
+      db.exec("PRAGMA foreign_keys = ON");
       return fail("MIGRATION_FAILED", `${migration.id}: ${String((error as Error).message)}`);
     }
+    db.exec("PRAGMA foreign_keys = ON");
   }
   return { ok: true, value: done };
 }

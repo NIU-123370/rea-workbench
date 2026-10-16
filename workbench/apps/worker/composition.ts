@@ -39,7 +39,9 @@ import { ContractService } from "../../packages/application/contract-service.ts"
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
+import { ExportService } from "../../packages/application/export-service.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
+import { VerificationService } from "../../packages/application/verification-service.ts";
 
 import { acquireWorkerLock, applyMigrations, openWriteConnection, planMigrations } from "../../packages/adapters/storage/database.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
@@ -50,6 +52,7 @@ import { ReaCaptureInspector } from "../../packages/adapters/rea/capture-inspect
 import { WebCaptureEvidenceFacts } from "../../packages/adapters/rea/web-capture-records.ts";
 import { createProjectRequestSchema } from "../../packages/contracts/resources.ts";
 import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
+import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
 //
@@ -99,6 +102,11 @@ export const COMMAND_NAMES = [
   // other, so the actor kind arrives on the frame and the service — not this table —
   // decides whether that kind may generate.
   "candidate.generate",
+  // Delivery (§8 lines 299-300 / issue #22). The ZIP leaves through a named command that
+  // re-runs the verified-samples gate; there is no path output parameter anywhere in it.
+  "export.create",
+  "export.download",
+  "export.list",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
@@ -305,6 +313,17 @@ function relayPort<T>(result: Result<T, { code: string; message: string }>): Com
   return { ok: true, value: result.value as unknown as JsonValue };
 }
 
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function limitOf(payload: JsonValue): number {
+  const raw = asRecord(payload)["limit"];
+  return typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? Math.min(raw, 500) : 50;
+}
+
 function missing(...ids: readonly (Id | null)[]): CommandOutcome | null {
   return ids.some((id) => id === null)
     ? gateFail("INVALID_INPUT", "command-ids", "the command is missing a required opaque id")
@@ -383,6 +402,14 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
   const builder = new BuilderService({ storage: writer, artifacts: store, limits: LIMITS });
+  const verifications = new VerificationService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
+  const exports_ = new ExportService({
+    storage: writer,
+    artifacts: store,
+    verification: verifications,
+    limits: LIMITS,
+    zipLimits: { maxEntries: 16, maxUncompressedBytes: 32_000_000, maxArchiveBytes: 34_000_000 },
+  });
 
   let session: ReaSession | null = null;
   function providerSession(): Result<ReaSession, GateFailure> {
@@ -587,6 +614,39 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
         }),
       );
     },
+    "export.create": async (payload, actor) => {
+      const parsed = exportCreateRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "export-create", "the export request was rejected");
+      const verificationId = parsed.data.verificationId ?? null;
+      return relay(
+        await exports_.create(projectIdOr(payload), actor, {
+          candidateId: asId(parsed.data.candidateId),
+          verificationId: verificationId === null ? null : asId(verificationId),
+          label: parsed.data.label,
+        }),
+      );
+    },
+    "export.download": async (payload, actor) => {
+      const parsed = exportReadRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "export-download", "the download request was rejected");
+      const archived = await exports_.archive(projectIdOr(payload), actor, asId(parsed.data.exportId));
+      if (!archived.ok) return archived;
+      // The bytes cross the private RPC as base64 in one frame because the web process may
+      // not open the artifact store (§8). The reply is the archive plus the digest the row
+      // recorded, so a client can check what it got before it hands it to a browser.
+      return relay({
+        ok: true,
+        value: {
+          exportId: archived.value.exportId,
+          sha256: archived.value.sha256,
+          byteLength: archived.value.byteLength,
+          mediaType: archived.value.mediaType,
+          bytesBase64: toBase64(archived.value.bytes),
+        },
+      });
+    },
+    "export.list": async (payload, actor) =>
+      relay(await exports_.list(projectIdOr(payload), actor, limitOf(payload))),
     "health.effectiveProfiles": () => relay({ ok: true, value: profiles.healthView() }),
     "doctor.run": async () => relay({ ok: true, value: (await doctorReport()) as unknown as JsonValue }),
     "jobs.recover": () => relay(recovery()),

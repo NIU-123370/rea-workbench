@@ -3,7 +3,17 @@
 // a recorded id this binary does not know is refused, so an older build cannot
 // quietly run against a newer schema (A12, D23).
 
-export type Migration = { readonly id: string; readonly sql: string };
+export type Migration = {
+  readonly id: string;
+  readonly sql: string;
+  // A table rebuild cannot run while foreign keys are enforced: SQLite treats
+  // `DROP TABLE` on a parent as an implicit delete, and every RESTRICT child row then
+  // stops it. `deferForeignKeys` tells the runner to switch enforcement off around the
+  // transaction rather than inside it (a pragma is ignored inside a transaction), and the
+  // runner then verifies the whole schema with `PRAGMA foreign_key_check` before commit,
+  // so a rebuild still cannot leave a half-upgraded database (D23).
+  readonly deferForeignKeys?: boolean;
+};
 
 export const SCHEMA_VERSION = 1;
 
@@ -333,6 +343,39 @@ CREATE TABLE IF NOT EXISTS audit_entries (
 
 CREATE INDEX IF NOT EXISTS idx_events_project_seq ON events (project_id, seq);
 CREATE INDEX IF NOT EXISTS idx_audit_project_seq ON audit_entries (project_id, seq);
+`,
+  },
+  {
+    id: "0005-artifact-export-class",
+    deferForeignKeys: true,
+    // Delivery gets its own artifact class (DESIGN §5 exports row, §8 lines 299-300 /
+    // issue #22). A package bundles candidate source with a published report, so it must
+    // not be smuggled inside one of the four producer classes whose isolation §5 names as
+    // a permission boundary; it needs a partition of its own, which means the class CHECK
+    // has to grow. SQLite cannot alter a CHECK, so this is the create-copy-drop-rename
+    // sequence — the same columns and constraints, one extra class value.
+    sql: `
+CREATE TABLE artifacts_new (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  job_id TEXT,
+  class TEXT NOT NULL CHECK (class IN ('inspector','blueprint','candidate','report','export')),
+  ${digestColumn("sha256")},
+  digest_reason TEXT,
+  byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+  storage_key TEXT NOT NULL UNIQUE,
+  media_type TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (sha256 IS NOT NULL OR digest_reason IS NOT NULL),
+  UNIQUE (project_id, id)
+);
+
+INSERT INTO artifacts_new (id, project_id, job_id, class, sha256, digest_reason, byte_length, storage_key, media_type, created_at)
+  SELECT id, project_id, job_id, class, sha256, digest_reason, byte_length, storage_key, media_type, created_at FROM artifacts;
+
+DROP TABLE artifacts;
+
+ALTER TABLE artifacts_new RENAME TO artifacts;
 `,
   },
 ] as const;

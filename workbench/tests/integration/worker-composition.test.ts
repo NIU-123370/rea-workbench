@@ -47,6 +47,9 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "blueprint.handoff",
   "blueprint.manifest",
   "candidate.generate",
+  "export.create",
+  "export.download",
+  "export.list",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
@@ -191,7 +194,7 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
     const storage = report.checks.find((check) => check.name === "storage-layout");
     const sandbox = report.checks.find((check) => check.name === "sandbox-profile");
     if (storage === undefined || sandbox === undefined) throw new Error("doctor omitted a required check");
-    expect(storage.facts).toEqual({ migrationsApplied: 4 });
+    expect(storage.facts).toEqual({ migrationsApplied: 5 });
     expect(sandbox.state).toBe("degraded");
     expect(JSON.stringify(report)).not.toContain(dataDir);
   });

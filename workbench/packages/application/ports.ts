@@ -25,7 +25,10 @@ import type {
 // only the worker's StorageWriter may write, and the API never opens this
 // connection (D06).
 
-export type ArtifactClass = "inspector" | "blueprint" | "candidate" | "report";
+// `export` is the delivery partition (§5 class list, extended by migration 0005 for
+// issue #22): a package bundles candidate source with a published report, so it
+// keeps its own store directory rather than borrowing a producer class.
+export type ArtifactClass = "inspector" | "blueprint" | "candidate" | "report" | "export";
 
 export type ArtifactRow = {
   id: Id;
@@ -210,6 +213,17 @@ export type CandidateRow = {
   dependencyManifestJson: JsonValue;
 };
 
+export type ExportRow = {
+  id: Id;
+  projectId: Id;
+  candidateId: Id;
+  verificationId: Id | null;
+  label: "draft" | "verified-samples";
+  artifactId: Id;
+  manifestJson: JsonValue;
+  createdAt: Instant;
+};
+
 export type VerificationRow = {
   id: Id;
   projectId: Id;
@@ -354,6 +368,11 @@ export type StorageTransaction = {
   insertVerification(row: VerificationRow): void;
   getVerification(projectId: Id, verificationId: Id): VerificationRow | null;
   listVerificationsForCandidate(projectId: Id, candidateId: Id): VerificationRow[];
+  // §5's `exports` row: the package bytes are an artifact of the `export` class, written
+  // and digested before the transaction that records this index row (§10 / issue #22).
+  insertExport(row: ExportRow): void;
+  getExport(projectId: Id, exportId: Id): ExportRow | null;
+  listExportsForProject(projectId: Id, limit: number): ExportRow[];
   insertGraphEdge(row: GraphEdgeRow): void;
   listEdges(projectId: Id, targetId: Id): GraphEdgeRow[];
   listClaimEvidence(projectId: Id, claimId: Id): { evidenceId: string; locationJson: JsonValue; role: "support" | "contradict" }[];

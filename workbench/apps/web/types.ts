@@ -24,5 +24,7 @@ export type EventPump = {
 };
 
 export type ApiResponse =
-  | { kind: "response"; status: number; headers: HttpHeaders; body: string | null }
+  // `Uint8Array` exists for one route: a download replies with the package bytes, which
+  // must not be run through a UTF-8 string on the way out (§8).
+  | { kind: "response"; status: number; headers: HttpHeaders; body: string | Uint8Array | null }
   | { kind: "stream"; status: number; headers: HttpHeaders; pump: EventPump };
