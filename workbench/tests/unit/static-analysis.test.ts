@@ -209,6 +209,11 @@ function fakeWriter(state: FakeState): StorageWriterPort {
     appendEvent: refused("appendEvent", state),
     eventsAfter: refused("eventsAfter", state),
     insertLease: refused("insertLease", state),
+    insertCandidate: refused("insertCandidate", state),
+    getCandidate: refused("getCandidate", state),
+    insertVerification: refused("insertVerification", state),
+    getVerification: refused("getVerification", state),
+    listVerificationsForCandidate: refused("listVerificationsForCandidate", state),
     findJobByKey: refused("findJobByKey", state),
     listJobsByStates: refused("listJobsByStates", state),
     listOpenLeases: refused("listOpenLeases", state),
@@ -254,6 +259,9 @@ function fakeArtifacts(bytes: Uint8Array): ArtifactPort {
       // The static branch reads envelope bytes through `read`, never a host path:
       // handing one out would let a projection reach outside the artifact store.
       throw new Error("the static branch never resolves an absolute path");
+    },
+    readStaging(): Promise<Result<Uint8Array, { code: "STAGING_UNVERIFIED" | "ARTIFACT_MISMATCH" | "ARTIFACT_WRITE_FAILED"; message: string }>> {
+      return Promise.reject(new Error("the static branch never reads evaluator staging"));
     },
   };
 }

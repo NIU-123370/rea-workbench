@@ -37,8 +37,8 @@ npm ci
 | 模块                                        | 现在真正负责的事                                                                                                                                          |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/domain`                           | 主张三色投影、canonical JSON 与两类摘要、不透明 Id / Instant、向量与契约语义                                                                               |
-| `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略） |
-| `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
+| `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略）、`verification.ts`（比较器具名版本与 evaluator 完成回执） |
+| `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、`verification-service.ts`（验证报告的唯一生产者）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
 | `packages/adapters/rea`                     | MCP 回复解码、Evidence 索引投影、HTTP 抓包事实读取、session 身份                                                                                           |
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
@@ -61,6 +61,20 @@ ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
 - **不承诺任何 Electron 运行时**：ASAR 是归档，不含启动一个 Electron 应用所需的
   平台条件；本支路只做离线静态分析，动态行为保留为未知。
 
+SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说清：
+
+- `POST` 完成回执是 `evaluatorCompletionSchema`，字段只有观测；带一个 `result:"PASS"`
+  进去会被 strict schema 以未识别键拒收，并且拒收会写下一条 `deny` 审计。
+- 只有 `actorKind:"evaluator"` 能记录；Builder 在解析负载之前就被拒，所以拒绝不会
+  泄露可接受的形状。
+- 报告发布前先复核 evaluator 留在 staging 的字节摘要，再发布**本模块推导出的**报告正文，
+  然后在一个事务里写 artifact、`verifications` 行、`verification.completed` 事件与 allow
+  审计；事务内还会重读候选/蓝图/计划/库存，任何一项移动即回滚。
+- 八项身份（snapshot/blueprint/candidate/vectorSet/plan/inventory/comparator/runnerImage）
+  任一不符 ⇒ 报告只作为 `identity-changed:<字段>` 的失效证据呈现，正文与 digest 不被改写。
+- `counts` 是冻结计划的分母，`inventoryCounts` 是整快照的分母；计划不再穷尽库存时
+  （新样本落进同一快照）验证被拒绝，而不是借一个更小的分母继续跑。
+
 ## 还没有的东西
 
 `npm run worker` 与 `npm run doctor` 现在存在：前者装配 worker（解析 `WB_*`、拿写
@@ -81,7 +95,10 @@ ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
   解析结果已在真样本上验证过。
 - `evidence_id` 的语义摘要仍由 REA 自己校验；工作台只做形状校验，这一条差异记录
   在 issue #14。
-- 候选执行器与 evaluator、性能门禁 A13 均未实现。受控 Web 采集的契约
+- 候选执行器容器与 evaluator 容器仍未实现，性能门禁 A13 未测量；`verification-service.ts`
+  落的是**控制面这一侧**：它只接受 evaluator 提交的观测，`result`、`counts` 与八项绑定身份
+  全部由 worker 从自己已有的行推导，因此候选自报 PASS、伪造报告、改写请求在 schema 里
+  根本没有可写的字段（DESIGN §10）。分容器与文件视图隔离本身在本机不可验证。受控 Web 采集的契约
   与读回通路已在 `contracts/rea-web-capture.ts` + `adapters/rea/capture-inspection.ts`
   落地，但只在 fixture 上验证过，真 provider 会话仍归 issue #14。
 
