@@ -13,6 +13,7 @@ import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { bootstrapExchangeSchema, currentSessionSchema } from "../../packages/contracts/session.ts";
 import { captureTaskSchema, inspectTaskSchema } from "../../packages/contracts/tasks.ts";
 import { importFieldsSchema, pendingTargetSchema } from "../../packages/contracts/resources.ts";
+import { auditEntrySchema, auditPageSchema } from "../../packages/contracts/audit.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
 
 // DESIGN §8 declares one contract source so DTOs, OpenAPI and clients cannot
@@ -162,6 +163,24 @@ describe("wire objects are parseable and reject extras", () => {
       { kind: "inspect", claimIds: [], question: "缺哪些正文", scope: "static" },
       inspectTaskSchema,
     ],
+    [
+      "auditEntrySchema",
+      {
+        seq: 4,
+        projectId: null,
+        actorId: "local-reviewer",
+        actorKind: "reviewer",
+        action: "vector.review",
+        resourceType: "vector",
+        resourceId: ID,
+        decision: "allow",
+        reasonCode: "vector-approved",
+        safeMetadata: { revision: 3 },
+        createdAt: "2026-10-16T00:00:00.000Z",
+      },
+      auditEntrySchema,
+    ],
+    ["auditPageSchema", { entries: [], nextCursor: null }, auditPageSchema],
     ["importFieldsSchema", { kind: "har" }, importFieldsSchema],
     [
       "pendingTargetSchema",

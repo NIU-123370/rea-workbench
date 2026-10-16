@@ -34,6 +34,8 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "capture.importHar",
   "job.get",
   "jobs.list",
+  "audit.list",
+  "audit.listGlobal",
   "evidence.get",
   "vector.create",
   "vector.read",

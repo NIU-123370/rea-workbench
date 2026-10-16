@@ -11,6 +11,7 @@ import { verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
 import { testVectorSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
+import { auditPageSchema } from "../../packages/contracts/audit.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
@@ -93,6 +94,11 @@ const ROUTES: readonly RouteSpec[] = [
   // because the read is a page, not a resource: §8 names this route as where a client
   // recovers a build or verification resource id from the persisted resultRef.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/jobs`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The two audit windows (§8 lines 302-303 / issue #58). Separate routes with separate
+  // commands: the journal a reviewer reads about one project is not the journal of pairings,
+  // revocations and unauthenticated refusals that belong to no project.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/audit`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/audit`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The five §8 reads that had a worker command and no HTTP door (issue #58). Each one is a
   // single resource under the project, session-bound, and answered by the command of the
   // same name; none of them takes a body, and none of them resolves a path.
@@ -455,6 +461,50 @@ async function readCandidateFile(ctx: Context, deps: ApiDependencies): Promise<A
   return jsonSuccess(ctx.requestId, 200, content.value);
 }
 
+// The two audit reads (§8 lines 302-303). `after` and `limit` arrive as query text, and a
+// value that is not a whole number is refused at the edge rather than turned into NaN or 0:
+// `0` is a legal cursor meaning "from the beginning", so coercing a typo would silently
+// re-serve the whole journal to a page that asked for the next hundred entries.
+function intQuery(ctx: Context, name: string, reason: string): { value: number | null } | { refusal: ApiResponse } {
+  const raw = ctx.request.query[name];
+  if (raw === undefined) return { value: null };
+  if (!/^\d+$/.test(raw)) {
+    return { refusal: refused(ctx.requestId, "INVALID_INPUT", reason, `the ${name} in the query is not a whole number`, ctx.declaration) };
+  }
+  return { value: Number(raw) };
+}
+
+async function readAuditPage(
+  ctx: Context,
+  deps: ApiDependencies,
+  command: string,
+  payload: Record<string, JsonValue>,
+): Promise<ApiResponse> {
+  const after = intQuery(ctx, "after", "audit-after-malformed");
+  if ("refusal" in after) return after.refusal;
+  const limit = intQuery(ctx, "limit", "audit-limit-malformed");
+  if ("refusal" in limit) return limit.refusal;
+  const outcome = await deps.worker.call(command, { ...payload, request: { after: after.value, limit: limit.value } }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const page = parseStrict(auditPageSchema, outcome.value);
+  if (!page.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "audit-page-shape", "the worker did not answer with a page of audit entries", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, page.value);
+}
+
+async function readProjectAudit(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  return readAuditPage(ctx, deps, "audit.list", { projectId });
+}
+
+async function readGlobalAudit(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  // No project segment exists on this route, so there is nothing to pass: §8 line 303 reads
+  // the rows whose project is null, and the command refuses any project id in its payload.
+  return readAuditPage(ctx, deps, "audit.listGlobal", {});
+}
+
 // --- The §8 reads that had a command but no route (issue #58) ------------------------
 //
 // Each of these five was already reachable by name inside the worker and already carried a
@@ -809,6 +859,13 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readGraph(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/jobs")) {
       response = await listJobs(ctx, deps);
+    } else if (route.method === "GET" && route.template === `${API_PREFIX}/audit`) {
+      // Before the project-scoped suffix test: `${API_PREFIX}/audit` also ends with
+      // `/audit`, and letting the scoped branch claim it would turn the unrooted journal
+      // into a "project unknown" answer.
+      response = await readGlobalAudit(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/audit")) {
+      response = await readProjectAudit(ctx, deps);
     } else if (route.method === "GET" && route.template === `${API_PREFIX}/projects/:projectId`) {
       response = await readProject(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/jobs/:jobId")) {
