@@ -8,6 +8,8 @@ import type { JsonValue } from "../../domain/json-value.ts";
 import type { Result } from "../../domain/result.ts";
 import type {
   ArtifactRow,
+  AuditRow,
+  CommittedAudit,
   CommittedEvent,
   EventDraft,
   EvidenceRow,
@@ -304,6 +306,52 @@ class SqliteTransaction implements StorageTransaction {
         row.retryAt,
         row.retryCount,
       );
+  }
+
+  insertAudit(row: AuditRow): number {
+    const result = this.db
+      .prepare(
+        `INSERT INTO audit_entries (project_id, actor_id, actor_kind, action, resource_type, resource_id, decision, reason_code, safe_metadata_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.projectId,
+        row.actorId,
+        row.actorKind,
+        row.action,
+        row.resourceType,
+        row.resourceId,
+        row.decision,
+        row.reasonCode,
+        jsonOf(row.safeMetadataJson),
+        row.createdAt,
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  auditAfter(afterSeq: number, projectId: Id | null, limit: number): CommittedAudit[] {
+    const rows = (
+      projectId === null
+        ? this.db
+            .prepare("SELECT * FROM audit_entries WHERE seq > ? AND project_id IS NULL ORDER BY seq ASC LIMIT ?")
+            .all(afterSeq, limit)
+        : this.db
+            .prepare("SELECT * FROM audit_entries WHERE seq > ? AND project_id = ? ORDER BY seq ASC LIMIT ?")
+            .all(afterSeq, projectId, limit)
+    ) as Row[];
+    return rows.map((row) => ({
+      seq: Number(row["seq"]),
+      projectId: row["project_id"] === null ? null : asId(String(row["project_id"])),
+      actorId: String(row["actor_id"]),
+      actorKind: String(row["actor_kind"]),
+      action: String(row["action"]),
+      resourceType: String(row["resource_type"]),
+      resourceId: row["resource_id"] === null ? null : String(row["resource_id"]),
+      decision: String(row["decision"]) as CommittedAudit["decision"],
+      reasonCode: String(row["reason_code"]),
+      safeMetadataJson: parseJson(String(row["safe_metadata_json"])),
+      createdAt: asInstant(String(row["created_at"])),
+    }));
   }
 
   latestSeq(projectId: Id): number {

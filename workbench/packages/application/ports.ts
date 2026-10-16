@@ -134,8 +134,26 @@ export type StorageTransaction = {
   appendEvent(draft: EventDraft): number;
   eventsAfter(projectId: Id, afterSeq: number, limit: number): CommittedEvent[];
   insertLease(row: LeaseRow): void;
+  insertAudit(row: AuditRow): number;
+  auditAfter(afterSeq: number, projectId: Id | null, limit: number): CommittedAudit[];
   latestSeq(projectId: Id): number;
 };
+
+export type AuditRow = {
+  projectId: Id | null;
+  actorId: string;
+  actorKind: string;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  decision: "allow" | "deny";
+  reasonCode: string;
+  // Already passed through DiagnosticsSanitizer: named non-body facts only.
+  safeMetadataJson: JsonValue;
+  createdAt: Instant;
+};
+
+export type CommittedAudit = AuditRow & { seq: number };
 
 export type StorageWriterPort = {
   transact<T>(work: (tx: StorageTransaction) => T): Result<T, StoragePortError>;
