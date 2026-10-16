@@ -27,6 +27,8 @@ import type { Actor } from "../../packages/application/actor.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
 import type { Result } from "../../packages/domain/result.ts";
 import type { HarImportReceipt } from "../../packages/contracts/imports.ts";
+import { testVectorSchema } from "../../packages/contracts/vectors.ts";
+import { parseStrict } from "../../packages/contracts/parse.ts";
 
 // The HAR ingestion closed loop (DESIGN §8 ingestion, §5, §9, D25; PRD F02/A01;
 // issue #15). The producer here is a fixture MCP server reached over stdio through
@@ -386,6 +388,10 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
     // The producer redacted the auth header value: the pair is omitted and pointed at.
     expect(vector.request.headers).toEqual([{ name: "accept", value: "application/json" }]);
     expect(vector.redactions[0]?.reason).toBe("transport-auth");
+    // The route that serves this object (§8 line 284) parses it against `testVectorSchema`
+    // before it answers, so the domain reply and the wire shape are checked against each
+    // other here rather than discovered the day a page asks for a vector.
+    expect(parseStrict(testVectorSchema, vector).ok).toBe(true);
 
     const blocked = unwrapAsync(
       await vectors.create(projectId, inspectorActor, {

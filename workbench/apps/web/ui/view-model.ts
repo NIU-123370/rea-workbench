@@ -318,6 +318,14 @@ export function buildRightTabs(actor: { isBuilder: boolean; hasBlueprint: boolea
   ];
 }
 
+// What the evidence reader says about the bytes it just fetched (§8 line 281). The digest
+// half is a *stated fact*, not a gap: when the store withheld it, the line has to say that
+// rather than leaving an empty field that reads like a truncated value (§4's rule for a
+// nullable digest, applied where a person reads it).
+export function evidenceMetaLine(input: { mediaType: string; byteLength: number; sha256: string | null }): string {
+  return `${input.mediaType} · ${String(input.byteLength)} 字节 · sha256 ${input.sha256 ?? "未公开（见存储侧的保留原因）"}`;
+}
+
 // Which candidate the 代码 tab reads (DESIGN §8 lines 277 and 294, issue #55).
 //
 // §8 gives the page one way to name a candidate: the job list carries each row's persisted

@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { bootWorker, type WorkerHandle } from "../../apps/worker/composition.ts";
+import { bootWorker, EVIDENCE_INLINE_LIMIT_BYTES, type WorkerHandle } from "../../apps/worker/composition.ts";
+import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { startWorkerRpc, type RpcServer } from "../../apps/worker/rpc-server.ts";
 import { createWorkerClient } from "../../apps/web/worker-client.ts";
 import { createApiHandler, API_PREFIX } from "../../apps/web/api.ts";
@@ -14,12 +15,13 @@ import { runWebProcess } from "../../apps/web/main.ts";
 import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
-import { JOB_LIST_MAX_LIMIT, jobPageSchema } from "../../packages/contracts/jobs.ts";
+import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
+import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
 import { SESSION_COOKIE_NAME } from "../../packages/application/session.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
-import { newId, nowInstant } from "../../packages/domain/identity.ts";
+import { asInstant, newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import { asDigest } from "../../packages/domain/canonical-json.ts";
 import { hex } from "../support/blueprint-seed.ts";
@@ -916,11 +918,22 @@ describe("the job page route (§8 line 277 / issue #55)", () => {
     const anonymous = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs`);
     expect(anonymous.status).toBe(401);
     const session = await pairSession();
-    const neighbour = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs/all`, {
+    // One segment deeper than any §8 job route is not a route at all: `/jobs/` does not open
+    // a "read anything under it" door.
+    const neighbour = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs/${newId()}/log`, {
       headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
     });
     expect(neighbour.status, neighbour.text).toBe(404);
     expect(neighbour.text).toContain("route-unknown");
+    // `GET /jobs/:j` IS a §8 template, so a non-identifier in that slot is not a routing
+    // miss: it is a malformed request, refused before the worker is asked, and the refused
+    // string never comes back into the page or a log line (§12.1).
+    const malformed = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs/all`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(malformed.status, malformed.text).toBe(400);
+    expect(malformed.text).toContain("job-id-malformed");
+    expect(malformed.text).not.toContain("/jobs/all");
   });
 
   it("answers a project with no jobs as an empty page, not as an error", async () => {
@@ -978,5 +991,441 @@ describe("the job page route (§8 line 277 / issue #55)", () => {
     );
     expect(forged.status, forged.text).toBe(400);
     expect(forged.text).toContain("jobs-cursor");
+  });
+});
+
+// The five §8 reads that had a worker command and no HTTP door (issue #58).
+//
+// Real data, real socket, real SQLite: the project arrives through `POST /projects`, and the
+// job, artifact and evidence rows through the worker's own write connection - the same rows
+// a HAR import would leave behind. The point is not that a handler exists but that what the
+// command answers is what §8 says the route returns, checked by parsing the HTTP body with
+// the schema the route itself uses.
+
+describe("the §8 read routes (issue #58)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: body.data?.csrfToken ?? body.csrfToken ?? "",
+    };
+  }
+
+  async function freshProject(session: { cookie: string; csrf: string }, name: string): Promise<string> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: `127.0.0.1:${String(address.port)}`,
+        origin: `http://127.0.0.1:${String(address.port)}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `read-route-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return (body.data?.id ?? body.id) as string;
+  }
+
+  function get(pathname: string, cookie: string) {
+    return call("GET", pathname, { headers: { host: `127.0.0.1:${String(address.port)}`, cookie } });
+  }
+
+  it("mounts exactly the five documented reads and refuses each one unpaired", async () => {
+    const id = newId();
+    for (const pathname of [
+      `${API_PREFIX}/projects/${id}`,
+      `${API_PREFIX}/projects/${id}/jobs/${id}`,
+      `${API_PREFIX}/projects/${id}/evidence/${"ev_" + "1".repeat(64)}`,
+      `${API_PREFIX}/projects/${id}/vectors/${id}`,
+      `${API_PREFIX}/projects/${id}/verification-plans/${id}`,
+    ]) {
+      const anonymous = await call("GET", pathname);
+      expect(`${pathname}:${String(anonymous.status)}`).toContain("401");
+    }
+    // And a sixth segment under `/vectors/` is not a door: §8 names one resource per path.
+    const session = await pairSession();
+    const deeper = await get(`${API_PREFIX}/projects/${id}/vectors/${id}/body`, session.cookie);
+    expect(deeper.status, deeper.text).toBe(404);
+    expect(deeper.text).toContain("route-unknown");
+  });
+
+  it("answers the project view with the six fields §8 line 271 names", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "read-project");
+    const listed = await get(`${API_PREFIX}/projects/${projectId}`, session.cookie);
+    expect(listed.status, listed.text).toBe(200);
+    const parsed = projectViewSchema.safeParse(JSON.parse(listed.text) as JsonValue);
+    if (!parsed.success) throw new Error(`the route refused its own schema: ${listed.text}`);
+    expect(parsed.data.id).toBe(projectId);
+    expect(parsed.data.name).toBe("read-project");
+    expect(parsed.data.graphRevision).toBe(0);
+    expect(parsed.data.inventoryRevision).toBe(0);
+    expect(parsed.data.targetIds).toEqual([]);
+    expect(parsed.data.recentJobIds).toEqual([]);
+  });
+
+  it("reads one job back as a full JobRecord, including the fields the page reports", async () => {
+    const session = await pairSession();
+    const projectId = (await freshProject(session, "read-job")) as Id;
+    const jobId = newId();
+    const created = nowInstant();
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertJob({
+        id: jobId,
+        projectId,
+        targetId: null,
+        kind: "build",
+        state: "succeeded",
+        cleanupState: "pending",
+        inputJson: {},
+        resultRef: "candidate-from-read-route",
+        errorJson: null,
+        idempotencyKey: `read-route-${String(jobId)}`,
+        requestDigest: asDigest(hex("read-job")),
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: created,
+        updatedAt: created,
+      });
+      tx.insertLease({
+        id: newId(),
+        jobId,
+        kind: "staging-dir",
+        resourceIdentityJson: { path: "runs/x" },
+        ownershipProofJson: { marker: "owned" },
+        cleanupState: "pending",
+        lastErrorJson: null,
+        retryAt: created,
+        retryCount: 0,
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+
+    // The same project's view has to name that job: §8 line 271's two id lists are what makes
+    // the view a way *into* a project rather than a receipt for its name.
+    const viewOfIt = await get(`${API_PREFIX}/projects/${projectId}`, session.cookie);
+    expect(viewOfIt.status, viewOfIt.text).toBe(200);
+    expect((JSON.parse(viewOfIt.text) as { recentJobIds?: string[] }).recentJobIds).toContain(jobId);
+
+    const single = await get(`${API_PREFIX}/projects/${projectId}/jobs/${jobId}`, session.cookie);
+    expect(single.status, single.text).toBe(200);
+    const record = jobRecordSchema.safeParse(JSON.parse(single.text) as JsonValue);
+    if (!record.success) throw new Error(`the job route refused its own schema: ${single.text}`);
+    expect(record.data.resultRef).toBe("candidate-from-read-route");
+    expect(record.data.cleanupState).toBe("pending");
+    // The same row read through the page must be byte-identical, because both reads run the
+    // one projection (§8: GET job, GET jobs and job.updated share the named time fields).
+    const page = await get(`${API_PREFIX}/projects/${projectId}/jobs`, session.cookie);
+    expect(page.status, page.text).toBe(200);
+    const listed = jobPageSchema.safeParse(JSON.parse(page.text) as JsonValue);
+    if (!listed.success) throw new Error(`the page route refused its own schema: ${page.text}`);
+    expect(listed.data.items.find((item) => item.id === jobId)).toEqual(record.data);
+  });
+
+  it("caps the project view's recent list instead of dumping the table", async () => {
+    // One project, 23 jobs a second apart. The view must answer with the bound, and with the
+    // newest ones: an unbounded list would grow with the project forever, and a wrong order
+    // would quietly serve the oldest work as "recent".
+    const session = await pairSession();
+    const projectId = (await freshProject(session, "read-bound")) as Id;
+    const base = Date.parse("2026-10-16T00:00:00.000Z");
+    const ids: Id[] = [];
+    for (let index = 0; index < 23; index += 1) {
+      const id = newId();
+      ids.push(id);
+      const at = asInstant(new Date(base + index * 1000).toISOString());
+      const seeded = worker.writeConnection.transact((tx) => {
+        tx.insertJob({
+          id,
+          projectId,
+          targetId: null,
+          kind: "inspect",
+          state: "succeeded",
+          cleanupState: "complete",
+          inputJson: {},
+          resultRef: null,
+          errorJson: null,
+          idempotencyKey: `bound-${String(index)}`,
+          requestDigest: asDigest(hex(`bound-${String(index)}`)),
+          deadlineAt: null,
+          retryAt: null,
+          createdAt: at,
+          updatedAt: at,
+        });
+        return true;
+      });
+      if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+    }
+    const listed = await get(`${API_PREFIX}/projects/${projectId}`, session.cookie);
+    expect(listed.status, listed.text).toBe(200);
+    const view = projectViewSchema.safeParse(JSON.parse(listed.text) as JsonValue);
+    if (!view.success) throw new Error(listed.text);
+    expect(view.data.recentJobIds.length).toBe(20);
+    // Newest first, so the tail of the seeded run is what the head of the list must show.
+    expect(view.data.recentJobIds.slice(0, 3)).toEqual([...ids].reverse().slice(0, 3));
+  });
+
+  it("reads a stored evidence envelope back under `evidence`, with what the store knew about it", async () => {
+    const session = await pairSession();
+    const projectId = (await freshProject(session, "read-evidence")) as Id;
+    const targetId = newId();
+    const jobId = newId();
+    const artifactId = newId();
+    const evidenceId = `ev_${"7".repeat(64)}`;
+    const created = nowInstant();
+    const envelope = { evidence_id: evidenceId, operation: "inspect_web_network_capture", detail: { status: 200 } };
+    const store = new ArtifactStore(dataDir);
+    const published = await store.publish(projectId, "inspector", new TextEncoder().encode(JSON.stringify(envelope)));
+    if (!published.ok) throw new Error(JSON.stringify(published.error));
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertTarget({
+        id: targetId,
+        projectId,
+        kind: "har",
+        originalLocator: null,
+        sourceSha256: null,
+        sourceArtifactId: null,
+        snapshotDigest: asDigest(hex("read-evidence-snapshot")),
+        identityReason: null,
+        createdAt: created,
+      });
+      tx.insertJob({
+        id: jobId,
+        projectId,
+        targetId,
+        kind: "capture",
+        state: "succeeded",
+        cleanupState: "complete",
+        inputJson: {},
+        resultRef: evidenceId,
+        errorJson: null,
+        idempotencyKey: `read-evidence-${String(jobId)}`,
+        requestDigest: asDigest(hex("read-evidence-job")),
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: created,
+        updatedAt: created,
+      });
+      tx.insertArtifact({
+        id: artifactId,
+        projectId,
+        jobId,
+        class: "inspector",
+        sha256: published.value.sha256,
+        digestReason: null,
+        byteLength: published.value.byteLength,
+        storageKey: published.value.storageKey,
+        mediaType: "application/json",
+        createdAt: created,
+      });
+      tx.insertEvidence({
+        projectId,
+        id: evidenceId,
+        targetId,
+        jobId,
+        artifactId,
+        providerJson: { id: "rea", name: "rea", version: "6.4.0" },
+        operation: "inspect_web_network_capture",
+        confidence: "observed",
+        authority: "shipped-artifact",
+        createdAt: created,
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+
+    const read = await get(`${API_PREFIX}/projects/${projectId}/evidence/${evidenceId}`, session.cookie);
+    expect(read.status, read.text).toBe(200);
+    const view = evidenceViewSchema.safeParse(JSON.parse(read.text) as JsonValue);
+    if (!view.success) throw new Error(`the evidence route refused its own schema: ${read.text}`);
+    // The envelope is passed through verbatim, under `evidence` (§4: a schema object travels
+    // as the source stated it), and the companion fields are the store's own facts.
+    expect(view.data.evidence).toEqual(envelope);
+    expect(view.data.byteLength).toBe(new TextEncoder().encode(JSON.stringify(envelope)).length);
+    expect(view.data.sha256).toBe(published.value.sha256);
+    // The project view has to name that target too: an empty list would read as "this
+    // project has nothing in it" while the evidence row says otherwise.
+    const viewOfProject = await get(`${API_PREFIX}/projects/${projectId}`, session.cookie);
+    const parsedView = projectViewSchema.safeParse(JSON.parse(viewOfProject.text) as JsonValue);
+    if (!parsedView.success) throw new Error(viewOfProject.text);
+    expect(parsedView.data.targetIds).toContain(targetId);
+
+    const otherProject = await freshProject(session, "read-evidence-other");
+    const crossProject = await get(`${API_PREFIX}/projects/${otherProject}/evidence/${evidenceId}`, session.cookie);
+    expect(crossProject.status, crossProject.text).toBe(404);
+    expect(crossProject.text).toContain("evidence-unknown");
+  });
+
+  it("refuses an evidence body over the inline cap by name, with the numbers to quote", async () => {
+    const session = await pairSession();
+    const projectId = (await freshProject(session, "read-evidence-big")) as Id;
+    const targetId = newId();
+    const jobId = newId();
+    const artifactId = newId();
+    const evidenceId = `ev_${"8".repeat(64)}`;
+    const created = nowInstant();
+    const store = new ArtifactStore(dataDir);
+    const bytes = new Uint8Array(EVIDENCE_INLINE_LIMIT_BYTES + 1).fill(123);
+    const published = await store.publish(projectId, "inspector", bytes);
+    if (!published.ok) throw new Error(JSON.stringify(published.error));
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertTarget({
+        id: targetId,
+        projectId,
+        kind: "har",
+        originalLocator: null,
+        sourceSha256: null,
+        sourceArtifactId: null,
+        snapshotDigest: asDigest(hex("big-snapshot")),
+        identityReason: null,
+        createdAt: created,
+      });
+      tx.insertJob({
+        id: jobId,
+        projectId,
+        targetId,
+        kind: "capture",
+        state: "succeeded",
+        cleanupState: "complete",
+        inputJson: {},
+        resultRef: evidenceId,
+        errorJson: null,
+        idempotencyKey: `big-${String(jobId)}`,
+        requestDigest: asDigest(hex("big-job")),
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: created,
+        updatedAt: created,
+      });
+      tx.insertArtifact({
+        id: artifactId,
+        projectId,
+        jobId,
+        class: "inspector",
+        sha256: published.value.sha256,
+        digestReason: null,
+        byteLength: published.value.byteLength,
+        storageKey: published.value.storageKey,
+        mediaType: "application/octet-stream",
+        createdAt: created,
+      });
+      tx.insertEvidence({
+        projectId,
+        id: evidenceId,
+        targetId,
+        jobId,
+        artifactId,
+        providerJson: {},
+        operation: "inspect_web_network_capture",
+        confidence: "observed",
+        authority: "shipped-artifact",
+        createdAt: created,
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+
+    const read = await get(`${API_PREFIX}/projects/${projectId}/evidence/${evidenceId}`, session.cookie);
+    // The cap is a cap, not a tripwire: this file is one byte past it.
+    expect(read.status, read.text).toBe(413);
+    expect(read.text).toContain("evidence-over-inline-limit");
+    // The refusal quotes the cap instead of truncating an envelope: a page that showed half a
+    // provider record would read as a record.
+    expect(read.text).toContain(String(EVIDENCE_INLINE_LIMIT_BYTES));
+    expect(read.text).toContain(String(EVIDENCE_INLINE_LIMIT_BYTES + 1));
+    // Pinned, not assumed: the worker's refusal carries `{byteLength, limit}` in `details`,
+    // and `fromWorker` relays **only** `reason` onto the wire. That is today's contract for
+    // every command, so a page that wants the numbers has to read them out of the sentence.
+    // Recorded as an open question in the issue list rather than changed here.
+    const refusal = JSON.parse(read.text) as { error: { details: Record<string, unknown> } };
+    expect(Object.keys(refusal.error.details)).toEqual(["reason"]);
+    // None of the stored bytes ride along in the refusal.
+    expect(read.text).not.toContain("{{{");
+
+    // The other side of the same line: a file of exactly the cap is a read, not a refusal.
+    // Without this half the test only proves the number appears in a message.
+    const exactId = newId();
+    const exactEvidence = `ev_${"9".repeat(64)}`;
+    // Valid JSON of exactly the cap: `{"pad":"` + padding + `"}` is the envelope, so the only
+    // thing at the boundary is its length.
+    const padLength = EVIDENCE_INLINE_LIMIT_BYTES - '{"pad":"'.length - '"}'.length;
+    const exactBytes = new TextEncoder().encode(`{"pad":"${"x".repeat(padLength)}"}`);
+    expect(exactBytes.length).toBe(EVIDENCE_INLINE_LIMIT_BYTES);
+    const exact = await store.publish(projectId, "inspector", exactBytes);
+    if (!exact.ok) throw new Error(JSON.stringify(exact.error));
+    const seededExact = worker.writeConnection.transact((tx) => {
+      tx.insertArtifact({
+        id: exactId,
+        projectId,
+        jobId,
+        class: "inspector",
+        sha256: exact.value.sha256,
+        digestReason: null,
+        byteLength: exact.value.byteLength,
+        storageKey: exact.value.storageKey,
+        mediaType: "application/octet-stream",
+        createdAt: created,
+      });
+      tx.insertEvidence({
+        projectId,
+        id: exactEvidence,
+        targetId,
+        jobId,
+        artifactId: exactId,
+        providerJson: {},
+        operation: "inspect_web_network_capture",
+        confidence: "observed",
+        authority: "shipped-artifact",
+        createdAt: created,
+      });
+      return true;
+    });
+    if (!seededExact.ok) throw new Error(JSON.stringify(seededExact.error));
+    const atCap = await get(`${API_PREFIX}/projects/${projectId}/evidence/${exactEvidence}`, session.cookie);
+    expect(atCap.status, atCap.text).toBe(200);
+    const atCapBody = JSON.parse(atCap.text) as { byteLength: number; mediaType: string };
+    expect(atCapBody.byteLength).toBe(EVIDENCE_INLINE_LIMIT_BYTES);
+    // The media type is the artifact row's, not the route's guess: two envelopes stored under
+    // this project differ in exactly that field.
+    expect(atCapBody.mediaType).toBe("application/octet-stream");
+  });
+
+  it("refuses a path segment that is not an identifier, naming the resource rather than the project", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "read-malformed");
+    const cases: [string, string][] = [
+      ["jobs", "job-id-malformed"],
+      ["vectors", "vector-id-malformed"],
+      ["verification-plans", "plan-id-malformed"],
+      ["evidence", "evidence-id-malformed"],
+    ];
+    for (const [segment, reason] of cases) {
+      const bad = await get(`${API_PREFIX}/projects/${projectId}/${segment}/not-an-id`, session.cookie);
+      // A typo in the id slot is 400, and a well-formed id that names nothing is 404: an
+      // operator fixing a broken link has to be able to tell those two apart.
+      expect(`${segment}:${String(bad.status)}`).toContain("400");
+      expect(`${segment}:${bad.text}`).toContain(reason);
+      expect(bad.text).not.toContain("not-an-id");
+    }
+  });
+
+  it("relays the worker's own not-found for a vector and a plan that is not this project's", async () => {
+    const session = await pairSession();
+    const mine = await freshProject(session, "read-unknown-vector");
+    const other = await freshProject(session, "read-unknown-plan");
+    const vector = await get(`${API_PREFIX}/projects/${mine}/vectors/${newId()}`, session.cookie);
+    expect(vector.status, vector.text).toBe(404);
+    const plan = await get(`${API_PREFIX}/projects/${other}/verification-plans/${newId()}`, session.cookie);
+    expect(plan.status, plan.text).toBe(404);
+    expect(plan.text).toContain("plan-unknown");
   });
 });

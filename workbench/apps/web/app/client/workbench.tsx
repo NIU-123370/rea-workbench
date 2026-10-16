@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, listView, pickCandidateSource } from "../../ui/view-model.ts";
+import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, listView, pickCandidateSource } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, LeftPanel, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
@@ -65,9 +65,10 @@ async function getJson(path: string): Promise<{ ok: true; value: unknown } | { o
 // The list view is the canvas substitute the acceptance row names, so it is always
 // rendered; the interactive canvas is an extra surface on top of it when the operator asks
 // for the picture instead of the table.
-function readEvidenceInquiry(evidenceId: string): DirectedInquiry {
-  return { kind: "read-evidence", subjectId: evidenceId, gaps: ["operator-jumped-to-evidence"], request: { evidenceId } };
-}
+//
+// "来源 N" used to queue a *draft* of reading the evidence, because there was no way to read
+// it. §8 line 281 now has a route (issue #58), so the jump reads: the envelope shown here is
+// the stored bytes, and the only thing left as a draft is what the source cannot yet tell us.
 
 // What the 代码 tab says when there is nothing to show, named by the step that came up
 // empty. "No candidate" and "no build job" are different operator problems, and one generic
@@ -136,6 +137,27 @@ export function FlowCanvas(props: { cells: readonly MiddleCell[]; rows: readonly
   );
 }
 
+// The stored envelope the source jump fetched (§8 line 281, issue #58). A component of its
+// own because the meta line is the same string in two places - the attribute a test reads and
+// the words an operator reads - and it is computed once here rather than twice per render.
+export type EvidenceView = {
+  evidenceId: string;
+  body: string;
+  mediaType: string;
+  byteLength: number;
+  sha256: string | null;
+};
+
+export function EvidenceReader(props: { evidence: EvidenceView }): React.ReactElement {
+  const line = evidenceMetaLine(props.evidence);
+  return (
+    <section aria-label="已读取的证据" data-evidence-reader={props.evidence.evidenceId}>
+      <p data-evidence-meta={line}>{line}</p>
+      <pre data-evidence-body>{props.evidence.body}</pre>
+    </section>
+  );
+}
+
 export function PairingForm(props: { onPaired: () => void }): React.ReactElement {
   const [token, setToken] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
@@ -174,6 +196,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [jobs, setJobs] = useState<JobsPagePayload | null>(null);
   const [candidate, setCandidate] = useState<CandidatePayload | null>(null);
   const [source, setSource] = useState<{ fileId: string; content: string; sha256: string } | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceView | null>(null);
+  const [evidenceNotice, setEvidenceNotice] = useState<string | null>(null);
   const [codeNotice, setCodeNotice] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState>("unknown");
   const [mode, setMode] = useState<"canvas" | "list">("canvas");
@@ -231,6 +255,27 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       setSource({ fileId, content: body.content, sha256: body.sha256 });
     },
     [candidate, props.projectId],
+  );
+
+  const showEvidence = useCallback(
+    async (evidenceId: string) => {
+      const got = await getJson(`/api/v1/projects/${props.projectId}/evidence/${evidenceId}`);
+      if (!got.ok) {
+        setEvidence(null);
+        setEvidenceNotice(`读取被拒：${got.reason}`);
+        return;
+      }
+      const view = got.value as { evidence: unknown; mediaType: string; byteLength: number; sha256: string | null };
+      setEvidenceNotice(null);
+      setEvidence({
+        evidenceId,
+        body: JSON.stringify(view.evidence, null, 2),
+        mediaType: view.mediaType,
+        byteLength: view.byteLength,
+        sha256: view.sha256,
+      });
+    },
+    [props.projectId],
   );
 
   // The wire names the endpoints `fromKey`/`toKey`; the view model names them `from`/`to`.
@@ -299,12 +344,12 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     if (cell === undefined) return;
     const first = cell.evidenceJumpTargets[0];
     if (first !== undefined) {
-      setInquiries((previous) => [...previous, readEvidenceInquiry(first)]);
+      void showEvidence(first);
       return;
     }
     const inquiry = directedInquiry(cell);
     if (inquiry.ok) setInquiries((previous) => [...previous, inquiry.value]);
-  }, [cells]);
+  }, [cells, showEvidence]);
 
   const claimRows = graph?.claims ?? [];
   const droppedEdges = built === null ? [] : canvasEdges(built.cells, edgeViews).dropped;
@@ -330,7 +375,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         canvasSlot={mode === "canvas" && cells.length > 0 ? <FlowCanvas cells={cells} rows={edgeViews} onCellPick={pickCell} /> : null}
         mode="list"
         onInquiry={(inquiry) => setInquiries((previous) => [...previous, inquiry])}
-        onJumpToEvidence={(evidenceId) => setInquiries((previous) => [...previous, readEvidenceInquiry(evidenceId)])}
+        onJumpToEvidence={(evidenceId) => void showEvidence(evidenceId)}
       />
       <section data-tabpanel={activeTab} aria-label="右栏面板内容">
         {activeTab === "contract" ? (
@@ -390,6 +435,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           </tbody>
         </table>
       ) : null}
+      {evidence === null ? (evidenceNotice === null ? null : <p data-evidence-refused>{evidenceNotice}</p>) : null}
+      {evidence === null ? null : <EvidenceReader evidence={evidence} />}
       <section aria-label="定向调查队列">
         <h2>已发起的定向调查（本地排队，尚未提交）</h2>
         <ul>{inquiries.map((inquiry, index) => <li key={`${String(inquiry.kind)}-${String(index)}`}>{JSON.stringify(inquiry)}</li>)}</ul>

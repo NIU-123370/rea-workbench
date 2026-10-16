@@ -5,6 +5,7 @@ import {
   digestSchema,
   idSchema,
   instantSchema,
+  jsonValueSchema,
   nonEmptyString,
   reaEvidenceIdSchema,
 } from "./primitives.ts";
@@ -82,6 +83,18 @@ export const importFieldsSchema = z.strictObject({
 export const importAcceptedSchema = z.strictObject({
   targetId: idSchema,
   job: jobRecordSchema,
+});
+
+// The stored-evidence read (§8 line 281): the provider envelope travels under `evidence`,
+// not loose at the top level, and it is passed through verbatim (§4's rule that a schema
+// object is transferred as the source stated it). The three companion fields are what the
+// store already knew about those bytes - class-free media type, length, and the digest or
+// the fact that the digest was withheld - so a page can say which envelope it is showing.
+export const evidenceViewSchema = z.strictObject({
+  evidence: jsonValueSchema,
+  mediaType: nonEmptyString,
+  byteLength: z.int().min(0),
+  sha256: digestSchema.nullable(),
 });
 
 export type CreateProjectRequest = z.infer<typeof createProjectRequestSchema>;
