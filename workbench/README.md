@@ -37,9 +37,9 @@ npm ci
 | 模块                                        | 现在真正负责的事                                                                                                                                          |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/domain`                           | 主张三色投影、canonical JSON 与两类摘要、不透明 Id / Instant、向量与契约语义                                                                               |
-| `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略）、`verification.ts`（比较器具名版本与 evaluator 完成回执） |
+| `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略）、`rea-analysis-view.ts` / `rea-evidence-bundle.ts`（保留与导入导出）、`verification.ts`（比较器具名版本与 evaluator 完成回执） |
 | `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、`verification-service.ts`（验证报告的唯一生产者）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
-| `packages/adapters/rea`                     | MCP 回复解码、Evidence 索引投影、HTTP 抓包事实读取、session 身份                                                                                           |
+| `packages/adapters/rea`                     | MCP 回复解码、Evidence 索引投影、HTTP 抓包事实读取、session 身份、具名 schema 对账（`schema-reconciliation.ts`）与按引用保留（`retention.ts`）                    |
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
@@ -74,6 +74,20 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   任一不符 ⇒ 报告只作为 `identity-changed:<字段>` 的失效证据呈现，正文与 digest 不被改写。
 - `counts` 是冻结计划的分母，`inventoryCounts` 是整快照的分母；计划不再穷尽库存时
   （新样本落进同一快照）验证被拒绝，而不是借一个更小的分母继续跑。
+
+`tools/list` 的对账是**双向**的（DESIGN §9 第 2 条 / issue #14）：期望的一边由严格镜像
+自己投影出来（`contracts/rea-advertised-shapes.ts`），观察的一边是这条连接刚返回的广告
+形状，两个方向都比 properties 集、required 集与 `additionalProperties:false`。以前
+`identity.ts` 手抄的 `REQUIRED_TOOLS` 表已经落后于它要总结的镜像（把
+`analyze_javascript_application` 记成"无必填"，而且根本没有 `detail`），这正是这条规则
+要防的东西。
+
+真实 provider 的读数（2026-10-16，`98d8470d` 构建，node 24.18.0）：handshake
+`2025-06-18`，173 个工具，广告出的 envelope **16 个字段全部 required**、
+`additionalProperties:false`，`confidence` 与 `authority` 的枚举与镜像逐字一致——
+所以 `rea-evidence.ts` 里那条"故意比上游 producer default 更严"的偏差不再是偏差。
+`tests/integration/rea-live-provider.test.ts` 在设了 `REA_LIVE_BIN` 时才跑真会话，
+没设就整支显式跳过，绝不把"没跑"算成"跑过"。
 
 ## 还没有的东西
 

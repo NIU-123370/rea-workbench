@@ -61,7 +61,13 @@ import { reaEvidenceSchema } from "./rea-evidence.ts";
 //   * `resource-controls` field documentation strings (`.describe(...)`) are
 //     upstream presentation metadata and are not carried here.
 //   * No real `.asar` file was parsed by REA while writing this mirror; the
-//     fixture in `tests/fixtures/` is hand-built against these shapes.
+//     fixture in `tests/fixtures/` is hand-built against these shapes. What HAS
+//     been run against the built provider at 98d8470d (2026-10-16) is the
+//     `format: "directory"` branch on a 3-file sample: it produced a 16-field
+//     envelope with `confidence: "derived"` that `reaEvidenceSchema` accepts, and
+//     `detail: "summary"` returned an `inspect_analysis_view` envelope whose
+//     `parameters.parent_evidence_id` is the retained complete record. No claim
+//     here rests on an asar run.
 
 const boundedText = z.string().min(1);
 const boundedKey = z.string().min(1);
@@ -119,21 +125,38 @@ export const reaAnalysisResourceControlsSchema = z.strictObject({
 // src/contracts/analysisDetail.ts:6-11
 export const reaAnalysisDetailSchema = z.enum(["complete", "summary"]).default("complete");
 
-// src/domain/javascript/javascriptApplicationAnalysis.ts:27-33
+// src/domain/javascript/javascriptApplicationAnalysis.ts:27-33 plus
+// src/contracts/javascript/electronToolContracts.ts:32-35, i.e. the complete
+// advertised `analyze_javascript_application` input.
+//
+// `detail` belongs HERE, not in a second "request" schema. Upstream adds it to
+// the tool's own inputSchema, so the field-for-field mirror of the tool input
+// has to carry it: while it lived only in the derived request schema below,
+// this strictObject refused a field the provider advertises as legal. That was
+// caught at runtime, not by reading, because `tools/list` of the built provider
+// at 98d8470d advertises exactly
+// ["analysis_timeout_ms","detail","format","input_path","integrity_policy",
+//  "max_heap_mb","max_semantic_nodes","max_semantic_nodes_per_file","source_paths"]
+// with required ["input_path"] and additionalProperties:false, and
+// `adapters/rea/schema-reconciliation.ts` now compares that advertised key set
+// against the one derived from this schema (DESIGN §1, §9 item 2).
+//
+// Upstream's own two-level split (domain input + MCP request wrapper) collapses
+// into one mirror here; the wrapper is re-exported below only so existing
+// imports keep resolving, and it is the *same* schema object, so `detail` still
+// has exactly one owner.
 export const analyzeJavaScriptApplicationInputSchema = z.strictObject({
   input_path: reaLocalPathSchema,
   format: z.enum(["auto", "asar", "directory"]).default("auto"),
   integrity_policy: reaArtifactIntegrityPolicySchema,
   source_paths: reaSourcePathsSchema.optional(),
   ...reaAnalysisResourceControlsSchema.shape,
+  detail: reaAnalysisDetailSchema,
 });
 
-// src/contracts/javascript/electronToolContracts.ts:32-35 (the MCP request adds
-// the delivery choice; `input_path` is the only target handle the tool takes).
-export const analyzeJavaScriptApplicationRequestSchema =
-  analyzeJavaScriptApplicationInputSchema.extend({
-    detail: reaAnalysisDetailSchema,
-  });
+// Alias, not a second mirror: the MCP request shape and the tool input shape are
+// one and the same schema at this baseline.
+export const analyzeJavaScriptApplicationRequestSchema = analyzeJavaScriptApplicationInputSchema;
 
 // --- provenance (javascriptApplicationEvidenceSchemas.ts) ------------------
 
@@ -995,6 +1018,22 @@ const reaSummaryViewCoverageSchema = z.strictObject({
   exhausted: z.boolean(),
 });
 
+// src/domain/analysisView/analysisView.ts:184-193 `javascriptSummarySchema`, i.e.
+// the summary payload itself. Extracted from the strictObject below so
+// `contracts/rea-analysis-view.ts` — whose `summary` view admits
+// `z.union([layout, javascript])` over the SAME payload — imports it instead of
+// copying it. Upstream's owner is one file; this keeps it one owner here too.
+export const reaJavaScriptApplicationSummarySchema = z.strictObject({
+  input_path: z.string().min(1),
+  format: z.enum(["asar", "directory"]),
+  root_artifact_sha256: reaDigestSchema,
+  source_selection: reaSourceSelectionSchema.exactOptional(),
+  statistics: z.record(z.string(), z.json()),
+  electron: z.record(z.string(), z.json()),
+  coverage: z.record(z.string(), z.json()),
+  limitation_count: z.number().int().nonnegative(),
+});
+
 export const reaJavaScriptApplicationSummaryViewResultSchema = z.strictObject({
   kind: z.literal("summary"),
   view: z.strictObject({ kind: z.literal("summary") }),
@@ -1006,16 +1045,7 @@ export const reaJavaScriptApplicationSummaryViewResultSchema = z.strictObject({
   limitations: z.array(z.string()),
   unknowns: z.array(z.string()),
   parent_operation: z.literal("analyze_javascript_application"),
-  summary: z.strictObject({
-    input_path: z.string().min(1),
-    format: z.enum(["asar", "directory"]),
-    root_artifact_sha256: reaDigestSchema,
-    source_selection: reaSourceSelectionSchema.exactOptional(),
-    statistics: z.record(z.string(), z.json()),
-    electron: z.record(z.string(), z.json()),
-    coverage: z.record(z.string(), z.json()),
-    limitation_count: z.number().int().nonnegative(),
-  }),
+  summary: reaJavaScriptApplicationSummarySchema,
 });
 
 // src/contracts/toolOutputSchemaPrimitives.ts:29-32 `evidenceResultOf` re-declares
