@@ -49,9 +49,9 @@ if (!repo || !pr) {
 }
 
 if (!existsSync(findingsPath)) {
-  // An earlier gate (typecheck or tests) failed before the rules ran, so the red
-  // check already carries the signal and a review body would only be noise.
-  process.stdout.write(`no findings file at ${findingsPath}; earlier gate failed, skipping review\n`);
+  // Nothing was scanned, so there is nothing to report. This is not a pass: the
+  // final workflow step fails the check when the report is missing.
+  process.stdout.write(`no findings file at ${findingsPath}; nothing to post\n`);
   process.exit(0);
 }
 

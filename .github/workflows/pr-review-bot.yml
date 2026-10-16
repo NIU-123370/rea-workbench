@@ -68,15 +68,18 @@ jobs:
           FINDINGS: .review/findings.json
         run: node infra/review/post.mjs
 
-      - name: block on a P1 finding
+      - name: block when the rules did not run or found a P1
         if: ${{ !cancelled() }}
         run: |
           node -e '
             const fs = require("node:fs");
             const path = ".review/findings.json";
             if (!fs.existsSync(path)) {
-              console.log("no findings file; an earlier gate already failed");
-              process.exit(0);
+              // The rules step is continue-on-error so a P1 still gets a posted
+              // review; that also means a crashed scan would otherwise pass.
+              // A missing report can only mean the scan never finished, so fail.
+              console.error("no findings file: the rules scan did not complete");
+              process.exit(1);
             }
             const report = JSON.parse(fs.readFileSync(path, "utf8"));
             console.log(`scanned=${report.scannedFiles} P1=${report.summary.P1} P2=${report.summary.P2}`);

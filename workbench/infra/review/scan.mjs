@@ -3,7 +3,7 @@
 // table and emits findings as JSON, plus a markdown summary and per-line GitHub
 // annotations. Exit code 1 when any P1 is found, so the check blocks the merge.
 
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -52,10 +52,19 @@ const findings = files.flatMap((file) =>
 );
 const summary = summarize(findings);
 
+function writeReport(target, contents) {
+  if (!target) return;
+  // CI starts from a clean checkout where .review/ does not exist, so the parent
+  // directory is created rather than assumed: assuming it turned a crashed scan
+  // into a green check.
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, contents);
+}
+
 const payload = { scannedFiles: files.length, findings, summary };
 const serialised = `${JSON.stringify(payload)}\n`;
-if (options.json) writeFileSync(options.json, serialised);
-else process.stdout.write(serialised);
+writeReport(options.json, serialised);
+if (!options.json) process.stdout.write(serialised);
 
 if (options.summary) {
   const lines = [
@@ -70,7 +79,7 @@ if (options.summary) {
       `- **${finding.severity} ${finding.rule}** \`${finding.file}:${finding.line}\` — ${finding.title}（${finding.anchor}）— ${finding.hint}`,
     );
   }
-  writeFileSync(options.summary, `${lines.join("\n")}\n`);
+  writeReport(options.summary, `${lines.join("\n")}\n`);
 }
 
 for (const finding of findings) {

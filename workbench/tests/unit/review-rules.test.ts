@@ -132,6 +132,16 @@ describe("the repository passes its own review bot", () => {
     expect(report.summary).toEqual({ total: 0, P1: 0, P2: 0, blocking: 0 });
   });
 
+  it("creates the report directory instead of assuming it exists", () => {
+    // A clean CI checkout has no `.review/`, and assuming it did turned a crashed
+    // scan into a green check once already.
+    const scratch = mkdtempSync(path.join(tmpdir(), "rea-review-dir-"));
+    const target = path.join(scratch, "deep", "nested", "findings.json");
+    execFileSync(process.execPath, ["infra/review/scan.mjs", "--json", target], { cwd: root });
+    const report = JSON.parse(readFileSync(target, "utf8")) as { scannedFiles: number };
+    expect(report.scannedFiles).toBeGreaterThan(0);
+  });
+
   it("exits non-zero when a P1 is present", () => {
     const scratch = mkdtempSync(path.join(tmpdir(), "rea-review-bad-"));
     mkdirSync(path.join(scratch, "packages/domain"), { recursive: true });
