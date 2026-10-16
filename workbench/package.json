@@ -2,6 +2,7 @@
   "name": "rea-workbench",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Local single-user software archaeology workbench on REA 6.4.0",
   "engines": {

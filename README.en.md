@@ -8,7 +8,7 @@
 
 Local software archaeology. Evidence first.
 
-[![CI](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml) ![Stage: Early Development](https://img.shields.io/badge/stage-early%20development-f0b44d) [![REA baseline: 6.4.0](https://img.shields.io/badge/REA%20baseline-6.4.0-8bd5e8)](https://github.com/morluto/rea/tree/98d8470d36cfbf7cd25820a4ed430aebae20c0c5)
+[![CI](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml) ![Stage: Early Development](https://img.shields.io/badge/stage-early%20development-f0b44d) [![REA baseline: 6.4.0](https://img.shields.io/badge/REA%20baseline-6.4.0-8bd5e8)](https://github.com/morluto/rea/tree/98d8470d36cfbf7cd25820a4ed430aebae20c0c5) [![License: MIT](https://img.shields.io/badge/license-MIT-8bd5e8)](LICENSE)
 
 [Highlights](#highlights) · [Preview](#preview) · [Development](#development) · [Roadmap](#roadmap) · [简体中文](README.md)
 
@@ -194,4 +194,4 @@ If this would help your work, Star the repository and follow its development.
 
 **Acknowledgments:** [REA](https://github.com/morluto/rea) provides the underlying analysis capabilities and Evidence contracts. Prompts for the promotional images are available in the [asset notes](docs/assets/README.md).
 
-**License:** This repository has not declared a license. Contact the maintainer for authorization before use or redistribution. Upstream dependencies retain their respective licenses.
+**License:** This project is licensed under the [MIT License](LICENSE). Upstream dependencies retain their respective licenses.
