@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { Err, Result } from "../../domain/result.ts";
 import { nowInstant } from "../../domain/identity.ts";
 import { KNOWN_MIGRATION_IDS, MIGRATIONS, SCHEMA_VERSION } from "./migrations.ts";
+import type { Migration } from "./migrations.ts";
 
 // DESIGN §2/§6 (D06): exactly one worker owns the SQLite write connection and
 // holds a process-level exclusive lock over the data directory. A second worker
@@ -25,6 +26,12 @@ export type StorageErrorCode =
   | "MIGRATION_UNKNOWN"
   | "MIGRATION_FAILED"
   | "BACKUP_FAILED"
+  // The two halves of a backup did not agree, or the snapshot cannot be opened at all
+  // (D23 / A12: a manifest that names a missing artifact is not restorable).
+  | "BACKUP_INCOMPLETE"
+  | "BACKUP_UNVERIFIABLE"
+  // This build refuses to restore a database it does not understand (D23).
+  | "RESTORE_SCHEMA_INCOMPATIBLE"
   | "SQLITE_FAILURE";
 
 export type StorageError = { code: StorageErrorCode; message: string };
@@ -153,12 +160,15 @@ export function planMigrations(db: DatabaseSync): Result<MigrationPlan, StorageE
 export function applyMigrations(
   db: DatabaseSync,
   plan: MigrationPlan,
+  // Injectable so a test can hand the runner a migration that violates the schema and see
+  // whether the pre-commit integrity check catches it. Nothing outside a test passes this.
+  steps: readonly Migration[] = MIGRATIONS,
 ): Result<readonly string[], StorageError> {
   const insert = db.prepare(
     `INSERT INTO ${MIGRATION_TABLE} (id, sql_sha256, applied_at) VALUES (?, ?, ?)`,
   );
   const done: string[] = [];
-  for (const migration of MIGRATIONS) {
+  for (const migration of steps) {
     if (!plan.pending.includes(migration.id)) continue;
     // A rebuild needs enforcement off *before* the transaction opens, because SQLite
     // ignores a pragma issued inside one. The transaction still wraps the whole rebuild,

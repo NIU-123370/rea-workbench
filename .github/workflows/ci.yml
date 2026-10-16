@@ -25,5 +25,27 @@ jobs:
           test "$(node -v)" = "v24.18.0" || { echo "node must be 24.18.0"; exit 1; }
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run lint
       - run: npm run test:unit
       - run: npm run test:integration
+      # The release matrix has to reconcile before anything is called a candidate (T16's
+      # document half / A01-A13). A hole here is a build failure, not a warning.
+      - name: docs:check (T01-T17 vs A01-A13)
+        run: npm run docs:check
+      # T17 on this host: linux x64 is A13's gate host, but no browser lane runs here, so
+      # the record is advisory and the job does not fail on it. The harness itself reports
+      # gateHostSatisfied=false until a browser lane exists.
+      - name: T17 measurement record (advisory)
+        run: |
+          mkdir -p .perf
+          npm run perf:t17 --silent | sed -n 's/^record: //p' > .perf/t17.json
+          node -e "const r=require('./.perf/t17.json');console.log(JSON.stringify({p50:r.p50Ms,p95:r.p95Ms,max:r.maxMs,samples:r.samplesMs.length,host:r.host.platform+'/'+r.host.arch,gateHostSatisfied:r.gateHostSatisfied}))"
+          test -s .perf/t17.json
+        continue-on-error: true
+      - name: upload T17 record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t17-record
+          path: workbench/.perf/t17.json
+          if-no-files-found: ignore
