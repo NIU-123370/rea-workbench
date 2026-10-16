@@ -7,7 +7,7 @@ import { asId, asInstant } from "../../domain/identity.ts";
 import type { JsonValue } from "../../domain/json-value.ts";
 import type { Result } from "../../domain/result.ts";
 import { TransactionRefused } from "../../application/decision.ts";
-import type { CleanupState } from "../../contracts/jobs.ts";
+import type { CleanupState, JobState } from "../../contracts/jobs.ts";
 import type {
   ArtifactRow,
   AuditRow,
@@ -209,6 +209,38 @@ class SqliteTransaction implements StorageTransaction {
         row.projectId,
         row.id,
       );
+  }
+
+  listJobsByStates(states: readonly JobState[], limit: number): JobRow[] {
+    if (states.length === 0) return [];
+    const placeholders = states.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(`SELECT * FROM jobs WHERE state IN (${placeholders}) ORDER BY created_at ASC LIMIT ?`)
+      .all(...states, limit) as Row[];
+    return rows.map((row) => this.rowToJob(row));
+  }
+
+  listOpenLeases(states: readonly CleanupState[], limit: number): LeaseRow[] {
+    if (states.length === 0) return [];
+    const placeholders = states.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT leases.* FROM resource_leases leases
+         JOIN jobs ON jobs.id = leases.job_id
+         WHERE leases.cleanup_state IN (${placeholders}) ORDER BY leases.id ASC LIMIT ?`,
+      )
+      .all(...states, limit) as Row[];
+    return rows.map((row) => ({
+      id: asId(String(row["id"])),
+      jobId: asId(String(row["job_id"])),
+      kind: String(row["kind"]),
+      resourceIdentityJson: parseJson(String(row["resource_identity_json"])),
+      ownershipProofJson: parseJson(String(row["ownership_proof_json"])),
+      cleanupState: String(row["cleanup_state"]) as CleanupState,
+      lastErrorJson: parseJson(row["last_error_json"] === null ? null : String(row["last_error_json"])),
+      retryAt: row["retry_at"] === null ? null : asInstant(String(row["retry_at"])),
+      retryCount: Number(row["retry_count"]),
+    }));
   }
 
   findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null {

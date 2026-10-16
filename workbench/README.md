@@ -34,7 +34,8 @@ npm ci
 
 ## 还没有的东西
 
-`npm run doctor` / `db:migrate` / `dev` 是设计文档承诺的命令，**目前尚未实现**，
-所以 `package.json` 里没有这三个脚本：worker 装配（`apps/worker`）、HTTP API 与
-会话配对（`apps/web`）、`.env.example`、以及 Docker 沙箱与宿主 broker 都还在
-issue #16 之后的队列里。本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
+`npm run worker` 与 `npm run doctor` 现在存在：前者装配 worker（解析 `WB_*`、拿写
+锁、跑迁移、开本机 RPC），后者只报告不改宿主。`db:migrate` 与 `dev` 仍未实现——
+迁移由 worker 启动时执行（没有独立的迁移命令），HTTP API 与
+会话配对（`apps/web`，issue #17）、`.env.example`、以及 Docker 沙箱与宿主 broker
+（issue #21）都还在队列里。本机没有 Docker 时，隔离类门禁一律不可声明为已通过。

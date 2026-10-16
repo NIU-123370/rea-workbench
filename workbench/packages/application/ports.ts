@@ -259,6 +259,10 @@ export type StorageTransaction = {
   insertJob(row: JobRow): JobIdempotency;
   updateJob(row: JobRow): void;
   getJob(projectId: Id, jobId: Id): JobRow | null;
+  // Worker-wide recovery scans: a restart does not know which project it lost a
+  // job in, so these are deliberately not project-filtered (§11).
+  listJobsByStates(states: readonly JobState[], limit: number): JobRow[];
+  listOpenLeases(states: readonly CleanupState[], limit: number): LeaseRow[];
   findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null;
   insertArtifact(row: ArtifactRow): void;
   getArtifact(projectId: Id, artifactId: Id): ArtifactRow | null;
