@@ -45,6 +45,7 @@ import { ExportService } from "../../packages/application/export-service.ts";
 import { GraphReadService } from "../../packages/application/graph-read.ts";
 import { CandidateReadService } from "../../packages/application/candidate-read.ts";
 import { JobReadService } from "../../packages/application/job-read.ts";
+import { AuditReadService } from "../../packages/application/audit-read.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
 
@@ -60,6 +61,7 @@ import { candidateGenerateRequestSchema } from "../../packages/contracts/candida
 import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
 import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
 import { jobListRequestSchema } from "../../packages/contracts/jobs.ts";
+import { auditListRequestSchema } from "../../packages/contracts/audit.ts";
 import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../packages/contracts/candidate.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
@@ -103,6 +105,10 @@ export const COMMAND_NAMES = [
   // The project's job page (§8 line 277): the documented way to recover a build or
   // verification resource id, because each row carries its persisted resultRef.
   "jobs.list",
+  // The two audit windows (§8 lines 302-303). They are separate names because the rows they
+  // read are separate: one project's decisions, and the entries that belong to no project.
+  "audit.list",
+  "audit.listGlobal",
   "evidence.get",
   "vector.create",
   "vector.read",
@@ -152,6 +158,7 @@ const PROJECTLESS_COMMANDS: readonly string[] = [
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
+  "audit.listGlobal",
   "session.pair",
   "session.read",
   "session.revoke",
@@ -447,6 +454,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const graph = new GraphReadService({ storage: writer });
   const candidateRead = new CandidateReadService({ storage: writer, artifacts: store });
   const jobRead = new JobReadService({ storage: writer });
+  const auditRead = new AuditReadService({ storage: writer });
   const exports_ = new ExportService({
     storage: writer,
     artifacts: store,
@@ -574,6 +582,20 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
           limit: parsed.data.limit,
         }),
       );
+    },
+    "audit.list": (payload, actor) => {
+      const parsed = auditListRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "audit-list", "the audit page request was rejected");
+      return relay(auditRead.listProject(projectIdOr(payload), actor, { after: parsed.data.after ?? null, limit: parsed.data.limit }));
+    },
+    "audit.listGlobal": (payload, actor) => {
+      const parsed = auditListRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "audit-list", "the audit page request was rejected");
+      // No project id is accepted here at all: the strict request shape has none, and the
+      // rows this reads are the ones whose `project_id` is NULL (§8 line 303). A caller that
+      // wanted another project's journal has to use the project-scoped route and be judged
+      // against that project.
+      return relay(auditRead.listGlobal(actor, { after: parsed.data.after ?? null, limit: parsed.data.limit }));
     },
     "evidence.get": async (payload) => {
       const projectId = pickId(payload, "projectId");

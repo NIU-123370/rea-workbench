@@ -16,6 +16,7 @@ import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
+import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
@@ -1427,5 +1428,161 @@ describe("the §8 read routes (issue #58)", () => {
     const plan = await get(`${API_PREFIX}/projects/${other}/verification-plans/${newId()}`, session.cookie);
     expect(plan.status, plan.text).toBe(404);
     expect(plan.text).toContain("plan-unknown");
+  });
+});
+
+// The two audit windows over HTTP (§8 lines 302-303 / issue #58).
+//
+// The journal this reads is the one the suite itself wrote: every pairing above journaled a
+// `session.pair`, and every project creation journaled a project row. That is the point of
+// doing it here rather than with fixtures - the split between "this project's decisions" and
+// "the entries that belong to no project" is checked against rows neither test authored.
+
+describe("the audit routes (§8 lines 302-303)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: body.data?.csrfToken ?? body.csrfToken ?? "",
+    };
+  }
+
+  async function freshProject(session: { cookie: string; csrf: string }, name: string): Promise<string> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: `127.0.0.1:${String(address.port)}`,
+        origin: `http://127.0.0.1:${String(address.port)}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `audit-route-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return (body.data?.id ?? body.id) as string;
+  }
+
+  function get(pathname: string, cookie: string) {
+    return call("GET", pathname, { headers: { host: `127.0.0.1:${String(address.port)}`, cookie } });
+  }
+
+  // Rows written straight through the worker's own connection. This suite is about the two
+  // windows' selectors and the cursor, not about who journalled what - and §12.2's list of
+  // journalled actions does not include creating a project, so a fresh project's window is
+  // legitimately empty. Asserting against an empty page would certify any selector at all.
+  function seedProjectAudit(projectId: string, count: number): number[] {
+    const seqs: number[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const written = worker.writeConnection.transact((tx) =>
+        tx.insertAudit({
+          projectId: projectId as Id,
+          actorId: "local-reviewer",
+          actorKind: "reviewer",
+          action: "vector.review",
+          resourceType: "vector",
+          resourceId: String(newId()),
+          decision: index % 2 === 0 ? "allow" : "deny",
+          reasonCode: index % 2 === 0 ? "vector-approved" : "vector-rejected",
+          safeMetadataJson: { attempt: index },
+          createdAt: nowInstant(),
+        }),
+      );
+      if (!written.ok) throw new Error(JSON.stringify(written.error));
+      seqs.push(written.value);
+    }
+    return seqs;
+  }
+
+  it("holds both windows behind a session and does not invent neighbours", async () => {
+    const anonymousGlobal = await call("GET", `${API_PREFIX}/audit`);
+    expect(anonymousGlobal.status).toBe(401);
+    const anonymousScoped = await call("GET", `${API_PREFIX}/projects/${newId()}/audit`);
+    expect(anonymousScoped.status).toBe(401);
+    const session = await pairSession();
+    const neighbour = await get(`${API_PREFIX}/audit/entries`, session.cookie);
+    expect(neighbour.status, neighbour.text).toBe(404);
+    expect(neighbour.text).toContain("route-unknown");
+  });
+
+  it("keeps the unrooted journal to the rows that belong to no project", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "audit-global-window");
+    const global = await get(`${API_PREFIX}/audit?limit=500`, session.cookie);
+    expect(global.status, global.text).toBe(200);
+    const parsed = auditPageSchema.safeParse(JSON.parse(global.text) as JsonValue);
+    if (!parsed.success) throw new Error(`the unrooted window refused its own schema: ${global.text}`);
+    expect(parsed.data.entries.every((entry) => entry.projectId === null)).toBe(true);
+    // Pairing is what this suite did to get here, and §12.2 lists it among the project-less
+    // entries. An empty journal would mean the window reads a different table than the writes.
+    expect(parsed.data.entries.some((entry) => entry.action === "session.pair")).toBe(true);
+    const seeded = seedProjectAudit(projectId, 3);
+    const scoped = await get(`${API_PREFIX}/projects/${projectId}/audit?limit=500`, session.cookie);
+    expect(scoped.status, scoped.text).toBe(200);
+    const own = auditPageSchema.safeParse(JSON.parse(scoped.text) as JsonValue);
+    if (!own.success) throw new Error(scoped.text);
+    expect(own.data.entries.length).toBeGreaterThanOrEqual(3);
+    expect(own.data.entries.every((entry) => entry.projectId === projectId)).toBe(true);
+    expect(own.data.entries.map((entry) => entry.seq)).toEqual(expect.arrayContaining(seeded));
+    const globalSeqs = new Set(parsed.data.entries.map((entry) => entry.seq));
+    expect(own.data.entries.filter((entry) => globalSeqs.has(entry.seq))).toEqual([]);
+  });
+
+  it("refuses a query it cannot read as a number, and accepts the one value that looks like a typo", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "audit-bad-query");
+    for (const bad of ["abc", "-1", "1.5", ""]) {
+      const after = await get(`${API_PREFIX}/projects/${projectId}/audit?after=${encodeURIComponent(bad)}`, session.cookie);
+      expect(`after=${bad}:${String(after.status)}`).toContain("400");
+      expect(after.text).toContain("audit-after-malformed");
+      const limit = await get(`${API_PREFIX}/projects/${projectId}/audit?limit=${encodeURIComponent(bad)}`, session.cookie);
+      expect(`limit=${bad}:${String(limit.status)}`).toContain("400");
+      expect(limit.text).toContain("audit-limit-malformed");
+    }
+    // `after=0` is the beginning of the journal, not a missing value: the edge test above has
+    // to refuse text without swallowing the legal zero, or a page could never ask from start.
+    const zero = await get(`${API_PREFIX}/projects/${projectId}/audit?after=0`, session.cookie);
+    expect(zero.status, zero.text).toBe(200);
+  });
+
+  it("refuses a page past the bound instead of serving a quieter smaller one", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "audit-over-bound");
+    const over = await get(`${API_PREFIX}/projects/${projectId}/audit?limit=${String(AUDIT_LIST_MAX_LIMIT + 1)}`, session.cookie);
+    expect(over.status, over.text).toBe(413);
+    expect(over.text).toContain("audit-limit");
+  });
+
+  it("follows the integer cursor to the end of the journal through HTTP without repeating a seq", async () => {
+    const session = await pairSession();
+    await freshProject(session, "audit-cursor-a");
+    await freshProject(session, "audit-cursor-b");
+    const projectId = (await freshProject(session, "audit-cursor-c")) as Id;
+    seedProjectAudit(projectId, 5);
+    const seen: number[] = [];
+    let after: number | null = 0;
+    for (let pages = 0; pages < 200; pages += 1) {
+      const page = await get(`${API_PREFIX}/projects/${projectId}/audit?limit=2&after=${String(after ?? 0)}`, session.cookie);
+      expect(page.status, page.text).toBe(200);
+      const parsed = auditPageSchema.safeParse(JSON.parse(page.text) as JsonValue);
+      if (!parsed.success) throw new Error(page.text);
+      seen.push(...parsed.data.entries.map((entry) => entry.seq));
+      if (parsed.data.nextCursor === null) break;
+      after = parsed.data.nextCursor;
+    }
+    // More than one page, or "I followed the cursor" is a sentence about one request.
+    expect(seen.length).toBeGreaterThan(2);
+    expect(new Set(seen).size).toBe(seen.length);
+    const whole = await get(`${API_PREFIX}/projects/${projectId}/audit`, session.cookie);
+    const all = auditPageSchema.safeParse(JSON.parse(whole.text) as JsonValue);
+    if (!all.success) throw new Error(whole.text);
+    expect(seen.sort((left, right) => left - right)).toEqual(all.data.entries.map((entry) => entry.seq).sort((left, right) => left - right));
   });
 });
