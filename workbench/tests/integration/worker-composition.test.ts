@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { asId, newId } from "../../packages/domain/identity.ts";
-import type { Id, } from "../../packages/domain/identity.ts";
+import type { Id, Instant } from "../../packages/domain/identity.ts";
+import type { Digest } from "../../packages/domain/canonical-json.ts";
+import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
+import { seedBlueprintForGeneration } from "../support/blueprint-seed.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { bootWorker, COMMAND_NAMES } from "../../apps/worker/composition.ts";
 import { parseFrame, startWorkerRpc } from "../../apps/worker/rpc-server.ts";
@@ -22,6 +25,36 @@ import type { Result } from "../../packages/domain/result.ts";
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const inspector: Actor = { actorId: "local-operator", actorKind: "inspector" };
 const builder: Actor = { actorId: "builder-agent", actorKind: "builder" };
+
+// The worker's whole command surface, written out here so a reviewer sees a new name
+// as an edit to a boundary rather than as a line in a handler table (DESIGN §14).
+const EXPECTED_COMMANDS: readonly string[] = [
+  "project.create",
+  "project.get",
+  "capture.importHar",
+  "job.get",
+  "evidence.get",
+  "vector.create",
+  "vector.read",
+  "vector.list",
+  "vector.review",
+  "contract.create",
+  "contract.review",
+  "plan.build",
+  "plan.review",
+  "plan.read",
+  "blueprint.freeze",
+  "blueprint.handoff",
+  "blueprint.manifest",
+  "candidate.generate",
+  "health.effectiveProfiles",
+  "doctor.run",
+  "jobs.recover",
+  "session.pair",
+  "session.read",
+  "session.revoke",
+  "events.after",
+];
 
 let dataDir: string;
 let packageRoot: string;
@@ -167,6 +200,9 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
 describe("named commands and the local RPC (§14)", () => {
   it("exposes only the registered commands", async () => {
     expect(worker.commands).toEqual([...COMMAND_NAMES]);
+    // §14 makes the command table a boundary: a new name has to be written down here
+    // as well, so a handler cannot become reachable without a reviewer noticing.
+    expect([...COMMAND_NAMES].sort()).toEqual([...EXPECTED_COMMANDS].sort());
     const unknown = await request("sql.exec", { statement: "SELECT 1" }, inspector);
     expect(unknown.ok).toBe(false);
     if (!unknown.ok) expect(unknown.error.reason).toBe("unknown-command");
@@ -243,6 +279,111 @@ describe("named commands and the local RPC (§14)", () => {
     expect(lease.value.cleanupState).toBe("pending");
   });
 
+  it("keeps the Builder's generation command reachable and its request shape closed (§7.3)", async () => {
+    const created = unwrap(await request("project.create", { name: "build-1" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const dto = { blueprintId: newId(), jobId: newId(), budget: { maxAttemptsPerBlueprint: 2, deadlineAt: null }, generator: { model: "test-agent" } };
+    const base = { projectId, request: dto };
+
+    // A request that also names a vector — the one thing that would turn the Builder
+    // into a holdout reader — is refused by the schema, not filtered by the handler.
+    const leaky = await request("candidate.generate", { projectId, request: { ...dto, vectorId: "holdout-7" } }, builder);
+    expect(leaky.ok).toBe(false);
+    if (leaky.ok) return;
+    expect(leaky.error.reason).toBe("candidate-generate");
+
+    const noBudget = await request("candidate.generate", { projectId, request: { blueprintId: dto.blueprintId, jobId: dto.jobId, generator: {} } }, builder);
+    expect(noBudget.ok).toBe(false);
+    if (noBudget.ok) return;
+    expect(noBudget.error.reason).toBe("candidate-generate");
+
+    // Another actor kind reaching the same command is refused by the service before it
+    // reads a blueprint, and the refusal is the actor rule rather than a lookup miss.
+    const wrongActor = await request("candidate.generate", base, inspector);
+    expect(wrongActor.ok).toBe(false);
+    if (wrongActor.ok) return;
+    expect(wrongActor.error.code).toBe("ACCESS_DENIED");
+    expect(wrongActor.error.reason).toBe("only-the-builder-generates");
+
+    // The Builder itself gets as far as the lookup, and a blueprint that is not there
+    // stays a lookup miss rather than an invented candidate.
+    const unknown = await request("candidate.generate", base, builder);
+    expect(unknown.ok).toBe(false);
+    if (unknown.ok) return;
+    expect(unknown.error.code).toBe("NOT_FOUND");
+    expect(unknown.error.reason).toBe("blueprint-unreadable");
+  });
+
+  it("carries a builder frame for generation through the local RPC", async () => {
+    const started = await startWorkerRpc(worker);
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const created = unwrap(await request("project.create", { name: "build-2" }, inspector)) as { id: string };
+    const replies = await roundTrip(started.value.socketPath, [
+      {
+        id: 7,
+        command: "candidate.generate",
+        payload: { projectId: created.id, request: { blueprintId: newId(), jobId: newId(), budget: { maxAttemptsPerBlueprint: 1, deadlineAt: null }, generator: {} } },
+        actor: { actorId: "builder-agent", actorKind: "builder" },
+      },
+    ]);
+    await started.value.close();
+    // The frame is accepted (the actor kind is a legal RPC actor) and the refusal that
+    // comes back is the service's own, with a named code rather than a transport error.
+    expect(replies[0]?.["ok"]).toBe(false);
+    const error = replies[0]?.["error"] as { reason?: string } | undefined;
+    expect(error?.reason).toBe("blueprint-unreadable");
+  });
+
+  it("forwards the request's own budget and deadline to the Builder (§10)", async () => {
+    const created = unwrap(await request("project.create", { name: "build-3" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const { targetId, jobId } = workerInsertBuildJob(projectId);
+    const store = new ArtifactStore(dataDir);
+    const seeded = await seedBlueprintForGeneration({
+      writer: worker.writeConnection,
+      store,
+      projectId,
+      targetId,
+      name: "through-the-wire",
+    });
+    const generate = (budget: JsonValue) =>
+      request("candidate.generate", { projectId, request: { blueprintId: seeded.blueprintId, jobId, budget, generator: { model: "test-agent" } } }, builder);
+
+    // Two attempts commit under a wire budget of two, and the third is the refusal. A
+    // handler that forwarded a fixed count instead of the requested one breaks here.
+    const first = await generate({ maxAttemptsPerBlueprint: 2, deadlineAt: null });
+    expect(first.ok).toBe(true);
+    const second = await generate({ maxAttemptsPerBlueprint: 2, deadlineAt: null });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect((second.value as { attempt: number }).attempt).toBe(2);
+    const third = await generate({ maxAttemptsPerBlueprint: 2, deadlineAt: null });
+    expect(third.ok).toBe(false);
+    if (third.ok) return;
+    expect(third.error.reason).toBe("generation-budget-exhausted");
+
+    // A past deadline travels the same field and is honoured rather than dropped: this
+    // blueprint has its full budget left, so only the deadline can be what stops it.
+    const fresh = await seedBlueprintForGeneration({
+      writer: worker.writeConnection,
+      store,
+      projectId,
+      targetId,
+      name: "past-deadline",
+    });
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const refused = await request(
+      "candidate.generate",
+      { projectId, request: { blueprintId: fresh.blueprintId, jobId, budget: { maxAttemptsPerBlueprint: 5, deadlineAt: past }, generator: {} } },
+      builder,
+    );
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.code).toBe("RESOURCE_LIMIT");
+    expect(refused.error.reason).toBe("generation-deadline-passed");
+  });
+
   it("reads configuration only from the declared names and the installed package", () => {
     const composition = readFileSync(path.join(ROOT, "apps/worker/composition.ts"), "utf8");
     const main = readFileSync(path.join(ROOT, "apps/worker/main.ts"), "utf8");
@@ -306,6 +447,47 @@ async function roundTrip(socketPath: string, frames: Record<string, unknown>[]):
   ]);
   socket.destroy();
   return replies;
+}
+
+function workerInsertBuildJob(projectId: Id): { targetId: Id; jobId: Id } {
+  // A `build` job is what a candidate row hangs from (§11). It is written through the
+  // worker's own connection because no command creates one without the state machine.
+  const targetId = newId();
+  const jobId = newId();
+  const created = new Date().toISOString() as Instant;
+  const outcome = worker.writeConnection.transact((tx) => {
+    tx.insertTarget({
+      id: targetId,
+      projectId,
+      kind: "asar",
+      originalLocator: null,
+      sourceSha256: null,
+      sourceArtifactId: null,
+      snapshotDigest: null,
+      identityReason: "seeded-for-generation",
+      createdAt: created,
+    });
+    tx.insertJob({
+      id: jobId,
+      projectId,
+      targetId,
+      kind: "build",
+      state: "running",
+      cleanupState: "pending",
+      inputJson: {},
+      resultRef: null,
+      errorJson: null,
+      idempotencyKey: `build-${jobId}`,
+      requestDigest: ("e".repeat(64)) as Digest,
+      deadlineAt: null,
+      retryAt: null,
+      createdAt: created,
+      updatedAt: created,
+    });
+    return true;
+  });
+  if (!outcome.ok) throw new Error(JSON.stringify(outcome.error));
+  return { targetId, jobId };
 }
 
 let RECOVERY_JOB_ID: Id = newId();

@@ -8,6 +8,7 @@ import * as blueprint from "../../packages/domain/blueprint.ts";
 import * as contract from "../../packages/domain/contract.ts";
 import * as evidence from "../../packages/domain/evidence.ts";
 import * as identity from "../../packages/domain/identity.ts";
+import * as openApi from "../../packages/domain/openapi.ts";
 import * as plan from "../../packages/domain/plan.ts";
 import * as inventory from "../../packages/domain/inventory.ts";
 import * as jsonValue from "../../packages/domain/json-value.ts";
@@ -29,6 +30,7 @@ const MODULES: Record<string, unknown> = {
   "contract.ts": contract,
   "evidence.ts": evidence,
   "identity.ts": identity,
+  "openapi.ts": openApi,
   "plan.ts": plan,
   "inventory.ts": inventory,
   "json-value.ts": jsonValue,
@@ -89,6 +91,11 @@ const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["vector.ts", "isCanonicalBase64"],
   ["vector.ts", "sameSourceCoordinates"],
   ["vector.ts", "draftReview"],
+  ["openapi.ts", "generationDefects"],
+  ["openapi.ts", "buildTargetOpenApi"],
+  ["openapi.ts", "openApiDigest"],
+  ["openapi.ts", "candidateManifest"],
+  ["openapi.ts", "adapterSource"],
 ];
 
 function domainFiles(): string[] {
