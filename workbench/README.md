@@ -105,6 +105,20 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   子进程与 zod；对账用例同时断言这四类越界依旧报红。
 
 
+三栏 UI（PRD F04 / DESIGN §6 / issue #18）现在的真实状态：
+
+- 中栏的 SEEN / INFERRED / UNKNOWN **不重算**，全部走 `packages/domain/evidence.ts` 这个唯一
+  owner；边只看自己那条 claim，节点颜色不会外溢（用例与变异都钉了这条）。
+- 每个状态同时给图标、文字与缺口列表，颜色只是加强；列表视图渲染的是同一批 cell，
+  所以换视图不会把"未知"洗成"看起来没事"。
+- 未知项生成的是**定向调查草稿**：reason 词表映射到唯一那一种可能改变它的下一步；
+  词表里没有的 reason 会被如实标成 `reasons-unmapped`，不编一个步骤。
+- 右栏"代码"Tab 对 Builder 永久禁用（`builder-may-not-read-source`），"报告"要有已冻结蓝图；
+  中栏只带 Evidence **引用**，正文走各自的鉴权读取。
+- 画布目前是静态布局，不是 React Flow；`apps/web` 也没有 Next.js 页面外壳。两处都写在
+  代码注释里，不留"看起来像实现了"的错觉。因此**没有任何一条浏览器验证做过**：
+  平移/缩放、Tab 焦点、点击跳转的实际交互未测，能测的部分用 `react-dom/server` 静态渲染测。
+
 ## 还没有的东西
 
 `npm run worker` 与 `npm run doctor` 现在存在：前者装配 worker（解析 `WB_*`、拿写
