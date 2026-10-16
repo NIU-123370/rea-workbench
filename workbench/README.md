@@ -63,11 +63,19 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   装严格；`/api/cart/42` 不做模板泛化；`x-rea-error-cases` / `x-rea-limitations` /
   `x-rea-unknowns` 一并带着，不丢。适配器按评审的 method 与 path 建路由表，base URL 走
   `context` 参数而不是模块级状态。
+- 候选字节现在有一条**具名读取路径**（§8 lines 295-296）：`GET /projects/:p/candidates/:c`
+  列出这个候选发布过哪些文件（id 来自受校验 manifest、path 仅显示、字节数与语言取自 artifact 行），
+  `GET .../files/:f` 取一个文件的内容并**当场重算摘要**——哈希与 manifest 承诺的不一致就拒绝，
+  而不是把换过的字节显示出去。选择器只有 manifest file id：`Id` 是带品牌的 opaque UUID，
+  路径形状的字符串连构造都构造不出来，`storage_key` 也不在任何回包里（§5 要求它仅服务端可见）。
+  超过内文联调限额（`CANDIDATE_BODY_LIMIT_BYTES`）的文件是**具名拒绝**并带上大小与限额，不做截断。
 - **未验证 / 未实现的部分**：生成的 `adapter.ts` 从未被执行，`openapi.json` 也没喂给任何
   第三方 OpenAPI 校验器（本机不装依赖）——两条都只由本仓的单测断言其内容与摘要，「SDK
-  真的能调用成功」不属于已证事实。另外 Builder 目前是 worker 命令表里的一个具名命令与
-  一种 actor，还没有独立进程与自己的落地文件视图（issue #19 的第一条完成条件），候选字节
-  仍只存在 worker 的 artifact store 里。
+  真的能调用成功」不属于已证事实。Builder 仍然是 worker 命令表里的一个具名命令与一种 actor，
+  没有独立进程与自己的落地文件视图（issue #19 的第一条完成条件）。
+  另外这条读取路径**还不能被页面自己走通**：§8 没有「列出某项目的候选」这条路由，
+  所以 UI 无法从一个 candidate id 之外的入口发现候选——三栏的「代码」Tab 因此仍是具名空态。
+  我没有为了补 UI 去发明一条 §8 之外的路由（命令表是边界），这条缺口记在 issue #19。
 
 导出与 verified-samples（F11 / issue #22）的边界：
 
