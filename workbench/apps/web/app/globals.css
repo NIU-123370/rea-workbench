@@ -1,0 +1,180 @@
+/* The shell's own stylesheet (issue #18 / PRD F04).
+ *
+ * Two rules here are load-bearing rather than decorative:
+ *   * `[data-layout="three-column"]` is what makes the middle column a column. Without it
+ *     the three panels stack, and "三栏" would only be true of the DOM.
+ *   * the flow container needs an explicit box: React Flow warns and draws no edges when
+ *     its parent has no measured width, which is exactly how a canvas with two relations
+ *     rendered zero of them.
+ *
+ * Colour never carries meaning on its own: every status also prints an icon and a word
+ * from the view model, so this file only paints what is already said.
+ */
+
+:root {
+  color-scheme: light;
+  --ink: #1c1c1e;
+  --line: #d5d5d9;
+  --positive: #1c6b3f;
+  --caution: #8a5a00;
+  --negative: #8f1d22;
+  --surface: #f7f7f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+header {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+[data-layout="three-column"] {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(200px, 260px);
+  gap: 16px;
+  padding: 16px;
+  align-items: start;
+}
+
+[data-panel="left"],
+[data-panel="middle"],
+[data-panel="right"] {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  background: #fff;
+  min-width: 0;
+}
+
+[data-panel="left"] dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 8px 0;
+}
+
+[data-panel="left"] dt {
+  color: #55555c;
+}
+
+[data-panel="left"] dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.status {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-positive {
+  color: var(--positive);
+}
+
+.status-caution {
+  color: var(--caution);
+}
+
+.status-negative {
+  color: var(--negative);
+}
+
+button {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+button[role="tab"][aria-selected="true"] {
+  background: #1c1c1e;
+  color: #fff;
+}
+
+button:disabled {
+  color: #86868b;
+  cursor: not-allowed;
+}
+
+[role="tablist"] {
+  display: flex;
+  gap: 8px;
+}
+
+/* The canvas needs a measured box of its own: React Flow warns and draws no edges when
+   its parent has no width, so a canvas with two relations can render zero of them. */
+[data-panel="flow-canvas"] {
+  width: 100%;
+  min-width: 320px;
+  height: 420px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.react-flow {
+  width: 100%;
+  height: 100%;
+}
+
+.react-flow__node {
+  background: var(--surface);
+}
+
+[aria-label="定向调查队列"],
+[data-tabpanel] {
+  margin: 12px 0 0;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+}
+
+[aria-label="定向调查队列"] ul,
+[data-tabpanel] ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
+form[data-panel="pairing"] {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 12px;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}

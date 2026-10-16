@@ -185,16 +185,42 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   词表里没有的 reason 会被如实标成 `reasons-unmapped`，不编一个步骤。
 - 右栏"代码"Tab 对 Builder 永久禁用（`builder-may-not-read-source`），"报告"要有已冻结蓝图；
   中栏只带 Evidence **引用**，正文走各自的鉴权读取。
-- 画布目前是静态布局，不是 React Flow；`apps/web` 也没有 Next.js 页面外壳。两处都写在
-  代码注释里，不留"看起来像实现了"的错觉。因此**没有任何一条浏览器验证做过**：
-  平移/缩放、Tab 焦点、点击跳转的实际交互未测，能测的部分用 `react-dom/server` 静态渲染测。
+- 中栏读的是 `GET /api/v1/projects/:projectId/graph`（§8 封闭命令表里新增的具名命令
+  `graph.read`）：回来的只有行里存的 basis / validity / coverage / sourceEvidenceIds，
+  没有任何"颜色"或"状态"字段，三色判定仍然只有 `projectClaim` 一个 owner。
+- 画布是真的 React Flow，并且被 `tests/unit/architecture.test.ts` 的 `clientOnly` 规则关在
+  `"use client"` 岛屿里：`apps/web` 的服务器半边（路由、`main.ts`）一旦 import 它就报红，
+  把作用域放宽到整模块、把禁令删掉、把岛屿真正 import 进路由半边，三种变异都会红。
+- 列表行同时带图标、文字与 `status-positive|caution|negative` 颜色类，并且"来源 N"与
+  "创建定向调查"两个按钮就在行上——跳转与发起不依赖画布存在。
+- "代码"Tab 对复核者是启用的，但只输出一句具名空态：§8 还没有读取候选文件内容的命令，
+  所以 Monaco 依赖被**删掉**而不是挂着不用（issue #19 的另一半补上时再一起回来）。
+
+浏览器实测（2026-10-16，真 Chrome 1440×832；worker、`npm run web`、`next dev` 三个真进程）：
+
+- 终端签出的配对码在页面里换到会话（`会话：paired`），图读出 3 节点 / 2 边；
+- React Flow 画出 3 个节点与 2 条带 `yields` / `precedes` 标签的边；缩放控件把 viewport 从
+  `scale(2)` 改到 `scale(1.66667)` 再回到 `scale(2)`（停在默认 maxZoom=2，不是失灵）；
+- "来源 1"与"创建定向调查"各生成一条队列项，kind 分别是 `read-evidence` 与 `capture-new`；
+- 右栏 Tab 切换会换 body：契约给 assertion＋修订＋basis/validity，报告给三种 coverage 计数，
+  代码给具名空态；三栏几何为 left 280@x=16、middle 821@x=312、right 260@x=1149，画布在 middle 内；
+- **仍未测**：鼠标拖拽平移（只按了控件）、键盘焦点顺序与读屏朗读、`next build` 产物路径
+  （本次走的是 `next dev`），以及真 REA provider 导入之后的图。
 
 ## 还没有的东西
 
-`npm run worker` 与 `npm run doctor` 现在存在：前者装配 worker（解析 `WB_*`、拿写
-锁、跑迁移、开本机 RPC），后者只报告不改宿主。本机的 `http://127.0.0.1:4310` 已经是真的：`apps/web` 起 loopback `node:http`，配对码只能由本地启动命令签出，浏览器用 `POST /api/v1/session` 换 HttpOnly SameSite=Strict cookie + csrfToken + reviewerId，变更请求要 `X-CSRF-Token` 与精确 Host/Origin，SSE 按 worker 已提交的 seq 投递。`db:migrate` 与 `dev` 仍未实现——
-迁移由 worker 启动时执行（没有独立的迁移命令），HTTP API 与
-会话配对（`apps/web`，issue #17）与 `.env.example` 都还在队列里；宿主 broker 的契约与控制面门禁已落地（issue #21，见下），但 `apps/broker` 进程本体仍未实现。本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
+`npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
+自己（解析 `WB_*`、拿写锁、跑迁移、开本机 RPC，并把配对码只打在终端）；`npm run web` 是
+API 进程本体（DESIGN §14 给 web 的只有 `WB_HOST`/`WB_PORT`/`WB_DATA_DIR` 三个字段，它不碰文件
+系统、不 mint 会话，每个请求都走 worker 的私有 RPC socket）；`ui:dev` 起 Next 页面外壳，浏览
+器只跟同源页面说话，`/api/v1/**` 由 `apps/web/app/lib/relay.ts` 转发到本机 API。
+`http://127.0.0.1:4310` 上是真的：`POST /api/v1/session` 换 HttpOnly SameSite=Strict cookie +
+csrfToken + reviewerId，变更请求要 `X-CSRF-Token` 与精确 Host/Origin，SSE 按 worker 已提交的
+seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/web-proxy-route.test.ts` 用一个
+只发一帧就不说话的流把这条钉住）。`db:migrate` 与 `dev` 仍未实现——迁移由 worker 启动时执行
+（没有独立的迁移命令），`.env.example` 还在队列里；宿主 broker 的契约与控制面门禁已落地
+（issue #21，见下），但 `apps/broker` 进程本体仍未实现。本机没有 Docker 时，隔离类门禁一律
+不可声明为已通过。
 
 明确**未实现 / 未验证**的范围：
 

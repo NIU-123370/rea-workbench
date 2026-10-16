@@ -8,6 +8,7 @@ import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidenc
 import {
   buildLeftPanel,
   buildMiddlePanel,
+  canvasEdges,
   buildRightTabs,
   directedInquiry,
   listView,
@@ -186,6 +187,24 @@ describe("the side columns (§6, §7.3)", () => {
     expect(panel.cleanupState).toBe("complete");
   });
 
+  it("states the absence of preview frames instead of leaving the slot blank", () => {
+    const base = {
+      job: { id: newId(), state: "succeeded", cleanupState: "complete", errorJson: null },
+      target: { id: newId(), kind: "har", snapshotDigest: asDigest("9".repeat(64)) as Digest },
+      limitations: [],
+      scopeLabel: "cart 读取",
+    };
+    const offline = buildLeftPanel(base);
+    if ("reason" in offline) throw new Error("the panel should have been built");
+    // An offline HAR import has no frames. The slot says so, in words, rather than
+    // rendering an empty box the operator has to interpret.
+    expect(offline.frames.count).toBe(0);
+    expect(offline.frames.note).toContain("无画面");
+    const withFrames = buildLeftPanel({ ...base, frameLabels: ["t+0s 首页", "t+2s 购物车"] });
+    if ("reason" in withFrames) throw new Error("the panel should have been built");
+    expect(withFrames.frames).toEqual({ count: 2, note: "见下方画面列表" });
+  });
+
   it("says plainly when there is neither a task nor a target", () => {
     const panel = buildLeftPanel({ job: null, target: null, limitations: [], scopeLabel: "—" });
     expect(panel).toEqual({ reason: "no-task-and-no-target" });
@@ -200,5 +219,76 @@ describe("the side columns (§6, §7.3)", () => {
     const inspector = buildRightTabs({ isBuilder: false, hasBlueprint: false });
     expect(inspector.every((tab) => tab.enabled)).toBe(true);
     expect(inspector.every((tab) => tab.label.length > 0)).toBe(true);
+  });
+});
+
+describe("the canvas topology and the list's own actions (issue #18)", () => {
+  const a = newId();
+  const b = newId();
+  const ac = newId();
+  const bc = newId();
+  const ec = newId();
+  const seen = claim();
+  claims.set(ac, seen);
+  claims.set(bc, seen);
+  claims.set(ec, seen);
+
+  function scene(rows: readonly GraphEdgeView[]) {
+    const nodes = [node(a, [ac]), { ...node(b, [bc]), label: "POST /api/cart" }];
+    return buildMiddlePanel({
+      nodes,
+      edges: rows,
+      requiredClaimsOfNode: (entry) => entry.claimIds.map((id) => claims.get(id) as ClaimEvidenceState),
+      claimOfEdge: (id) => claims.get(id) ?? null,
+    });
+  }
+
+  it("draws a relation between the two endpoint cells", () => {
+    const rows: GraphEdgeView[] = [{ id: "edge-1", from: a, to: b, relation: "precedes", claimId: ec }];
+    const built = scene(rows);
+    const placed = canvasEdges(built.cells, rows);
+    // The endpoints come from the row, so the ids are the cells' own ids. Reading them out
+    // of the label instead gave a canvas with every node and no relation at all.
+    expect(placed.drawn).toEqual([{ id: "edge-1", source: a, target: b, label: "precedes" }]);
+    expect(placed.dropped).toEqual([]);
+  });
+
+  it("refuses to draw a relation whose endpoint is not on the canvas", () => {
+    const missing = newId();
+    const rows: GraphEdgeView[] = [{ id: "edge-2", from: a, to: missing, relation: "yields", claimId: ec }];
+    const placed = canvasEdges(scene(rows).cells, rows);
+    expect(placed.drawn).toEqual([]);
+    expect(placed.dropped).toEqual([{ reason: "edge-endpoint-not-on-canvas", missing: ["edge-2", a, missing] }]);
+  });
+
+  it("leaves an edge with an unreadable claim to the refusal list rather than the canvas", () => {
+    const unknownClaim = newId();
+    const rows: GraphEdgeView[] = [{ id: "edge-3", from: a, to: b, relation: "calls", claimId: unknownClaim }];
+    const built = scene(rows);
+    expect(built.failures).toEqual([
+      { code: "GRAPH_VIEW_INCOMPLETE", reason: "edge-claim-unreadable", missing: ["edge-3", unknownClaim] },
+    ]);
+    const placed = canvasEdges(built.cells, rows);
+    expect(placed.drawn).toEqual([]);
+    expect(placed.dropped).toEqual([]);
+  });
+
+  it("gives a list row the jump targets and the one next step", () => {
+    const rows: GraphEdgeView[] = [{ id: "edge-4", from: a, to: b, relation: "precedes", claimId: ec }];
+    const settled = listView(scene(rows).cells);
+    const nodeRow = settled.find((row) => row.id === a);
+    if (nodeRow === undefined) throw new Error("the node cell did not reach the list");
+    expect(nodeRow.evidenceJumpTargets).toEqual([`ev_${"b".repeat(64)}`]);
+    expect(nodeRow.sourceCount).toBe(1);
+    // A cell with nothing missing has no next step to offer.
+    expect(nodeRow.inquiry).toBeNull();
+
+    const stale = claim({ validity: "stale" });
+    claims.set(ac, stale);
+    const gapRow = listView(scene(rows).cells).find((row) => row.id === a);
+    if (gapRow?.inquiry === undefined || gapRow.inquiry === null) throw new Error("a stale claim offered no inquiry");
+    expect(gapRow.inquiry.kind).toBe("read-evidence");
+    expect(gapRow.reasonLine).toContain("claim-stale");
+    claims.set(ac, seen);
   });
 });

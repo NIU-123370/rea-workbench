@@ -22,10 +22,20 @@ const MODULES = [
   "apps/broker",
 ] as const;
 
+type ClientScope = {
+  readonly packages: readonly string[];
+  readonly directory: string;
+};
+
 type Rule = {
   readonly allowedInternal: readonly string[];
   readonly allowedPackages: readonly string[];
   readonly allowedBuiltins: readonly string[];
+  // Packages that exist only inside the browser bundle. They are deliberately not
+  // in `allowedPackages`: the same module also holds the server entrypoint and the
+  // route handlers, and those must stay loadable by plain `node --experimental-
+  // strip-types` with no bundler involved.
+  readonly clientOnly?: ClientScope;
 };
 
 const PACKAGES_ONLY = ["packages/domain", "packages/contracts", "packages/application"];
@@ -59,7 +69,10 @@ const RULES: Record<string, Rule> = {
   },
   "packages/adapters/rea": {
     allowedInternal: [...PACKAGES_ONLY, "packages/adapters/rea"],
-    allowedPackages: ["@modelcontextprotocol/sdk"],
+    // Nothing: the adapter frames the MCP wire itself, so naming the SDK here would be an
+    // allowance for a package the dependency tree does not carry. It was listed on the
+    // strength of a comment, and the guard below is what caught that.
+    allowedPackages: [],
     allowedBuiltins: ["node:crypto", "node:path", "node:child_process"],
   },
   "packages/adapters/sandbox": {
@@ -88,6 +101,11 @@ const RULES: Record<string, Rule> = {
       "node:sqlite",
       "node:child_process",
       "node:readline",
+      // The entrypoint has to turn its own `file:` URL into a path to find the installed
+      // package beside it. `new URL(...).pathname` is not that conversion - it hands back
+      // the percent-encoded form, and a project under a path with a space or a CJK
+      // character then silently reads no defaults file at all.
+      "node:url",
     ],
   },
   "apps/web": {
@@ -98,6 +116,14 @@ const RULES: Record<string, Rule> = {
     // no filesystem, no child process, no zod. The API still may not open a write
     // connection - every command goes through apps/web/worker-client.ts.
     allowedBuiltins: ["node:http", "node:net", "node:path"],
+    // The graph canvas is the three-column UI's own widget (S19), and it only exists in
+    // the `"use client"` island. The source editor is not installed: nothing in the closed
+    // §8 surface can return candidate bytes to display yet, so the shell shows a named
+    // empty state instead of mounting an unused 2 MB editor (issue #19's other half).
+    clientOnly: {
+      packages: ["@xyflow/react"],
+      directory: "apps/web/app/client",
+    },
   },
   "apps/broker": {
     // The broker is a host supervisor speaking its own restricted protocol; it
@@ -183,6 +209,12 @@ function isViolation(module: string, fileDir: string, specifier: string): boolea
     return !rule.allowedInternal.some((allowed) => withinAllowed(target, allowed));
   }
   if (specifier.startsWith("node:")) return !rule.allowedBuiltins.includes(specifier);
+  const clientOnly = rule.clientOnly;
+  if (clientOnly !== undefined && clientOnly.packages.includes(packageName(specifier))) {
+    // Allow the widget library for the island and refuse it everywhere else in the
+    // same module, so a route handler cannot quietly become browser-only code.
+    return !withinAllowed(fileDir, clientOnly.directory);
+  }
   return !rule.allowedPackages.includes(packageName(specifier));
 }
 
@@ -280,6 +312,46 @@ describe("module dependency direction (DESIGN §3)", () => {
     expect(isViolation("packages/domain", "packages/domain", "node:crypto")).toBe(false);
     expect(isViolation("packages/contracts", "packages/contracts", "zod")).toBe(false);
     expect(isViolation("packages/domain", "packages/domain", "../contracts/jobs.ts")).toBe(true);
+  });
+
+  it("keeps the browser-only widgets inside the client island", () => {
+    // The island may import them...
+    expect(isViolation("apps/web", "apps/web/app/client", "@xyflow/react")).toBe(false);
+    // ...and the server half of the same module may not, even though `next`,
+    // `react` and `react-dom` are allowed there.
+    expect(isViolation("apps/web", "apps/web", "@xyflow/react")).toBe(true);
+    expect(isViolation("apps/web", "apps/web/app/api/v1/[...path]", "@xyflow/react")).toBe(true);
+    // A widget the island does not use is not permitted by its absence: the scope list is
+    // the whole allowance.
+    expect(isViolation("apps/web", "apps/web/app/client", "@monaco-editor/react")).toBe(true);
+    expect(isViolation("apps/web", "apps/web/app/project/[projectId]", "@xyflow/react")).toBe(true);
+    // A sibling package of an allowed widget is still unknown and still flags.
+    expect(isViolation("apps/web", "apps/web/app/client", "@xyflow/system")).toBe(true);
+    expect(isViolation("apps/web", "apps/web/app/client", "zustand")).toBe(true);
+    // The rule must not leak into a module that declared no client scope.
+    expect(RULES["apps/worker"]?.clientOnly).toBeUndefined();
+    expect(isViolation("apps/worker", "apps/worker", "@xyflow/react")).toBe(true);
+  });
+
+  it("only permits packages the project actually declares", () => {
+    // An allowlist entry for a package that is not in the dependency tree is a trap: it
+    // looks enforced and silently permits an import that then fails to resolve at build
+    // time (which is exactly how the editor dependency would have rotted).
+    const manifest = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const declared = new Set([
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+    ]);
+    const permitted: string[] = [];
+    for (const rule of Object.values(RULES)) {
+      permitted.push(...rule.allowedPackages, ...(rule.clientOnly?.packages ?? []));
+    }
+    expect([...new Set(permitted)].filter((name) => !declared.has(name))).toEqual([]);
+    expect(declared.has("next")).toBe(true);
+    expect(declared.has("@xyflow/react")).toBe(true);
   });
 
   it("scans every TypeScript flavour, not just .ts", () => {
