@@ -23,8 +23,10 @@ import { parseStrict } from "../../packages/contracts/parse.ts";
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const CONTRACTS_DIR = path.join(ROOT, "packages/contracts");
 
-// `rea-evidence.ts` mirrors the upstream envelope and is delivered on #5.
-const EXCLUDED = ["rea-evidence.ts"];
+// Every file in this directory is in scope, including `rea-evidence.ts` (the
+// upstream envelope mirror delivered on #5) — an empty list here would mean the
+// sweep silently skipped a file.
+const EXCLUDED: string[] = [];
 
 const HEX = "a".repeat(64);
 const ID = "11111111-1111-4111-8111-111111111111";
