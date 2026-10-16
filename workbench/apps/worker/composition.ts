@@ -15,11 +15,12 @@ import path from "node:path";
 import { asDigest } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
 import { asId, newId, nowInstant } from "../../packages/domain/identity.ts";
-import type { Id } from "../../packages/domain/identity.ts";
+import type { Id, Instant } from "../../packages/domain/identity.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import type { Result } from "../../packages/domain/result.ts";
 
-import { BOOT_CONFIG_FIELDS } from "../../packages/contracts/boot.ts";
+import { BOOT_CONFIG_FIELDS, WORKER_RPC_SOCKET_NAME } from "../../packages/contracts/boot.ts";
+import { bootstrapExchangeSchema } from "../../packages/contracts/session.ts";
 import type { BootConfig, ConfigInput } from "../../packages/application/boot-config.ts";
 import { ProfileRegistry, resolveBootConfig } from "../../packages/application/boot-config.ts";
 import { runDoctor } from "../../packages/application/doctor.ts";
@@ -28,6 +29,11 @@ import { recoverJobs } from "../../packages/application/recovery.ts";
 import type { RecoveryReport } from "../../packages/application/recovery.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import { gateFail, type GateFailure } from "../../packages/application/gate-failure.ts";
+import { commitDecision, recordDeny } from "../../packages/application/decision.ts";
+import type { Step } from "../../packages/application/decision.ts";
+import { BootstrapTokenVault, SessionService } from "../../packages/application/session.ts";
+import type { PairingCode } from "../../packages/application/session.ts";
+import { normalizeEventLimit, toStreamEvents } from "../../packages/application/event-stream.ts";
 import { VectorService } from "../../packages/application/vector-service.ts";
 import { ContractService } from "../../packages/application/contract-service.ts";
 import { PlanService } from "../../packages/application/plan-service.ts";
@@ -53,7 +59,6 @@ import { createProjectRequestSchema } from "../../packages/contracts/resources.t
 
 const LIMITS = { maxDepth: 24, maxCodeUnits: 2_000_000 };
 const RECOVERY_SCAN_LIMIT = 500;
-const RPC_SOCKET_NAME = "worker.rpc.sock";
 
 export type CompositionRequest = {
   env: Readonly<Record<string, string | undefined>>;
@@ -64,6 +69,10 @@ export type CompositionRequest = {
   // A host that can enforce a container sandbox reports true; this build cannot
   // claim it on macOS, and the doctor says so instead of assuming it (§14).
   sandboxEnforced?: boolean;
+  // §14 gives these two lifetimes an expiry but no number; the application module
+  // holds the defaults, and a caller that wants a shorter life passes one here.
+  sessionTtlMs?: number;
+  bootstrapTtlMs?: number;
 };
 
 export const COMMAND_NAMES = [
@@ -87,10 +96,40 @@ export const COMMAND_NAMES = [
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
+  // Session pairing and the event read (DESIGN §8, §14; issue #17). The web process
+  // holds no session store of its own: §14 puts sessions in the worker's memory, so
+  // a worker restart drops every cookie in circulation and the API cannot outlive the
+  // authority that issued it.
+  "session.pair",
+  "session.read",
+  "session.revoke",
+  "events.after",
 ] as const;
+
+// Commands that legitimately name no project (§12.2: local pairing, revocation and
+// the health surfaces are project-less, not project-unknown).
+const PROJECTLESS_COMMANDS: readonly string[] = [
+  "project.create",
+  "health.effectiveProfiles",
+  "doctor.run",
+  "jobs.recover",
+  "session.pair",
+  "session.read",
+  "session.revoke",
+];
 
 export type CommandName = (typeof COMMAND_NAMES)[number];
 export type CommandOutcome = Result<JsonValue, GateFailure>;
+
+// What `session.pair` hands back to the HTTP adapter: the cookie value, the local
+// review identifier and the CSRF secret. The adapter puts exactly two of those in a
+// body and one in a Set-Cookie, and stores none of them anywhere else (§14).
+type PairedSession = {
+  sessionKey: string;
+  reviewerId: Id;
+  csrfToken: string;
+  expiresAt: Instant;
+};
 
 export type BootFailure = {
   kind: "config" | "lock" | "storage";
@@ -110,6 +149,13 @@ export type WorkerHandle = {
   dispatch: (name: string, payload: JsonValue, actor: Actor) => Promise<CommandOutcome>;
   doctor: () => Promise<DoctorReport>;
   recovery: () => Result<RecoveryReport, GateFailure>;
+  // The one-time pairing code this start command minted (§14). It is reachable only
+  // from the local process: there is no command that asks the worker for a code, so
+  // a web request cannot mint one, and `mintPairingCode` is how the operator asks for
+  // a replacement in person.
+  pairingCode: () => PairingCode;
+  mintPairingCode: () => PairingCode;
+  activeSessions: () => number;
   shutdown: () => Promise<void>;
 };
 
@@ -230,6 +276,17 @@ function pickBase64(value: JsonValue, field: string): Uint8Array | null {
   }
 }
 
+// `commitDecision` answers with the decided value *and* the journal sequence it
+// wrote. The sequence is this process's bookkeeping, not part of the caller's
+// contract, so a command that returns a decision unwraps it here rather than
+// handing the adapter an envelope the reply schema then refuses.
+function relayDecision<T>(
+  result: Result<{ value: T; auditSeq: number }, GateFailure>,
+): CommandOutcome {
+  if (!result.ok) return result;
+  return { ok: true, value: result.value.value as unknown as JsonValue };
+}
+
 function relay<T>(result: Result<T, GateFailure>): CommandOutcome {
   if (!result.ok) return result;
   return { ok: true, value: result.value as unknown as JsonValue };
@@ -295,6 +352,15 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
 
   const writer = new SqliteStorageWriter(db);
   const store = new ArtifactStore(config.dataDir);
+  // §14: the pairing code and the sessions are this process's memory and nothing
+  // else. They are minted here, at the same moment the write lock is taken, so the
+  // code the terminal is about to show belongs to the worker that will honour it.
+  const bootstraps = new BootstrapTokenVault();
+  const sessions = new SessionService();
+  // One live code per start command: minting a replacement destroys the previous one,
+  // and nothing on the RPC surface can ask for either.
+  let currentPairing: PairingCode = bootstraps.mint(Date.now(), request.bootstrapTtlMs ?? undefined);
+  const sessionTtl = (): number | undefined => request.sessionTtlMs;
   const profiles = new ProfileRegistry(readProfiles(request.profileDir), {
     supportedPlatform: process.platform === "linux" && process.arch === "x64",
     canEnforceSandbox: request.sandboxEnforced === true,
@@ -497,6 +563,122 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     "health.effectiveProfiles": () => relay({ ok: true, value: profiles.healthView() }),
     "doctor.run": async () => relay({ ok: true, value: (await doctorReport()) as unknown as JsonValue }),
     "jobs.recover": () => relay(recovery()),
+    // Pairing (DESIGN §8, §14). The code is consumed before anything is granted, the
+    // grant is journalled inside the transaction, and a journal that cannot be written
+    // takes the session back — §12.2 says a decision that cannot be journalled must not
+    // happen, and pairing is the widest decision this workbench makes.
+    "session.pair": (payload, actor) => {
+      const parsed = bootstrapExchangeSchema.safeParse(payload);
+      if (!parsed.success) return gateFail("INVALID_INPUT", "pair-payload", "the pairing request was rejected");
+      const nowMs = Date.now();
+      const redeemed = bootstraps.redeem(parsed.data.bootstrapToken, nowMs);
+      if (!redeemed.ok) {
+        recordDeny(writer, {
+          projectId: null,
+          actor,
+          resourceType: "session",
+          action: "session.pair",
+          resourceId: null,
+          decision: "deny",
+          reasonCode: `pairing-${redeemed.error}`,
+          // Nothing about the attempted value is recorded, not even its length (§12.1).
+          metadata: {},
+        });
+        return gateFail("SESSION_REQUIRED", `pairing-${redeemed.error}`, "the pairing code was not accepted");
+      }
+      const minted = sessions.mint(nowMs, sessionTtl());
+      const journalled = commitDecision(writer, {
+        projectId: null,
+        actor,
+        resourceType: "session",
+        action: "session.pair",
+        resourceId: minted.reviewerId,
+        allowReason: "pairing-code-consumed",
+        metadata: { reviewerId: minted.reviewerId, expiresAt: minted.expiresAt },
+        work: (): Step<PairedSession> => ({
+          kind: "committed",
+          value: {
+            sessionKey: minted.sessionKey,
+            reviewerId: minted.reviewerId,
+            csrfToken: minted.csrfToken,
+            expiresAt: minted.expiresAt,
+          },
+        }),
+      });
+      if (!journalled.ok) {
+        sessions.revoke(minted.sessionKey);
+        return journalled;
+      }
+      return relayDecision(journalled);
+    },
+    // The adapter asks this on every authenticated request, so a worker restart or an
+    // expiry is felt immediately rather than when the session table is next read.
+    "session.read": (payload) => {
+      const sessionKey = pickString(payload, "sessionKey");
+      if (sessionKey === null) return gateFail("INVALID_INPUT", "session-key-missing", "the session read needs the cookie value");
+      const found = sessions.resolve(sessionKey, Date.now());
+      if (found === null) return gateFail("SESSION_REQUIRED", "session-unknown", "no live session carries that cookie");
+      return relay({
+        ok: true,
+        value: { reviewerId: found.reviewerId, csrfToken: found.csrfToken, expiresAt: found.expiresAt },
+      });
+    },
+    "session.revoke": (payload, actor) => {
+      const sessionKey = pickString(payload, "sessionKey");
+      if (sessionKey === null) return gateFail("INVALID_INPUT", "session-key-missing", "the session revoke needs the cookie value");
+      const found = sessions.resolve(sessionKey, Date.now());
+      if (found === null) return gateFail("SESSION_REQUIRED", "session-unknown", "no live session carries that cookie");
+      // Ending access happens first and always: a journal that cannot be written may
+      // not leave a session alive.
+      sessions.revoke(sessionKey);
+      return relayDecision(commitDecision(writer, {
+        projectId: null,
+        actor,
+        resourceType: "session",
+        action: "session.revoke",
+        resourceId: found.reviewerId,
+        allowReason: "session-revoked",
+        metadata: { reviewerId: found.reviewerId },
+        work: (): Step<JsonValue> => ({ kind: "committed", value: { revoked: true } }),
+      }));
+    },
+    // The event read behind SSE (§8, §2: 只读查询与 SSE 由 worker 提供一致快照). The
+    // closed type list is applied here, on the way out of the only process that reads
+    // the outbox, so a row whose type is not one of the ten never reaches a socket.
+    "events.after": (payload) => {
+      const projectId = pickId(payload, "projectId");
+      const refused = missing(projectId);
+      if (refused !== null) return refused;
+      const cursor = asRecord(payload)["afterSeq"];
+      if (typeof cursor !== "number" || !Number.isInteger(cursor) || cursor < 0) {
+        return gateFail("INVALID_INPUT", "cursor-seq", "the event cursor must be a non-negative sequence number");
+      }
+      const requestedLimit = asRecord(payload)["limit"];
+      if (requestedLimit !== null && requestedLimit !== undefined && typeof requestedLimit !== "number") {
+        return gateFail("INVALID_INPUT", "cursor-limit", "the event limit must be an integer");
+      }
+      const pageLimit = normalizeEventLimit(typeof requestedLimit === "number" ? requestedLimit : null);
+      if (!pageLimit.ok) return pageLimit;
+      const read = writer.transact((tx) => {
+        const head = tx.eventsAfter(projectId as Id, 0, 1)[0];
+        return {
+          rows: tx.eventsAfter(projectId as Id, cursor, pageLimit.value),
+          oldestSeq: head === undefined ? null : head.seq,
+          latestSeq: tx.latestSeq(projectId as Id),
+        };
+      });
+      if (!read.ok) return relayPort(read);
+      const validated = toStreamEvents(read.value.rows);
+      if (!validated.ok) return validated;
+      return relay({
+        ok: true,
+        value: {
+          events: validated.value as unknown as JsonValue,
+          oldestSeq: read.value.oldestSeq,
+          latestSeq: read.value.latestSeq,
+        },
+      });
+    },
   };
 
   function projectIdOr(payload: JsonValue): Id {
@@ -574,21 +756,31 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       config,
       registry: profiles,
       writeConnection: writer,
-      rpcSocketPath: path.join(config.dataDir, RPC_SOCKET_NAME),
+      rpcSocketPath: path.join(config.dataDir, WORKER_RPC_SOCKET_NAME),
       commands: COMMAND_NAMES,
       async dispatch(name, payload, actor) {
         const handler = (handlers as Record<string, ((p: JsonValue, a: Actor) => Promise<CommandOutcome> | CommandOutcome) | undefined>)[name];
         // A name that is not registered is refused rather than routed: this is the
         // only place the worker's command surface is decided.
         if (handler === undefined) return gateFail("INVALID_INPUT", "unknown-command", `no handler is registered for ${name}`);
-        if (projectIdOr(payload) === ("" as Id) && name !== "project.create" && name !== "health.effectiveProfiles" && name !== "doctor.run" && name !== "jobs.recover") {
+        if (projectIdOr(payload) === ("" as Id) && !PROJECTLESS_COMMANDS.includes(name)) {
           return gateFail("INVALID_INPUT", "missing-project", "every command except project and health lookups names a project");
         }
         return await handler(payload, actor);
       },
       doctor: doctorReport,
       recovery,
+      pairingCode: () => currentPairing,
+      mintPairingCode: () => {
+        currentPairing = bootstraps.mint(Date.now(), request.bootstrapTtlMs ?? undefined);
+        return currentPairing;
+      },
+      activeSessions: () => sessions.activeCount(),
       async shutdown() {
+        // Sessions die with the process, and saying so here keeps the promise in one
+        // place: a caller that reuses the handle cannot present a live cookie after a
+        // shutdown (§14: 重启也使全部会话失效).
+        sessions.revokeAll();
         if (session !== null) await session.close();
         db.close();
         await held.release();

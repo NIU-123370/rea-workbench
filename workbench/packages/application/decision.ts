@@ -63,7 +63,9 @@ export type Step<T> =
   | { kind: "committed"; value: T };
 
 export type Decision<T> = {
-  projectId: Id;
+  // Null for a decision that belongs to no project: §12.2 names local pairing and
+  // revocation, and §5 stores those rows with `project_id = null`.
+  projectId: Id | null;
   actor: Actor;
   resourceType: string;
   action: string;

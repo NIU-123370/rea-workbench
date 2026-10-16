@@ -55,6 +55,14 @@ export type NamedErrorCode = (typeof NAMED_ERROR_CODES)[number];
 
 export type ApiError = z.infer<typeof apiErrorSchema>;
 
+const NAMED_ERROR_CODE_SET: ReadonlySet<string> = new Set<string>(NAMED_ERROR_CODES);
+
+// An error code that arrived from another process is data until this says otherwise:
+// the HTTP adapter must not turn an unmodelled string into a status code.
+export function isNamedErrorCode(value: unknown): value is NamedErrorCode {
+  return typeof value === "string" && NAMED_ERROR_CODE_SET.has(value);
+}
+
 export function httpStatusFor(code: NamedErrorCode): number {
   return HTTP_STATUS_BY_ERROR_CODE[code];
 }

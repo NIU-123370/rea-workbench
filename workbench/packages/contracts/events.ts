@@ -45,5 +45,15 @@ export const committedEventSchema = z.strictObject({
   payload: eventPayloadSchema,
 });
 
+// What one read of the outbox returns (DESIGN §8: 只读查询与 SSE 由 worker 提供一致
+// 快照). `oldestSeq` is null only while the project has no events at all, which is
+// what lets a cursor be judged recoverable rather than assumed.
+export const eventPageSchema = z.strictObject({
+  events: z.array(committedEventSchema),
+  oldestSeq: z.int().nonnegative().nullable(),
+  latestSeq: z.int().nonnegative(),
+});
+
 export type EventType = (typeof EVENT_TYPES)[number];
 export type CommittedEvent = z.infer<typeof committedEventSchema>;
+export type EventPage = z.infer<typeof eventPageSchema>;

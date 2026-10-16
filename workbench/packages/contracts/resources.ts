@@ -16,6 +16,15 @@ export const createProjectRequestSchema = z.strictObject({
   name: nonEmptyString,
 });
 
+// The 201 body of `POST /projects` is exactly these four fields (§8), and a fresh
+// project's graph revision is stated as zero rather than left to a default.
+export const createdProjectSchema = z.strictObject({
+  id: idSchema,
+  name: nonEmptyString,
+  graphRevision: z.literal(0),
+  createdAt: instantSchema,
+});
+
 export const projectSummarySchema = z.strictObject({
   id: idSchema,
   name: nonEmptyString,
