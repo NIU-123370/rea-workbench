@@ -326,6 +326,16 @@ export function evidenceMetaLine(input: { mediaType: string; byteLength: number;
   return `${input.mediaType} · ${String(input.byteLength)} 字节 · sha256 ${input.sha256 ?? "未公开（见存储侧的保留原因）"}`;
 }
 
+// The numbers a refusal published beside its reason (§8's ApiError.details, §12.1 / issue #59).
+// "too big" and "not found" are different operator problems, and the reason string alone tells
+// the operator that something was refused, not which cap was crossed. Nothing is invented here:
+// the input is already the declared-safe subset the API published, so this only orders and joins.
+export function refusalFactsLine(facts: Record<string, number | boolean>): string | null {
+  const names = Object.keys(facts).sort();
+  if (names.length === 0) return null;
+  return names.map((name) => `${name} ${String(facts[name] as number | boolean)}`).join(" · ");
+}
+
 // Which candidate the 代码 tab reads (DESIGN §8 lines 277 and 294, issue #55).
 //
 // §8 gives the page one way to name a candidate: the job list carries each row's persisted

@@ -5,6 +5,8 @@ import type { Actor, ActorKind } from "../../packages/application/actor.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import type { Result } from "../../packages/domain/result.ts";
 import type { WorkerHandle } from "./composition.ts";
+import type { GateFailure } from "../../packages/application/gate-failure.ts";
+import { safeFailureDetails } from "../../packages/contracts/errors.ts";
 
 // The worker's local RPC (DESIGN §14: 本机 RPC 提供具名命令与查询).
 //
@@ -25,7 +27,9 @@ export type RpcFrame = {
 
 export type RpcReply =
   | { id: number; ok: true; value: JsonValue }
-  | { id: number; ok: false; error: { code: string; reason: string; message: string } };
+  // `details` is already the declared-safe subset: filtering at the boundary that leaves
+  // the process means no consumer of this socket has to remember to sanitise.
+  | { id: number; ok: false; error: { code: string; reason: string; message: string; details: Record<string, number | boolean> } };
 
 export type RpcServer = {
   socketPath: string;
@@ -104,7 +108,7 @@ export async function startWorkerRpc(worker: WorkerHandle): Promise<Result<RpcSe
       // rather than assembled in memory first.
       if (buffer.length + chunk.byteLength > MAX_FRAME_BYTES) {
         overflow = true;
-        socket.write(`${JSON.stringify({ id: -1, ok: false, error: { code: "RESOURCE_LIMIT", reason: "frame-too-large", message: "the request frame exceeds the byte budget" } })}\n`);
+        socket.write(`${JSON.stringify({ id: -1, ok: false, error: { code: "RESOURCE_LIMIT", reason: "frame-too-large", message: "the request frame exceeds the byte budget", details: {} } })}\n`);
         socket.end();
         return;
       }
@@ -147,7 +151,7 @@ async function answer(worker: WorkerHandle, socket: net.Socket, line: string): P
     const reply: RpcReply = {
       id: -1,
       ok: false,
-      error: { code: "INVALID_INPUT", reason: frame.error.reason, message: "the frame was not a valid request" },
+      error: { code: "INVALID_INPUT", reason: frame.error.reason, message: "the frame was not a valid request", details: {} },
     };
     socket.write(`${JSON.stringify(reply)}\n`);
     return;
@@ -156,16 +160,26 @@ async function answer(worker: WorkerHandle, socket: net.Socket, line: string): P
   socket.write(`${JSON.stringify(reply)}\n`);
 }
 
+// The one place a refusal becomes wire bytes. Filtering here, at the boundary that leaves the
+// process, is what lets every consumer of this socket (the web API today, an operator tool
+// tomorrow) treat `details` as already-safe without having remembered to check.
+export function errorFrame(id: number, failure: GateFailure): RpcReply {
+  return {
+    id,
+    ok: false,
+    error: {
+      code: failure.code,
+      reason: failure.reason,
+      message: failure.message,
+      details: safeFailureDetails(failure.details),
+    },
+  };
+}
+
 // The worker reference is bound when the server starts, so a request never
 // resolves a global at call time.
 async function replyFor(worker: WorkerHandle, frame: RpcFrame): Promise<RpcReply> {
   const outcome = await worker.dispatch(frame.command, frame.payload, frame.actor);
-  if (!outcome.ok) {
-    return {
-      id: frame.id,
-      ok: false,
-      error: { code: outcome.error.code, reason: outcome.error.reason, message: outcome.error.message },
-    };
-  }
+  if (!outcome.ok) return errorFrame(frame.id, outcome.error);
   return { id: frame.id, ok: true, value: outcome.value };
 }

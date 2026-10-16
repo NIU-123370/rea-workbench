@@ -4,7 +4,7 @@ import path from "node:path";
 import { decodeRpcReply, encodeRpcFrame } from "../../packages/contracts/rpc.ts";
 import { RPC_ACTOR_KINDS } from "../../packages/contracts/rpc.ts";
 import type { RpcActorKind, RpcFrameWire, RpcReplyWire } from "../../packages/contracts/rpc.ts";
-import { isNamedErrorCode } from "../../packages/contracts/errors.ts";
+import { isNamedErrorCode, safeFailureDetails } from "../../packages/contracts/errors.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
@@ -31,6 +31,9 @@ export type WorkerFailure = {
   code: NamedErrorCode;
   reason: string;
   message: string;
+  // The declared-safe numbers and booleans (§12.1). Both ends of the socket apply the same
+  // list, so this type is what the reader checked rather than what the sender claimed.
+  details: Record<string, number | boolean>;
 };
 
 export type WorkerCaller = {
@@ -50,7 +53,18 @@ function unreachable(reason: string): WorkerFailure {
     code: "CAPABILITY_UNAVAILABLE",
     reason,
     message: "the worker is not answering on its private local socket",
+    details: {},
   };
+}
+
+// The frame is data, not a promise: whatever the worker put in `details` is re-checked here
+// against the same declared list the worker applied, so a caller downstream never has to know
+// whether the sender filtered. A type sweep alone would not be enough - a peer that put
+// `internalRowId: 91` on the socket offered a number, and the reason the name is on the list is
+// exactly that a number can still be a fact nobody meant to publish (§12.1).
+function publishableDetails(value: JsonValue): Record<string, number | boolean> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  return safeFailureDetails(value as Record<string, unknown>);
 }
 
 // The socket path is derived, never taken from a request: `..`, an absolute path from
@@ -84,6 +98,7 @@ export function createWorkerClient(options: WorkerClientOptions): WorkerCaller &
             code: "ACCESS_DENIED",
             reason: "actor-kind-not-accepted-over-rpc",
             message: "this actor kind has no place on the operator RPC channel",
+            details: {},
           },
         };
       }
@@ -100,7 +115,10 @@ export function createWorkerClient(options: WorkerClientOptions): WorkerCaller &
       // An error code the contract does not name is not forwarded: the adapter maps
       // named codes onto statuses, and an unmodelled string has no status (§8).
       if (!isNamedErrorCode(failure.code)) return { ok: false, error: unreachable("worker-code-unmodelled") };
-      return { ok: false, error: { code: failure.code, reason: failure.reason, message: failure.message } };
+      return {
+        ok: false,
+        error: { code: failure.code, reason: failure.reason, message: failure.message, details: publishableDetails(failure.details) },
+      };
     },
     async close() {
       for (const socket of sockets) socket.destroy();
@@ -142,7 +160,7 @@ function roundTrip(
     socket.on("data", (chunk: Buffer) => {
       // Counted before buffered, the same rule the server applies to a request frame.
       if (buffer.length + chunk.byteLength > maxReplyBytes) {
-        finish({ ok: false, error: { code: "RESOURCE_LIMIT", reason: "reply-too-large", message: "the worker reply exceeds the byte budget" } });
+        finish({ ok: false, error: { code: "RESOURCE_LIMIT", reason: "reply-too-large", message: "the worker reply exceeds the byte budget", details: {} } });
         return;
       }
       buffer += chunk.toString("utf8");
@@ -151,13 +169,13 @@ function roundTrip(
       const line = buffer.slice(0, index);
       const decoded = decodeRpcReply(line);
       if (!decoded.ok) {
-        finish({ ok: false, error: { code: "REA_CONTRACT_MISMATCH", reason: decoded.error.reason, message: "the worker reply did not match the RPC contract" } });
+        finish({ ok: false, error: { code: "REA_CONTRACT_MISMATCH", reason: decoded.error.reason, message: "the worker reply did not match the RPC contract", details: {} } });
         return;
       }
       if (decoded.value.id !== frame.id) {
         // A reply for another frame is not this request's answer; guessing would let
         // one command's result be read as another's.
-        finish({ ok: false, error: { code: "REA_CONTRACT_MISMATCH", reason: "reply-id-mismatch", message: "the worker answered a different request id" } });
+        finish({ ok: false, error: { code: "REA_CONTRACT_MISMATCH", reason: "reply-id-mismatch", message: "the worker answered a different request id", details: {} } });
         return;
       }
       finish({ ok: true, value: decoded.value });
