@@ -7,9 +7,9 @@ import {
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
-import { contractReviewHttpRequestSchema, contractReviewReceiptSchema, planReviewHttpRequestSchema, planReviewReceiptSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { contractCommitReceiptSchema, contractDraftRequestSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
-import { testVectorSchema, vectorPageSchema, vectorReviewHttpRequestSchema, vectorReviewReceiptSchema } from "../../packages/contracts/vectors.ts";
+import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
@@ -18,6 +18,7 @@ import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { candidateFileContentSchema, candidateViewSchema } from "../../packages/contracts/candidate.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
+import type { JsonSchema } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
 import { asId, asInstant, isId, isReaEvidenceId, newId } from "../../packages/domain/identity.ts";
@@ -119,6 +120,15 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/contracts/:contractId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  // The three creation doors (§8 lines 282, 286, 289). Vectors and plans are among the creations
+  // §8 line 261 names, so they carry an Idempotency-Key; contracts are not on that list, and the
+  // door honours the document literally rather than inventing a key for a row the service already
+  // versions. Bodies are the service's own schemas, so a field §8 names that nothing stores
+  // (`sensitiveValues` at a vector create, `expectedGraphRevision` at a plan or contract create) is
+  // a named refusal, not a silent drop - recorded as deviations on issue #58.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/vectors`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/contracts`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/verification-plans`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The freeze (§8 line 292). Unlike the three review doors, this one is a *creation* named in
   // §8 line 261, so it carries an Idempotency-Key: a retried freeze must replay the blueprint it
   // already made rather than mint a second one beside it.
@@ -358,60 +368,23 @@ async function readHealth(ctx: Context, deps: ApiDependencies): Promise<ApiRespo
   return jsonSuccess(ctx.requestId, 200, body.value);
 }
 
+// POST /projects. §8's 201 body is four named fields, and the journaling is the shared one -
+// a second copy of "digest, claim, abandon, record" is a second thing that can drift from the
+// first, and this route was the last creation still carrying its own.
 async function createProject(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
   const body = readJsonBody(ctx);
   if (!body.ok) return body.response;
   const parsed = parseStrict(createProjectRequestSchema, body.value);
-  if (!parsed.ok) {
-    // Field paths only, never values: a rejected extra field must not echo what a caller
-    // put in it.
-    return errorResponse(
-      ctx.requestId,
-      {
-        code: "INVALID_INPUT",
-        message: "the project request does not match the named schema",
-        details: { fields: parsed.error.issues.map((issue) => issue.path) },
-      },
-      ctx.declaration,
-    );
-  }
-  const digest = idempotencyDigest(
-    { route: `${API_PREFIX}/projects`, method: "POST", body: parsed.value },
-    ctx.declaration,
-    deps.limits,
-  );
-  // A refusal this process made itself names its facts at the call site rather than relaying
-  // whatever a helper put in `details` - `refused` is the only shape for that, and it publishes
-  // the reason and nothing else.
-  if (!digest.ok) return refused(ctx.requestId, digest.error.code, digest.error.reason, digest.error.message, ctx.declaration);
-  const scope = journalScope(String((ctx.session as CurrentSession).reviewerId), `${API_PREFIX}/projects`);
-  const claim = deps.journal.claim(scope, key, digest.value);
-  if (claim.kind === "divergent") {
-    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-reused", "that idempotency key already carries a different request", ctx.declaration);
-  }
-  if (claim.kind === "inFlight") {
-    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-in-flight", "the first request with that key has not produced a result yet", ctx.declaration);
-  }
-  if (claim.kind === "replay") {
-    // The original result, field for field, with a fresh request id: §8 says a replay
-    // returns 原结果, and nothing is sent to the worker a second time.
-    return jsonSuccess(ctx.requestId, claim.recorded.status, claim.recorded.body);
-  }
-  const outcome = await deps.worker.call("project.create", parsed.value, ctx.actor);
-  if (!outcome.ok) {
-    // A command that produced nothing gives the key back, so the caller may retry it.
-    deps.journal.abandon(scope, key);
-    return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
-  }
-  // §8's 201 body is four fields; the worker's row carries more than that, and a response
-  // is a named contract rather than a dump of what the command happened to return.
-  const created = parseStrict(createdProjectSchema, pickFields(outcome.value, ["id", "name", "graphRevision", "createdAt"]));
-  if (!created.ok) {
-    deps.journal.abandon(scope, key);
-    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "project-shape", "the worker did not answer with a created project", ctx.declaration);
-  }
-  deps.journal.record(scope, key, digest.value, { status: 201, body: created.value });
-  return jsonSuccess(ctx.requestId, 201, created.value);
+  if (!parsed.ok) return invalidBody(ctx, "the project request does not match the named schema", parsed.error);
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects`,
+    template: `${API_PREFIX}/projects`,
+    command: "project.create",
+    payload: parsed.value,
+    body: parsed.value,
+    projection: COMMIT_PROJECTIONS.project,
+  });
 }
 
 async function listExports(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
@@ -625,6 +598,74 @@ async function readEvidence(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   return jsonSuccess(ctx.requestId, 200, view.value);
 }
 
+// --- The creation doors (§8 lines 282, 286, 289 / issue #58) ---------------------------
+//
+// Each door forwards the body the service already parses - one definition of a create request,
+// so the door cannot drift from the service - and answers with the same commit receipt its review
+// sibling uses, because creation and review are both statements about one row. The only mapping
+// is a name: §8 calls the plan's exclusion list `exclusions`, the service calls the identical
+// list `excludedVectors`, and the door translates in one line rather than redeclaring the items.
+async function createVector(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(vectorCreateRequestSchema, body.value);
+  if (!parsed.ok) return invalidBody(ctx, "the vector request does not match the named schema", parsed.error);
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${String(projectId)}/vectors`,
+    template: `${API_PREFIX}/projects/:projectId/vectors`,
+    command: "vector.create",
+    payload: { projectId, request: parsed.value },
+    body: parsed.value,
+    projection: COMMIT_PROJECTIONS.vector,
+  });
+}
+
+async function createContract(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(contractDraftRequestSchema, body.value);
+  if (!parsed.ok) return invalidBody(ctx, "the contract request does not match the named schema", parsed.error);
+  // No journal: §8 line 261 does not list contract among the keyed creations, so a retried body
+  // here is the service's own question (it versions by content), not one this process answers.
+  const outcome = await deps.worker.call("contract.create", { projectId, request: parsed.value }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const projected = projectCommit(ctx, outcome.value, COMMIT_PROJECTIONS.contract);
+  if (!projected.ok) return projected.response;
+  return jsonSuccess(ctx.requestId, 201, projected.value);
+}
+
+async function createPlan(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(planBuildHttpRequestSchema, body.value);
+  if (!parsed.ok) return invalidBody(ctx, "the plan request does not match the named schema", parsed.error);
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${String(projectId)}/verification-plans`,
+    template: `${API_PREFIX}/projects/:projectId/verification-plans`,
+    command: "plan.build",
+    payload: {
+      projectId,
+      request: {
+        targetId: parsed.value.targetId,
+        snapshotDigest: parsed.value.snapshotDigest,
+        contractRevisionIds: parsed.value.contractRevisionIds,
+        excludedVectors: parsed.value.exclusions,
+        expectedInventoryRevision: parsed.value.expectedInventoryRevision,
+      },
+    },
+    body: parsed.value,
+    projection: COMMIT_PROJECTIONS.plan,
+  });
+}
+
 // --- The review routes (§8 lines 285, 287, 291 / issue #58) ---------------------------
 //
 // One rule these three share that is not written in §8's table: **the reviewer is the session,
@@ -634,6 +675,123 @@ async function readEvidence(ctx: Context, deps: ApiDependencies): Promise<ApiRes
 // on. The request schemas are `strictObject` without that field, which turns a caller who sends
 // `reviewerId` (or §8's `note`, which has no storage owner anywhere) into a 400 naming the field,
 // rather than a suggestion the route quietly honours or drops.
+// One projection per record type. The create door and the review door answer about the same row,
+// so the field list, the schema and the name of a malformed answer live here once. Written out
+// twice, they are two lists that can drift - the field list below is what makes a receipt a named
+// contract rather than a dump of whatever the command happened to return.
+type CommitProjection = {
+  readonly fields: readonly string[];
+  readonly schema: JsonSchema;
+  readonly reason: string;
+  readonly message: string;
+};
+
+const COMMIT_PROJECTIONS = {
+  project: {
+    fields: ["id", "name", "graphRevision", "createdAt"],
+    schema: createdProjectSchema,
+    reason: "project-shape",
+    message: "the worker did not answer with a created project",
+  },
+  vector: {
+    fields: ["vectorId", "digest", "eligibility", "reasons", "inventoryRevision", "auditSeq", "eventSeq"],
+    schema: vectorCommitReceiptSchema,
+    reason: "vector-commit-shape",
+    message: "the worker did not answer with a vector commit",
+  },
+  contract: {
+    fields: ["contractId", "contractKey", "revision", "digest", "reviewStatus", "auditSeq", "eventSeq"],
+    schema: contractCommitReceiptSchema,
+    reason: "contract-commit-shape",
+    message: "the worker did not answer with a contract commit",
+  },
+  plan: {
+    fields: ["planId", "digest", "inventoryDigest", "selectedCount", "excludedCount", "graphRevision", "inventoryRevision", "reviewStatus", "auditSeq", "eventSeq"],
+    schema: planCommitReceiptSchema,
+    reason: "plan-commit-shape",
+    message: "the worker did not answer with a plan commit",
+  },
+  blueprint: {
+    fields: ["blueprintId", "digest", "manifestDigest", "planId", "publicVectorCount", "holdoutVectorCount", "contractCount", "auditSeq"],
+    schema: blueprintFreezeReceiptSchema,
+    reason: "blueprint-freeze-shape",
+    message: "the worker did not answer with a frozen blueprint",
+  },
+} as const satisfies Record<string, CommitProjection>;
+
+function projectCommit(
+  ctx: Context,
+  value: JsonValue,
+  projection: CommitProjection,
+): { ok: true; value: JsonValue } | { ok: false; response: ApiResponse } {
+  const parsed = parseStrict(projection.schema, pickFields(value, projection.fields));
+  if (!parsed.ok) {
+    return { ok: false, response: refused(ctx.requestId, "REA_CONTRACT_MISMATCH", projection.reason, projection.message, ctx.declaration) };
+  }
+  return { ok: true, value: parsed.value };
+}
+
+// A body that does not match its named schema. Field paths and the names of rejected keys, never
+// the values that came with them (§12.1) - a caller has to learn what to remove, and echoing a
+// rejected value would put the request's own text into the answer.
+type ParseFailureLike = { issues: { path: string; keys?: string[] }[] };
+
+function invalidBody(ctx: Context, message: string, failure: ParseFailureLike): ApiResponse {
+  return errorResponse(ctx.requestId, {
+    code: "INVALID_INPUT",
+    message,
+    details: { fields: failure.issues.map((issue) => issue.path), rejectedKeys: failure.issues.flatMap((issue) => issue.keys ?? []) },
+  }, ctx.declaration);
+}
+
+// A creation over HTTP, in one place: digest the canonical request, claim the key, call the
+// command, and only record a 201 once the reply has been projected through its named schema.
+// A refusal gives the key back (§8 line 261 says 同键可重试), and a reply that does not fit the
+// contract is a REA_CONTRACT_MISMATCH rather than a dump of what the command happened to return.
+// The journal scope carries the concrete path (two projects must not share one key) while the
+// digest is taken over the template, which is what makes a replay by body rather than by URL.
+async function commitCreation(
+  ctx: Context,
+  deps: ApiDependencies,
+  input: {
+    key: string;
+    scope: string;
+    template: string;
+    command: string;
+    payload: Record<string, JsonValue>;
+    body: JsonValue;
+    projection: CommitProjection;
+  },
+): Promise<ApiResponse> {
+  const digest = idempotencyDigest({ route: input.template, method: "POST", body: input.body }, ctx.declaration, deps.limits);
+  if (!digest.ok) return refused(ctx.requestId, digest.error.code, digest.error.reason, digest.error.message, ctx.declaration);
+  const scope = journalScope(String((ctx.session as CurrentSession).reviewerId), input.scope);
+  const claim = deps.journal.claim(scope, input.key, digest.value);
+  if (claim.kind === "divergent") {
+    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-reused", "that idempotency key already carries a different request", ctx.declaration);
+  }
+  if (claim.kind === "inFlight") {
+    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-in-flight", "the first request with that key has not produced a result yet", ctx.declaration);
+  }
+  if (claim.kind === "replay") {
+    return jsonSuccess(ctx.requestId, claim.recorded.status, claim.recorded.body);
+  }
+  const outcome = await deps.worker.call(input.command, input.payload, ctx.actor);
+  if (!outcome.ok) {
+    deps.journal.abandon(scope, input.key);
+    return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  }
+  const receipt = projectCommit(ctx, outcome.value, input.projection);
+  if (!receipt.ok) {
+    // A creation that produced something this process cannot name is still a refusal, so the key
+    // goes back to the caller rather than being pinned to an answer it never got.
+    deps.journal.abandon(scope, input.key);
+    return receipt.response;
+  }
+  deps.journal.record(scope, input.key, digest.value, { status: 201, body: receipt.value });
+  return jsonSuccess(ctx.requestId, 201, receipt.value);
+}
+
 type ReviewInput = { decision: "approved" | "rejected"; expectedDigest: JsonValue; expectedInventoryRevision?: number };
 
 type ReviewBody = { ok: true; request: ReviewInput } | { ok: false; response: ApiResponse };
@@ -642,18 +800,7 @@ function reviewBody(ctx: Context, schema: Parameters<typeof parseStrict>[0]): Re
   const body = readJsonBody(ctx);
   if (!body.ok) return { ok: false, response: body.response };
   const parsed = parseStrict(schema, body.value);
-  if (!parsed.ok) {
-    // Paths, never values (§12.1): an extra field must not be echoed back.
-    return {
-      ok: false,
-      response: errorResponse(ctx.requestId, {
-        code: "INVALID_INPUT",
-        message: "the review request does not match the named schema",
-        // The names to take out, never the values that came with them (§12.1).
-        details: { fields: parsed.error.issues.map((issue) => issue.path), rejectedKeys: parsed.error.issues.flatMap((issue) => issue.keys ?? []) },
-      }, ctx.declaration),
-    };
-  }
+  if (!parsed.ok) return { ok: false, response: invalidBody(ctx, "the review request does not match the named schema", parsed.error) };
   // Which of the three schemas was handed in is what decides whether the inventory revision is
   // required, so a missing one is a schema refusal here rather than a second check that could
   // disagree with it.
@@ -690,32 +837,15 @@ async function freezeBlueprint(ctx: Context, deps: ApiDependencies, key: string)
       details: { fields: parsed.error.issues.map((issue) => issue.path), rejectedKeys: parsed.error.issues.flatMap((issue) => issue.keys ?? []) },
     }, ctx.declaration);
   }
-  const route = `${API_PREFIX}/projects/${String(projectId)}/blueprints`;
-  const digest = idempotencyDigest({ route: `${API_PREFIX}/projects/:projectId/blueprints`, method: "POST", body: parsed.value }, ctx.declaration, deps.limits);
-  if (!digest.ok) return refused(ctx.requestId, digest.error.code, digest.error.reason, digest.error.message, ctx.declaration);
-  const scope = journalScope(String((ctx.session as CurrentSession).reviewerId), route);
-  const claim = deps.journal.claim(scope, key, digest.value);
-  if (claim.kind === "divergent") {
-    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-reused", "that idempotency key already carries a different request", ctx.declaration);
-  }
-  if (claim.kind === "inFlight") {
-    return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-in-flight", "the first request with that key has not produced a result yet", ctx.declaration);
-  }
-  if (claim.kind === "replay") {
-    return jsonSuccess(ctx.requestId, claim.recorded.status, claim.recorded.body);
-  }
-  const outcome = await deps.worker.call("blueprint.freeze", { projectId, request: { planId: parsed.value.verificationPlanId } }, ctx.actor);
-  if (!outcome.ok) {
-    deps.journal.abandon(scope, key);
-    return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
-  }
-  const receipt = parseStrict(blueprintFreezeReceiptSchema, pickFields(outcome.value, ["blueprintId", "digest", "manifestDigest", "planId", "publicVectorCount", "holdoutVectorCount", "contractCount", "auditSeq"]));
-  if (!receipt.ok) {
-    deps.journal.abandon(scope, key);
-    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "blueprint-freeze-shape", "the worker did not answer with a frozen blueprint", ctx.declaration);
-  }
-  deps.journal.record(scope, key, digest.value, { status: 201, body: receipt.value });
-  return jsonSuccess(ctx.requestId, 201, receipt.value);
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${String(projectId)}/blueprints`,
+    template: `${API_PREFIX}/projects/:projectId/blueprints`,
+    command: "blueprint.freeze",
+    payload: { projectId, request: { planId: parsed.value.verificationPlanId } },
+    body: parsed.value,
+    projection: COMMIT_PROJECTIONS.blueprint,
+  });
 }
 
 async function reviewVector(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
@@ -729,11 +859,9 @@ async function reviewVector(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   if (!body.ok) return body.response;
   const outcome = await deps.worker.call("vector.review", { projectId, vectorId, request: reviewRequest(ctx, body.request) }, ctx.actor);
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
-  const receipt = parseStrict(vectorReviewReceiptSchema, pickFields(outcome.value, ["vectorId", "digest", "eligibility", "reasons", "inventoryRevision", "auditSeq", "eventSeq"]));
-  if (!receipt.ok) {
-    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "vector-review-shape", "the worker did not answer with a vector review receipt", ctx.declaration);
-  }
-  return jsonSuccess(ctx.requestId, 200, receipt.value);
+  const projected = projectCommit(ctx, outcome.value, COMMIT_PROJECTIONS.vector);
+  if (!projected.ok) return projected.response;
+  return jsonSuccess(ctx.requestId, 200, projected.value);
 }
 
 async function reviewContract(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
@@ -747,11 +875,9 @@ async function reviewContract(ctx: Context, deps: ApiDependencies): Promise<ApiR
   if (!body.ok) return body.response;
   const outcome = await deps.worker.call("contract.review", { projectId, contractId, request: reviewRequest(ctx, body.request) }, ctx.actor);
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
-  const receipt = parseStrict(contractReviewReceiptSchema, pickFields(outcome.value, ["contractId", "contractKey", "revision", "digest", "reviewStatus", "auditSeq", "eventSeq"]));
-  if (!receipt.ok) {
-    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "contract-review-shape", "the worker did not answer with a contract review receipt", ctx.declaration);
-  }
-  return jsonSuccess(ctx.requestId, 200, receipt.value);
+  const projected = projectCommit(ctx, outcome.value, COMMIT_PROJECTIONS.contract);
+  if (!projected.ok) return projected.response;
+  return jsonSuccess(ctx.requestId, 200, projected.value);
 }
 
 async function reviewPlan(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
@@ -765,11 +891,9 @@ async function reviewPlan(ctx: Context, deps: ApiDependencies): Promise<ApiRespo
   if (!body.ok) return body.response;
   const outcome = await deps.worker.call("plan.review", { projectId, planId, request: reviewRequest(ctx, body.request) }, ctx.actor);
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
-  const receipt = parseStrict(planReviewReceiptSchema, pickFields(outcome.value, ["planId", "digest", "inventoryDigest", "selectedCount", "excludedCount", "graphRevision", "inventoryRevision", "reviewStatus", "auditSeq", "eventSeq"]));
-  if (!receipt.ok) {
-    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "plan-review-shape", "the worker did not answer with a plan review receipt", ctx.declaration);
-  }
-  return jsonSuccess(ctx.requestId, 200, receipt.value);
+  const projected = projectCommit(ctx, outcome.value, COMMIT_PROJECTIONS.plan);
+  if (!projected.ok) return projected.response;
+  return jsonSuccess(ctx.requestId, 200, projected.value);
 }
 
 async function readVector(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
@@ -1068,6 +1192,12 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createExport(ctx, deps);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/blueprints`) {
       response = await freezeBlueprint(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/vectors`) {
+      response = await createVector(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/contracts`) {
+      response = await createContract(ctx, deps);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/verification-plans`) {
+      response = await createPlan(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/review")) {
       // One branch for three routes, chosen by the resource the path names: the commands take
       // different ids, and two of the three are inventory-bound while the contract one is not.

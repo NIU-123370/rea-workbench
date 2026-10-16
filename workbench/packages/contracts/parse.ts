@@ -1,4 +1,5 @@
 import type { Result } from "../domain/result.ts";
+import type { JsonValue } from "../domain/json-value.ts";
 import type { ZodType } from "zod";
 
 // Every wire input starts as `unknown` and is parsed by a named strict schema
@@ -11,6 +12,11 @@ export type ParseFailure = {
   // whole answer, and it is not the value that came with it, which stays unechoed (§12.1).
   issues: { path: string; reason: string; message: string; keys?: string[] }[];
 };
+
+// A schema that keeps its output inside the JSON domain: every wire reply in this project is
+// parsed by one, and the alias lets a caller name the requirement without importing zod itself
+// (§3 keeps the validator out of `apps/web`).
+export type JsonSchema = ZodType<JsonValue>;
 
 export function parseStrict<T>(schema: ZodType<T>, input: unknown): Result<T, ParseFailure> {
   const parsed = schema.safeParse(input);

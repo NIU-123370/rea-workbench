@@ -26,6 +26,80 @@ import { hex } from "./blueprint-seed.ts";
 // then be testing the REA adapter as well. The digest the vector index row carries is still the
 // domain's own over the same canonical bytes, which is what the contract gate re-verifies.
 const LIMITS = { maxDepth: 24, maxCodeUnits: 200_000 };
+
+// The stored evidence envelope, in the shape the REA mirror says `inspect_web_network_capture`
+// produces (§4's mirrored schema). `vector.create` reads it back through
+// `web-capture-records.readRecord`, which re-hashes the bytes and parses `normalized_result`, so
+// an envelope invented for convenience would surface there as a contract mismatch rather than a
+// created vector - which is exactly the difference this fixture has to get right.
+function captureEnvelope(evidenceId: string): Record<string, JsonValue> {
+  return {
+    evidence_id: evidenceId,
+    subject: {
+      name: "cart.har",
+      digest: { sha256: SNAPSHOT },
+      format: "file",
+      architecture: null,
+      local_path: "/captures/cart.har",
+    },
+    provider: { id: "rea.web.network", name: "Web network capture", version: "6.4.0" },
+    analysis_profile: null,
+    predicate_type: "web-network-capture",
+    operation: "inspect_web_network_capture",
+    parameters: { capture_path: "/captures/cart.har", format: "har", sensitive_values: [] },
+    raw_result: null,
+    normalized_result: {
+      decoder: { id: "har-1.2", name: "HAR", version: "1.2" },
+      container: {
+        reported: { log: { version: "1.2", creator: { name: "chrome", version: "141" } } },
+        numeric_literals: [],
+        redactions: [],
+        records_pointer: "/log/entries",
+      },
+      total_records: 1,
+      records: [
+        {
+          ordinal: 0,
+          location: { kind: "json-pointer", pointer: "/records/0/reported" },
+          reported: {
+            request: {
+              method: "GET",
+              url: "https://shop.example/api/cart",
+              queryString: [{ name: "include", value: "items" }],
+              headers: [{ name: "authorization", value: "redacted" }],
+              cookies: [],
+              headersSize: -1,
+              bodySize: 0,
+            },
+            response: {
+              status: 200,
+              statusText: "OK",
+              headers: [{ name: "content-type", value: "application/json" }],
+              cookies: [],
+              content: { size: 11, compression: 0, mimeType: "application/json", text: "{\"items\":[]}" },
+              bodySize: 11,
+            },
+          },
+          binary_fields: [],
+          numeric_literals: [{ pointer: "/records/0/reported/response/status", producer_type: "json-number", literal: "200" }],
+          redactions: [{ pointer: "/records/0/reported/request/headers/0/value", reason: "transport-credential" }],
+          limitations: [],
+        },
+      ],
+      artifact: { path: "/captures/cart.har", sha256: SNAPSHOT, bytes: 2048 },
+      format: "har",
+      runtime_attribution: "unknown",
+      limitations: [],
+    },
+    confidence: "observed",
+    authority: "shipped-artifact",
+    environment: null,
+    limitations: [],
+    relationship_coverage: { status: "complete" },
+    locations: [{ kind: "artifact-path", path: "/captures/cart.har" }],
+    evidence_links: [],
+  };
+}
 const SNAPSHOT = ("9" as const).repeat(64) as Digest;
 const DIALECT = "https://json-schema.org/draft/2020-12/schema";
 
@@ -58,7 +132,7 @@ export async function seedReviewChain(deps: {
   const evidenceId = `ev_${"8".repeat(64)}`;
   const claimId = newId();
 
-  const envelope = { evidence_id: evidenceId, operation: "inspect_web_network_capture", detail: { status: 200 } };
+  const envelope = captureEnvelope(evidenceId);
   const evidenceBytes = await store.publish(projectId, "inspector", new TextEncoder().encode(JSON.stringify(envelope)));
   if (!evidenceBytes.ok) throw new Error(`evidence publish -> ${JSON.stringify(evidenceBytes.error)}`);
 
