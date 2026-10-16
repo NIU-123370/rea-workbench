@@ -199,6 +199,35 @@ export type BlueprintRow = {
   createdAt: Instant;
 };
 
+export type CandidateRow = {
+  id: Id;
+  projectId: Id;
+  blueprintId: Id;
+  jobId: Id;
+  artifactId: Id;
+  digest: Digest;
+  generatorJson: JsonValue;
+  dependencyManifestJson: JsonValue;
+};
+
+export type VerificationRow = {
+  id: Id;
+  projectId: Id;
+  candidateId: Id;
+  jobId: Id;
+  planId: Id;
+  planDigest: Digest;
+  inventoryDigest: Digest;
+  blueprintDigest: Digest;
+  vectorSetDigest: Digest;
+  comparatorDigest: Digest;
+  runnerImageDigest: Digest;
+  result: "PASS" | "FAIL" | "UNKNOWN";
+  currentness: "current" | "stale";
+  summaryJson: JsonValue;
+  reportArtifactId: Id;
+};
+
 export type GraphEdgeRow = {
   id: Id;
   projectId: Id;
@@ -305,6 +334,13 @@ export type StorageTransaction = {
   listPlans(projectId: Id, filter: { targetId: Id | null; limit: number }): PlanRow[];
   insertBlueprint(row: BlueprintRow): void;
   getBlueprint(projectId: Id, blueprintId: Id): BlueprintRow | null;
+  // Candidate rows are written by the Builder service (issue #19) and read here by
+  // the verification gate, which must bind a candidate digest it did not choose.
+  insertCandidate(row: CandidateRow): void;
+  getCandidate(projectId: Id, candidateId: Id): CandidateRow | null;
+  insertVerification(row: VerificationRow): void;
+  getVerification(projectId: Id, verificationId: Id): VerificationRow | null;
+  listVerificationsForCandidate(projectId: Id, candidateId: Id): VerificationRow[];
   insertGraphEdge(row: GraphEdgeRow): void;
   listEdges(projectId: Id, targetId: Id): GraphEdgeRow[];
   listClaimEvidence(projectId: Id, claimId: Id): { evidenceId: string; locationJson: JsonValue; role: "support" | "contradict" }[];
@@ -374,6 +410,9 @@ export type ArtifactPort = {
     declaredSha256?: Digest,
   ): Promise<Result<PublishedFile, ArtifactPortError>>;
   read(projectId: Id, storageKey: string): Promise<Result<Uint8Array, ArtifactPortError>>;
+  // The evaluator hands a staging id, never a storage key or a path (§5: keys are
+  // server-visible only), and the worker reads the bytes behind that id.
+  readStaging(projectId: Id, stagingId: string): Promise<Result<Uint8Array, ArtifactPortError>>;
   // Resolves a key this store published into the absolute path the producer must
   // be given. Returns null for anything it did not mint.
   absolutePathFor(projectId: Id, storageKey: string): string | null;

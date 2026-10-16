@@ -10,6 +10,7 @@ import { TransactionRefused } from "../../application/decision.ts";
 import type { CleanupState, JobState } from "../../contracts/jobs.ts";
 import type {
   ArtifactRow,
+  CandidateRow,
   AuditRow,
   CommittedAudit,
   CommittedEvent,
@@ -18,6 +19,7 @@ import type {
   JobIdempotency,
   JobRow,
   LeaseRow,
+  VerificationRow,
   ProjectRow,
   StoragePortError,
   StorageTransaction,
@@ -46,6 +48,26 @@ function jsonOf(value: JsonValue): string {
 function parseJson(text: string | null): JsonValue | null {
   if (text === null) return null;
   return JSON.parse(text) as JsonValue;
+}
+
+function verificationFrom(row: Row): VerificationRow {
+  return {
+    id: asId(String(row["id"])),
+    projectId: asId(String(row["project_id"])),
+    candidateId: asId(String(row["candidate_id"])),
+    jobId: asId(String(row["job_id"])),
+    planId: asId(String(row["plan_id"])),
+    planDigest: asDigest(String(row["plan_digest"])),
+    inventoryDigest: asDigest(String(row["inventory_digest"])),
+    blueprintDigest: asDigest(String(row["blueprint_digest"])),
+    vectorSetDigest: asDigest(String(row["vector_set_digest"])),
+    comparatorDigest: asDigest(String(row["comparator_digest"])),
+    runnerImageDigest: asDigest(String(row["runner_image_digest"])),
+    result: String(row["result"]) as VerificationRow["result"],
+    currentness: String(row["currentness"]) as VerificationRow["currentness"],
+    summaryJson: parseJson(String(row["summary_json"])),
+    reportArtifactId: asId(String(row["report_artifact_id"])),
+  };
 }
 
 function mapSqliteError(error: unknown): StoragePortError {
@@ -611,6 +633,85 @@ class SqliteTransaction implements StorageTransaction {
       sourceManifestArtifactId: asId(String(row["source_manifest_artifact_id"])),
       createdAt: asInstant(String(row["created_at"])),
     };
+  }
+
+  insertCandidate(row: CandidateRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO candidates (id, project_id, blueprint_id, job_id, artifact_id, digest, generator_json, dependency_manifest_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.blueprintId,
+        row.jobId,
+        row.artifactId,
+        row.digest,
+        JSON.stringify(row.generatorJson),
+        JSON.stringify(row.dependencyManifestJson),
+      );
+  }
+
+  getCandidate(projectId: Id, candidateId: Id): CandidateRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM candidates WHERE project_id = ? AND id = ?")
+      .get(projectId, candidateId) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      blueprintId: asId(String(row["blueprint_id"])),
+      jobId: asId(String(row["job_id"])),
+      artifactId: asId(String(row["artifact_id"])),
+      digest: asDigest(String(row["digest"])),
+      generatorJson: parseJson(String(row["generator_json"])),
+      dependencyManifestJson: parseJson(String(row["dependency_manifest_json"])),
+    };
+  }
+
+  insertVerification(row: VerificationRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO verifications (id, project_id, candidate_id, job_id, plan_id, plan_digest, inventory_digest, blueprint_digest, vector_set_digest, comparator_digest, runner_image_digest, result, currentness, summary_json, report_artifact_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.candidateId,
+        row.jobId,
+        row.planId,
+        row.planDigest,
+        row.inventoryDigest,
+        row.blueprintDigest,
+        row.vectorSetDigest,
+        row.comparatorDigest,
+        row.runnerImageDigest,
+        row.result,
+        row.currentness,
+        JSON.stringify(row.summaryJson),
+        row.reportArtifactId,
+      );
+  }
+
+  getVerification(projectId: Id, verificationId: Id): VerificationRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM verifications WHERE project_id = ? AND id = ?")
+      .get(projectId, verificationId) as Row | undefined;
+    if (!row) return null;
+    return verificationFrom(row);
+  }
+
+  // A candidate may be re-verified; the newest row is the one whose currentness is
+  // reported, and the older ones stay readable as their own immutable records.
+  listVerificationsForCandidate(projectId: Id, candidateId: Id): VerificationRow[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM verifications WHERE project_id = ? AND candidate_id = ? ORDER BY rowid",
+      )
+      .all(projectId, candidateId) as Row[];
+    return rows.map(verificationFrom);
   }
 
   insertGraphEdge(row: GraphEdgeRow): void {

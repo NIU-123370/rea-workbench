@@ -4,7 +4,10 @@
 // must refuse it for the same reason as every other service, otherwise "Builder
 // reads blueprints only" becomes a per-module claim instead of one rule.
 
-export type ActorKind = "inspector" | "reviewer" | "builder" | "system";
+// `evaluator` is the trusted comparison role of DESIGN 10. It is not a control-plane
+// kind and it is not a decision kind: it may only hand a completion in, never approve
+// a plan, a contract or a sample.
+export type ActorKind = "inspector" | "reviewer" | "builder" | "system" | "evaluator";
 
 export type Actor = {
   actorId: string;
