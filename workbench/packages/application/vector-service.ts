@@ -6,7 +6,6 @@ import type { Id, Instant } from "../domain/identity.ts";
 import type { JsonValue, JsonObject } from "../domain/json-value.ts";
 import { isJsonObject } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
-import type { NamedErrorCode } from "../contracts/errors.ts";
 import {
   testVectorContentSchema,
   vectorCreateRequestSchema,
@@ -53,19 +52,16 @@ import type {
 //      caller can turn a blocked sample into a usable one or replace a different
 //      source record.
 
-export type VectorActorKind = "inspector" | "reviewer" | "builder" | "system";
+import type { Actor, ActorKind } from "./actor.ts";
+import { buildAuditRow, commitDecision as journalDecision } from "./decision.ts";
+import type { GateFailure } from "./gate-failure.ts";
+import { issueNames } from "./gate-failure.ts";
 
-export type VectorActor = {
-  actorId: string;
-  actorKind: VectorActorKind;
-};
-
-export type VectorFailure = {
-  code: NamedErrorCode;
-  reason: string;
-  message: string;
-  details: JsonObject;
-};
+// The actor vocabulary and the failure shape have one owner each, so a refusal
+// in this service cannot drift from a refusal in the contract or plan service.
+export type VectorActorKind = ActorKind;
+export type VectorActor = Actor;
+export type VectorFailure = GateFailure;
 
 export type VectorCommit = {
   vectorId: Id;
@@ -107,23 +103,6 @@ function safeMessage(text: string, context: VectorOperationContext): string {
   return redactText(text, context.sensitive).text;
 }
 
-type WireIssue = { path: readonly PropertyKey[]; code?: string; keys?: string[] };
-
-// A strict-object refusal is the interesting one for a caller: it names the field
-// that has no place in the request (the forged `request`/`response` pair above all).
-function issuePaths(issues: readonly WireIssue[]): string[] {
-  const named: string[] = [];
-  for (const issue of issues) {
-    if (issue.code === "unrecognized_keys" && issue.keys !== undefined) {
-      named.push(...issue.keys);
-      continue;
-    }
-    const path = issue.path.map(String).join(".");
-    named.push(path === "" ? "<root>" : path);
-  }
-  return named.slice(0, 8);
-}
-
 function auditRow(
   projectId: Id,
   actor: VectorActor,
@@ -133,18 +112,16 @@ function auditRow(
   reasonCode: string,
   metadata: JsonValue,
 ): AuditRow {
-  return {
+  return buildAuditRow({
     projectId,
-    actorId: actor.actorId,
-    actorKind: actor.actorKind,
-    action,
+    actor,
     resourceType: "vector",
+    action,
     resourceId,
     decision,
     reasonCode,
-    safeMetadataJson: metadata,
-    createdAt: nowInstant(),
-  };
+    metadata,
+  });
 }
 
 function stringArray(value: JsonValue): string[] {
@@ -258,10 +235,9 @@ export class VectorService {
     this.limits = deps.limits;
   }
 
-  // DESIGN §12.2: the decision and its journal entry commit together, and the
-  // journal must say what actually happened. A refusal inside the transaction is
-  // written as a deny in that same transaction — committing the business rows and
-  // an `allow` for a write that was refused would make the audit trail a lie.
+  // DESIGN §12.2: the decision and its journal entry commit together. The
+  // transaction unit itself is owned by `decision.ts` so the vector, contract and
+  // plan services cannot drift apart on when a deny is journalled.
   private commitDecision<T>(
     projectId: Id,
     actor: VectorActor,
@@ -271,31 +247,16 @@ export class VectorService {
     metadata: JsonValue,
     work: (tx: StorageTransaction) => Step<T>,
   ): Result<{ value: T; auditSeq: number }, VectorFailure> {
-    const outcome = this.storage.transact((tx) => {
-      const step = work(tx);
-      if (step.kind === "failure") {
-        return {
-          kind: "denied" as const,
-          failure: step.failure.error,
-          auditSeq: tx.insertAudit(
-            auditRow(projectId, actor, action, resourceId, "deny", step.failure.error.reason, {}),
-          ),
-        };
-      }
-      return {
-        kind: "allowed" as const,
-        value: step.value,
-        auditSeq: tx.insertAudit(
-          auditRow(projectId, actor, action, resourceId, "allow", allowReason, metadata),
-        ),
-      };
+    return journalDecision(this.storage, {
+      projectId,
+      actor,
+      resourceType: "vector",
+      action,
+      resourceId,
+      allowReason,
+      metadata,
+      work,
     });
-    if (!outcome.ok) return fail("INVALID_INPUT", outcome.error.code, outcome.error.message);
-    if (outcome.value.kind === "denied") {
-      const failure = outcome.value.failure;
-      return fail(failure.code, failure.reason, failure.message, failure.details);
-    }
-    return { ok: true, value: { value: outcome.value.value, auditSeq: outcome.value.auditSeq } };
   }
 
   private chainCluster(
@@ -368,8 +329,8 @@ export class VectorService {
       return fail(
         "INVALID_INPUT",
         "create-request",
-        safeMessage(`create request rejected: ${issuePaths(parsed.error.issues).join(",")}`, context),
-        { issues: issuePaths(parsed.error.issues) },
+        safeMessage(`create request rejected: ${issueNames(parsed.error.issues).join(",")}`, context),
+        { issues: issueNames(parsed.error.issues) },
       );
     }
     const request = parsed.data;
@@ -687,7 +648,7 @@ export class VectorService {
       return fail(
         "INVALID_INPUT",
         "review-request",
-        safeMessage(`review request rejected: ${issuePaths(parsed.error.issues).join(",")}`, context),
+        safeMessage(`review request rejected: ${issueNames(parsed.error.issues).join(",")}`, context),
       );
     }
     const request = parsed.data;
@@ -838,6 +799,25 @@ export class VectorService {
     };
   }
 
+  // Bulk read for the contract gate. Each payload digest is verified against its
+  // index row, so content read outside a write transaction is still provably the
+  // content that transaction is deciding about.
+  async loadContents(
+    projectId: Id,
+    vectorIds: readonly Id[],
+  ): Promise<Result<Map<string, TestVector>, VectorFailure>> {
+    const loaded = new Map<string, TestVector>();
+    for (const vectorId of vectorIds) {
+      const looked = this.storage.transact((tx) => tx.getVector(projectId, vectorId));
+      if (!looked.ok) return fail("INVALID_INPUT", looked.error.code, looked.error.message);
+      if (looked.value === null) return fail("NOT_FOUND", "vector-unknown", "vector not found");
+      const read = await this.materialize(looked.value);
+      if (!read.ok) return read;
+      loaded.set(vectorId, read.value);
+    }
+    return { ok: true, value: loaded };
+  }
+
   private async materialize(row: VectorRow): Promise<Result<TestVector, VectorFailure>> {
     const artifactLookup = this.storage.transact((tx) => tx.getArtifact(row.projectId, row.payloadArtifactId));
     if (!artifactLookup.ok) return fail("INVALID_INPUT", artifactLookup.error.code, artifactLookup.error.message);
@@ -857,7 +837,7 @@ export class VectorService {
       return fail(
         "REA_CONTRACT_MISMATCH",
         "payload-schema",
-        `vector payload violates the schema at ${issuePaths(parsed.error.issues).join(",")}`,
+        `vector payload violates the schema at ${issueNames(parsed.error.issues).join(",")}`,
       );
     }
     const content = toContent(parsed.data);
