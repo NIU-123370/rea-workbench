@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runRestore, MANIFEST_SUFFIX } from "../../apps/worker/restore.ts";
-import { createReleaseBackup, verifyReleaseBackup, type ManifestEntry } from "../../packages/adapters/storage/backup-manifest.ts";
+import { runBackup, runVerify } from "../../apps/worker/backup.ts";
 import {
   acquireWorkerLock,
   applyMigrations,
@@ -15,7 +15,7 @@ import {
 } from "../../packages/adapters/storage/database.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
-import { MIGRATIONS, SCHEMA_VERSION } from "../../packages/adapters/storage/migrations.ts";
+import { MIGRATIONS } from "../../packages/adapters/storage/migrations.ts";
 import { MIGRATION_TABLE } from "../../packages/adapters/storage/database.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
@@ -113,15 +113,14 @@ beforeAll(async () => {
   });
   if (!artifact.ok) throw new Error(JSON.stringify(artifact.error));
 
-  const bundle = await createReleaseBackup({
-    db,
-    dataDir: root,
-    schemaVersion: SCHEMA_VERSION,
-    resolveFile: (entry: ManifestEntry) => store.absolutePathFor(entry.projectId as Id, entry.storageKey),
-  });
-  if (!bundle.ok) throw new Error(JSON.stringify(bundle.error));
-  snapshotFile = bundle.value.databaseFile;
-  manifestFile = bundle.value.manifestFile;
+  // The bundle under test is produced by the operator's own command, not by a test helper:
+  // a restore that only works against a fixture-built manifest is not a restore.
+  const made = await runBackup(root);
+  if (!made.ok) throw new Error(JSON.stringify(made.failure));
+  expect(made.artifacts).toBe(1);
+  expect(made.projects).toBe(1);
+  snapshotFile = made.databaseFile;
+  manifestFile = made.manifestFile;
   db.close();
 });
 
@@ -130,6 +129,94 @@ afterAll(async () => {
 });
 
 describe("the restore command (D23 / A16)", () => {
+  it("verifies the bundle the backup command produced, with nothing to complain about", async () => {
+    const verified = await runVerify(root, snapshotFile);
+    if (!verified.ok) throw new Error(JSON.stringify(verified.failure));
+    expect(verified.report.artifacts.verified).toBe(1);
+    expect(verified.report.reasons).toEqual([]);
+    const refused = await runVerify(root, path.join(root, "backups", "workbench-never-written.db"));
+    expect(!refused.ok && refused.failure.reason).toBe("backup-pair-incomplete");
+    const relative = await runVerify(root, "workbench-relative.db");
+    expect(!relative.ok && relative.failure.reason).toBe("snapshot-path-must-be-absolute");
+  });
+
+  it("refuses to back up or verify while the worker still holds the directory", async () => {
+    // The same lock the worker takes: a manifest written while another process is still
+    // publishing files describes a moment that never existed, so neither command is allowed
+    // to read the database in that state - not even read-only.
+    const held = await acquireWorkerLock(root);
+    if (!held.ok) throw new Error(JSON.stringify(held.error));
+    try {
+      const backup = await runBackup(root);
+      expect(backup.ok).toBe(false);
+      if (backup.ok) return;
+      expect(backup.failure.reason).toBe("worker-still-running-close-it-first");
+      const verify = await runVerify(root, snapshotFile);
+      expect(verify.ok).toBe(false);
+      if (verify.ok) return;
+      expect(verify.failure.reason).toBe("worker-still-running-close-it-first");
+    } finally {
+      await held.value.release();
+    }
+  });
+
+  it("reports a drifted file instead of passing the bundle", async () => {
+    const file = store.absolutePathFor(projectId, storageKey);
+    if (file === null) throw new Error("the store could not resolve its own key");
+    const original = readFileSync(file);
+    await writeFile(file, "drifted after the backup");
+    try {
+      const verified = await runVerify(root, snapshotFile);
+      if (!verified.ok) throw new Error(JSON.stringify(verified.failure));
+      expect(verified.report.artifacts.mismatched).toBe(1);
+      expect(verified.report.artifacts.verified).toBe(0);
+      expect(verified.report.reasons.join(" ")).toContain("artifact-file-digest-mismatch");
+    } finally {
+      await writeFile(file, original);
+    }
+    const again = await runVerify(root, snapshotFile);
+    if (!again.ok) throw new Error(JSON.stringify(again.failure));
+    expect(again.report.reasons).toEqual([]);
+  });
+
+  it("says what it could not read when the snapshot itself is unreadable", async () => {
+    // A bundle can be present and still useless - truncated transfer, disk trouble. The
+    // answer has to name the failure rather than be a bare "not verifiable", because this is
+    // the message an operator reads at 2am while deciding whether to restore.
+    const corrupt = path.join(root, "backups", "workbench-corrupt.db");
+    await writeFile(corrupt, "this is not a sqlite database");
+    await copyFile(manifestFile, `${corrupt}${MANIFEST_SUFFIX}`);
+    const outcome = await runVerify(root, corrupt);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.code).toBe("BACKUP_UNVERIFIABLE");
+    expect(outcome.failure.reason).toBe("backup-unverifiable");
+    expect(outcome.failure.details.length).toBeGreaterThan(0);
+    await rm(corrupt, { force: true });
+    await rm(`${corrupt}${MANIFEST_SUFFIX}`, { force: true });
+  });
+
+  it("brings a database that is behind this build forward before backing it up", async () => {
+    // The worker would apply these at startup anyway. Backing up a schema this build has not
+    // finished with would produce a bundle that cannot be handed back to a worker.
+    const opened = openWriteConnection(root);
+    if (!opened.ok) throw new Error(JSON.stringify(opened.error));
+    const last = MIGRATIONS[MIGRATIONS.length - 1];
+    if (last === undefined) throw new Error("no migrations to drop");
+    opened.value.db.prepare(`DELETE FROM ${MIGRATION_TABLE} WHERE id = ?`).run(last.id);
+    opened.value.db.close();
+    const outcome = await runBackup(root);
+    if (!outcome.ok) throw new Error(JSON.stringify(outcome.failure));
+    const check = openWriteConnection(root);
+    if (!check.ok) throw new Error(JSON.stringify(check.error));
+    try {
+      const plan = planMigrations(check.value.db);
+      expect(plan.ok && plan.value.pending.length).toBe(0);
+    } finally {
+      check.value.db.close();
+    }
+  });
+
   it("refuses while the worker still holds the data directory", async () => {
     const held = await acquireWorkerLock(root);
     if (!held.ok) throw new Error(JSON.stringify(held.error));
