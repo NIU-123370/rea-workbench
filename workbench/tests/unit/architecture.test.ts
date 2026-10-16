@@ -93,7 +93,11 @@ const RULES: Record<string, Rule> = {
   "apps/web": {
     allowedInternal: ["packages/domain", "packages/contracts", "packages/application", "apps/web"],
     allowedPackages: ["next", "react", "react-dom"],
-    allowedBuiltins: [],
+    // DESIGN 3 hands apps/web the HTTP/SSE transport and the private RPC client to
+    // the worker, which is exactly these three modules and nothing more: no sqlite,
+    // no filesystem, no child process, no zod. The API still may not open a write
+    // connection - every command goes through apps/web/worker-client.ts.
+    allowedBuiltins: ["node:http", "node:net", "node:path"],
   },
   "apps/broker": {
     // The broker is a host supervisor speaking its own restricted protocol; it
@@ -261,10 +265,14 @@ describe("module dependency direction (DESIGN §3)", () => {
   });
 
   it("catches a disallowed dependency and still lets an allowed one through", () => {
-    // The allowlist for apps/web is deliberately empty, and the broker may not
-    // reach an adapter; both must flag, while the real domain edge must not.
-    expect(RULES["apps/web"]?.allowedBuiltins).toEqual([]);
+    // apps/web is limited to the transport modules DESIGN 3 names for it; anything
+    // heavier still flags, and the broker may not reach an adapter at all.
+    expect(RULES["apps/web"]?.allowedBuiltins).toEqual(["node:http", "node:net", "node:path"]);
+    expect(isViolation("apps/web", "apps/web", "node:http")).toBe(false);
     expect(isViolation("apps/web", "apps/web", "node:sqlite")).toBe(true);
+    expect(isViolation("apps/web", "apps/web", "node:child_process")).toBe(true);
+    expect(isViolation("apps/web", "apps/web", "node:fs")).toBe(true);
+    expect(isViolation("apps/web", "apps/web", "../../packages/adapters/storage/writer.ts")).toBe(true);
     expect(isViolation("apps/broker", "apps/broker", "../packages/adapters/storage/database.ts")).toBe(
       true,
     );

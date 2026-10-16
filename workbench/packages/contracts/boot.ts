@@ -83,3 +83,22 @@ export const healthProfileSchema = z.strictObject({
 });
 
 export type HealthProfile = z.infer<typeof healthProfileSchema>;
+
+// The socket the worker listens on, named once (§14: the API only ever holds the RPC,
+// it never mounts the data directory). It is a file *inside* WB_DATA_DIR, so the two
+// processes agree on where the private channel is without either of them reading a
+// configuration value the other one invented.
+export const WORKER_RPC_SOCKET_NAME = "worker.rpc.sock";
+
+// What the web process needs out of §14: the literal loopback address, the port it
+// binds, and the data directory the worker's socket lives under. The filesystem
+// promises about that directory (private, writeable, lock-held) belong to the worker
+// composition root, which is the only process that may care about them.
+export const webListenConfigSchema = z.strictObject({
+  host: z.literal(LOOPBACK_HOST),
+  port: z.int().min(1).max(65535),
+  dataDir: z.string(),
+});
+
+export type WebListenConfigWire = z.infer<typeof webListenConfigSchema>;
+

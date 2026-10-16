@@ -1,5 +1,11 @@
-import { BOOT_CONFIG_FIELDS, DEFAULT_PORT, LOOPBACK_HOST, bootConfigSchema as BOOT_STRICT } from "../contracts/boot.ts";
-import type { BootConfigField, BootConfigWire, ProfileWire } from "../contracts/boot.ts";
+import {
+  BOOT_CONFIG_FIELDS,
+  DEFAULT_PORT,
+  LOOPBACK_HOST,
+  webListenConfigSchema,
+  bootConfigSchema as BOOT_STRICT,
+} from "../contracts/boot.ts";
+import type { BootConfigField, BootConfigWire, ProfileWire, WebListenConfigWire } from "../contracts/boot.ts";
 import { profileSchema } from "../contracts/boot.ts";
 import { parseStrict } from "../contracts/parse.ts";
 import type { JsonValue } from "../domain/json-value.ts";
@@ -206,6 +212,51 @@ function dedupeFailures(failures: readonly ConfigFailure[]): ConfigFailure[] {
 
 export function configFieldNames(failures: readonly ConfigFailure[]): string[] {
   return [...new Set(failures.map((failure) => failure.field))].sort();
+}
+
+export type WebListenConfig = WebListenConfigWire;
+
+// The only three §14 fields the web process reads. The other four are the worker's,
+// the broker's and the adapter's business, and reading them here would put a host
+// path or a provider endpoint inside a process that must not know about either.
+const WEB_LISTEN_FIELDS: readonly BootConfigField[] = ["WB_HOST", "WB_PORT", "WB_DATA_DIR"];
+
+// The web half of §14. Same three fields, same precedence (process config over the
+// installed package's declaration over the documented default), same rule that an
+// explicitly empty value is a mistake rather than an absence — and no filesystem
+// probes: §14 gives WB_DATA_DIR's privacy, writability and lock to the worker
+// composition root, and the API process must not acquire a stake in that directory.
+export function resolveWebListen(input: {
+  env: Readonly<Record<string, string | undefined>>;
+  installedDefaults: Readonly<Record<string, string | undefined>>;
+}): { kind: "ok"; config: WebListenConfig } | { kind: "invalid"; failures: ConfigFailure[] } {
+  const picked: Partial<Record<BootConfigField, string>> = {};
+  for (const field of WEB_LISTEN_FIELDS) {
+    const explicit = input.env[field];
+    const installed = input.installedDefaults[field];
+    if (explicit === "") picked[field] = "";
+    else if (typeof explicit === "string" && explicit.length > 0) picked[field] = explicit;
+    else if (typeof installed === "string" && installed.length > 0) picked[field] = installed;
+  }
+  const host = picked.WB_HOST ?? LOOPBACK_HOST;
+  const portText = picked.WB_PORT ?? String(DEFAULT_PORT);
+  const dataDir = picked.WB_DATA_DIR ?? "";
+  const failures: ConfigFailure[] = [];
+  if (host !== LOOPBACK_HOST) failures.push({ field: "WB_HOST", reason: "only-the-loopback-literal-is-accepted" });
+  if (picked.WB_HOST === "") failures.push({ field: "WB_HOST", reason: "present-but-empty" });
+  if (picked.WB_PORT === "") failures.push({ field: "WB_PORT", reason: "present-but-empty" });
+  const port = Number(portText);
+  if (!/^[1-9]\d*$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    failures.push({ field: "WB_PORT", reason: "decimal-integer-in-1..65535-required" });
+  }
+  if (dataDir === "") failures.push({ field: "WB_DATA_DIR", reason: "required-and-no-installed-default" });
+  else if (!absolutePath(dataDir)) failures.push({ field: "WB_DATA_DIR", reason: "absolute-normalised-path-required" });
+  if (failures.length > 0) return { kind: "invalid", failures: dedupeFailures(failures) };
+  const checked = parseStrict(webListenConfigSchema, { host, port, dataDir });
+  if (!checked.ok) {
+    return { kind: "invalid", failures: [{ field: "WB_PORT", reason: "resolved-shape-rejected" }] };
+  }
+  return { kind: "ok", config: checked.value };
 }
 
 export function toSafeJson(config: BootConfig): JsonValue {

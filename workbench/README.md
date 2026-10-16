@@ -89,10 +89,26 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 `tests/integration/rea-live-provider.test.ts` 在设了 `REA_LIVE_BIN` 时才跑真会话，
 没设就整支显式跳过，绝不把"没跑"算成"跑过"。
 
+本地会话与 API（DESIGN §8 §14 / D30 / issue #17）的边界：
+
+- 会话与配对码只活在 worker 进程的内存里；HTTP 侧不留副本，`session.read` 每个已认证
+  请求都问一次 worker，所以重启/过期/撤销在下一次请求就被感到。
+- 配对码绝不进 URL、query、referrer 或访问日志：路由只读 body，访问日志记的是匹配到的
+  路由模板而不是请求目标，`revoke` 之后再查一次同一个 cookie 就是 401。
+- `Idempotency-Key` 同键同摘要回放原结果（连响应体都逐字相同），不同 body ⇒ 409
+  `IDEMPOTENCY_CONFLICT`；digest 前先把投影交给唯一过滤器，含认证结构的 body 直接被拒，
+  不存在"给它算个摘要"这条路。
+- SSE 的 `Last-Event-ID` 与 `after` 不能互相矛盾；游标不可恢复 ⇒ 409
+  `EVENT_CURSOR_EXPIRED`，客户端被要求重读快照而不是补一个假事件。
+- 架构规则里 `apps/web` 的内建模块白名单被显式放宽到 `node:http`/`node:net`/`node:path`
+  三个传输件（DESIGN §3 就是把这个模块列为 HTTP/SSE），仍然不含 SQLite、文件系统写、
+  子进程与 zod；对账用例同时断言这四类越界依旧报红。
+
+
 ## 还没有的东西
 
 `npm run worker` 与 `npm run doctor` 现在存在：前者装配 worker（解析 `WB_*`、拿写
-锁、跑迁移、开本机 RPC），后者只报告不改宿主。`db:migrate` 与 `dev` 仍未实现——
+锁、跑迁移、开本机 RPC），后者只报告不改宿主。本机的 `http://127.0.0.1:4310` 已经是真的：`apps/web` 起 loopback `node:http`，配对码只能由本地启动命令签出，浏览器用 `POST /api/v1/session` 换 HttpOnly SameSite=Strict cookie + csrfToken + reviewerId，变更请求要 `X-CSRF-Token` 与精确 Host/Origin，SSE 按 worker 已提交的 seq 投递。`db:migrate` 与 `dev` 仍未实现——
 迁移由 worker 启动时执行（没有独立的迁移命令），HTTP API 与
 会话配对（`apps/web`，issue #17）与 `.env.example` 都还在队列里；宿主 broker 的契约与控制面门禁已落地（issue #21，见下），但 `apps/broker` 进程本体仍未实现。本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
 

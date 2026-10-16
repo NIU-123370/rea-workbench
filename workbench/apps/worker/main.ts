@@ -81,6 +81,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return 65;
   }
   terminal.print("rpc", `listening=${path.basename(started.value.socketPath)}`);
+  // DESIGN §14: the one-time pairing code is shown in the operator's own terminal,
+  // beside the URL that does not contain it. This is the only place the value leaves
+  // the worker's memory, and it is a terminal write rather than a response body, so a
+  // web request cannot ask for a code at all.
+  const pairing = worker.pairingCode();
+  terminal.print(
+    "pair",
+    `code=${pairing.token} url=http://${worker.config.host}:${String(worker.config.port)} expires=${pairing.expiresAt}`,
+  );
 
   await new Promise<void>((resolve) => {
     const stop = (): void => {
