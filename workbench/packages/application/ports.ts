@@ -172,6 +172,29 @@ export type ClaimEvidenceRow = {
   role: "support" | "contradict";
 };
 
+export type BlueprintRow = {
+  id: Id;
+  projectId: Id;
+  targetId: Id;
+  graphRevision: number;
+  snapshotDigest: Digest;
+  verificationPlanId: Id;
+  artifactId: Id;
+  digest: Digest;
+  sourceManifestArtifactId: Id;
+  createdAt: Instant;
+};
+
+export type GraphEdgeRow = {
+  id: Id;
+  projectId: Id;
+  targetId: Id;
+  fromKey: string;
+  toKey: string;
+  relation: string;
+  claimId: Id;
+};
+
 export type StoragePortError = {
   code:
     | "SQLITE_FAILURE"
@@ -227,6 +250,11 @@ export type StorageTransaction = {
   updatePlanReview(row: PlanRow): void;
   getPlan(projectId: Id, planId: Id): PlanRow | null;
   listPlans(projectId: Id, filter: { targetId: Id | null; limit: number }): PlanRow[];
+  insertBlueprint(row: BlueprintRow): void;
+  getBlueprint(projectId: Id, blueprintId: Id): BlueprintRow | null;
+  insertGraphEdge(row: GraphEdgeRow): void;
+  listEdges(projectId: Id, targetId: Id): GraphEdgeRow[];
+  listClaimEvidence(projectId: Id, claimId: Id): { evidenceId: string; locationJson: JsonValue; role: "support" | "contradict" }[];
   insertClaim(row: ClaimRow): void;
   getClaim(projectId: Id, claimId: Id): ClaimRow | null;
   insertClaimEvidence(row: ClaimEvidenceRow): void;

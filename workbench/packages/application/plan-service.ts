@@ -55,7 +55,7 @@ export type PlanCommit = {
   eventSeq: number | null;
 };
 
-function vectorFactsOf(rows: readonly VectorRow[]): PlanVectorFact[] {
+export function vectorFactsOf(rows: readonly VectorRow[]): PlanVectorFact[] {
   return rows.map((row) => ({
     id: row.id,
     targetId: row.targetId,
@@ -123,7 +123,7 @@ function contentFromWire(data: PlanContentWire): VerificationPlanContent {
   };
 }
 
-function contentOf(row: PlanRow): VerificationPlanContent | null {
+export function planContentOf(row: PlanRow): VerificationPlanContent | null {
   const parsed = verificationPlanContentSchema.safeParse(row.payloadJson);
   if (!parsed.success) return null;
   return contentFromWire(parsed.data);
@@ -388,7 +388,7 @@ export class PlanService {
           };
         }
 
-        const content = contentOf(row);
+        const content = planContentOf(row);
         if (content === null) {
           return {
             kind: "failure",
@@ -520,7 +520,7 @@ export class PlanService {
     const looked = this.storage.transact((tx) => {
       const row = tx.getPlan(projectId, planId);
       if (row === null) return null;
-      const content = contentOf(row);
+      const content = planContentOf(row);
       if (content === null) return { malformed: true as const };
       return { malformed: false as const, plan: rebuild(row, content) };
     });
@@ -552,7 +552,7 @@ export class PlanService {
     if (!listed.ok) return gateFail("INVALID_INPUT", listed.error.code, listed.error.message);
     const plans: VerificationPlan[] = [];
     for (const row of listed.value) {
-      const content = contentOf(row);
+      const content = planContentOf(row);
       if (content === null) {
         return gateFail("REA_CONTRACT_MISMATCH", "plan-payload-shape", "stored plan payload is malformed");
       }
