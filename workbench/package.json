@@ -24,7 +24,10 @@
     "perf:t17": "node infra/perf/t17-graph-update.ts",
     "ui:dev": "next dev apps/web -p 3000",
     "ui:build": "next build apps/web",
-    "ui:start": "next start apps/web -p 3000"
+    "ui:start": "next start apps/web -p 3000",
+    "db:restore": "node apps/worker/restore.ts",
+    "db:backup": "node apps/worker/backup.ts",
+    "db:verify": "node apps/worker/backup.ts verify"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

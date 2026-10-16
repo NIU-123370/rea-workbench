@@ -116,6 +116,21 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   manifest、并把磁盘文件再哈希一遍。缺文件、改内容、manifest 多写一条没跑过的迁移，都是具体原因
   而不是「成功」。旧构建读到不认识的迁移 id 就拒开库（`MIGRATION_UNKNOWN`），`planRestore` 同样
   拒恢复。
+- 三件事是一对，不是一条：`npm run db:backup` 产出 bundle、`npm run db:verify -- <快照路径>`
+  在它需要被恢复之前先报出「哪些文件对不上」，`npm run db:restore` 才动数据目录。**三条都先拿
+  worker 那把排他锁**（`worker-still-running-close-it-first`）：一边有人写文件、一边生成
+  manifest，得到的是一份描述「从未存在过的瞬间」的备份。verify 的退出码看 `reasons` 是否为空，
+  而不是看有没有找到文件——「找到了但有一堆说不清」不是通过。
+- `npm run db:restore -- --from <data dir>/backups/workbench-<stamp>.db` 是操作者的恢复入口，
+  顺序就是它的全部设计（§13 line 453 / D23）：**先拿 worker 自己的排他锁**（拿不到就停，这条
+  入口不可能和在线 worker 同时写），再确认 schema（`planRestore` 与 `planMigrations` 都会拒不
+  认识的迁移 id），再按 manifest 把磁盘文件**重新哈希**核对，然后才给现状留一份安全快照、把
+  快照**复制**到临时文件再原子 rename 到位（直接 rename 快照会吃掉操作者唯一能复核「恢复了什
+  么」的证据），最后用同一套增量、可重入迁移器把它带到本构建版本。任何一步不过都在写盘之前拒，
+  并给具体原因：`worker-still-running-close-it-first`、`backup-pair-incomplete`、
+  `backup-manifest-shape`、`snapshot-schema-newer-than-build`、
+  `artifact-files-do-not-match-the-manifest`、`restored-schema-unplannable`。旧的 `-wal` /
+  `-shm` 随被替换的库一起删——留着就等于让 SQLite 有机会重放刚被退役的状态。
 - **T17 只是本地测量，不是 A13 达标**：`npm run perf:t17` 用固定 fixture（1000 条记录 → 200 可见
   节点 + 400 边）量 `buildMiddlePanel` + `listView`，暖态 ≥30 次、nearest-rank p95；本机
   10-16 那轮 p50 0.16 ms / p95 0.27 ms / max 0.48 ms（40 个样本）。但记录里

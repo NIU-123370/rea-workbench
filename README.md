@@ -113,7 +113,7 @@ npm run test:integration
 | `npm run lint` | 执行 oxlint 静态检查。 |
 | `npm run review` | 执行仓库内的设计规则扫描，输出本地评审结果。 |
 
-`workbench/` 下已提供 `worker`（装配 worker 并打印配对码）、`web`（本机 API 进程）、`ui:dev`（Next 页面外壳）、`doctor`、`typecheck`、`test`、`lint`、`review`、`docs:check`、`perf:t17`。`db:migrate` 与 `dev` 仍未提供：迁移由 worker 启动时执行。基础模块测试无需 Docker、本地模型或真实 REA provider；fixture MCP 测试不代表真实 provider 工作流已经验证。更多开发约定见 [workbench/README.md](workbench/README.md)。
+`workbench/` 下已提供 `worker`（装配 worker 并打印配对码）、`web`（本机 API 进程）、`ui:dev`（Next 页面外壳）、`doctor`、`typecheck`、`test`、`lint`、`review`、`docs:check`、`perf:t17`。`db:migrate` 与 `dev` 仍未提供：迁移由 worker 启动时执行；离线恢复入口是 `db:restore`（须先停 worker）。基础模块测试无需 Docker、本地模型或真实 REA provider；fixture MCP 测试不代表真实 provider 工作流已经验证。更多开发约定见 [workbench/README.md](workbench/README.md)。
 
 <details>
 <summary><strong>想先独立体验底层 REA？</strong></summary>
