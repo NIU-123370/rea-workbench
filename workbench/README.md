@@ -37,10 +37,11 @@ npm ci
 | 模块                                        | 现在真正负责的事                                                                                                                                          |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/domain`                           | 主张三色投影、canonical JSON 与两类摘要、不透明 Id / Instant、向量与契约语义                                                                               |
-| `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）     |
+| `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略） |
 | `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
 | `packages/adapters/rea`                     | MCP 回复解码、Evidence 索引投影、HTTP 抓包事实读取、session 身份                                                                                           |
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
+| `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
 | `tests/{unit,integration,fixtures}`         | 纯逻辑门禁、真 SQLite / 真文件门禁与固定 envelope fixture                                                                                                   |
 
@@ -65,8 +66,7 @@ ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
 `npm run worker` 与 `npm run doctor` 现在存在：前者装配 worker（解析 `WB_*`、拿写
 锁、跑迁移、开本机 RPC），后者只报告不改宿主。`db:migrate` 与 `dev` 仍未实现——
 迁移由 worker 启动时执行（没有独立的迁移命令），HTTP API 与
-会话配对（`apps/web`，issue #17）、`.env.example`、以及 Docker 沙箱与宿主 broker
-（issue #21）都还在队列里。本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
+会话配对（`apps/web`，issue #17）与 `.env.example` 都还在队列里；宿主 broker 的契约与控制面门禁已落地（issue #21，见下），但 `apps/broker` 进程本体仍未实现。本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
 
 明确**未实现 / 未验证**的范围：
 
@@ -81,6 +81,22 @@ ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
   解析结果已在真样本上验证过。
 - `evidence_id` 的语义摘要仍由 REA 自己校验；工作台只做形状校验，这一条差异记录
   在 issue #14。
-- 资源 broker、候选执行器与 evaluator、性能门禁 A13 均未实现。受控 Web 采集的契约
+- 候选执行器与 evaluator、性能门禁 A13 均未实现。受控 Web 采集的契约
   与读回通路已在 `contracts/rea-web-capture.ts` + `adapters/rea/capture-inspection.ts`
   落地，但只在 fixture 上验证过，真 provider 会话仍归 issue #14。
+
+沙箱链路（issue #21）实现到「契约 + 控制面门禁 + Linux 命令渲染」这一层：四命令白名单、
+非 root / 只读根目录 / tmpfs / cap-drop ALL / no-new-privileges / seccomp / browser sandbox
+与 default-deny egress 在本机的单元与集成测试里可证。但**这些隔离效果在本机（macOS）不可
+验证**，具体是：
+
+- 没有真实容器执行——`apps/broker`（唯一持有调度权限的进程）尚未实现，测试一律注入 fake
+  transport；
+- 没有 seccomp profile 的实际加载；
+- 没有 network namespace 对 egress 的实际拦截（本机只验证了地址与 CIDR 的判定逻辑）。
+
+因此沙箱**不得被宣传为已支持的平台能力**：支持面固定为 Linux x64，且在 T19 的隔离验收于真实
+Linux 宿主通过之前，`GET /health` 的 profile 必须继续报告 `available: false`。隔离条件不满足
+时代码只拒绝、不回退到 `--no-sandbox`；平台判定由注入的 probe 提供，策略里不读
+`process.platform`（`tests/integration/sandbox-broker.test.ts` 有守卫用例）。
+
