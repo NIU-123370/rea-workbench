@@ -1,0 +1,672 @@
+{
+  "evidence_id": "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "subject": {
+    "name": "demo-app.asar",
+    "digest": {
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "format": "asar",
+    "architecture": null,
+    "local_path": "/operator/fixtures/demo-app.asar"
+  },
+  "provider": {
+    "id": "rea-javascript-application",
+    "name": "REA JavaScript application analyzer",
+    "version": "1"
+  },
+  "analysis_profile": null,
+  "predicate_type": "rea.javascript-application-analysis",
+  "operation": "analyze_javascript_application",
+  "parameters": {
+    "format": "asar",
+    "integrity_policy": "fail"
+  },
+  "raw_result": null,
+  "normalized_result": {
+    "input_path": "/operator/fixtures/demo-app.asar",
+    "format": "asar",
+    "root_artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "inventory_manifest_id": "agm_3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+    "inventory_graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "integrity_contradictions": [],
+    "graph": {
+      "schema": "JavaScriptApplicationGraph",
+      "graph_id": "jag_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "root_node_ids": [
+        "jag_node_5555555555555555555555555555555555555555555555555555555555555555"
+      ],
+      "nodes": [
+        {
+          "node_id": "jag_node_5555555555555555555555555555555555555555555555555555555555555555",
+          "kind": "asar-entry",
+          "identity": {
+            "strategy": "canonical-path",
+            "stability": "artifact-version",
+            "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "path": "package.json"
+          },
+          "observations": [
+            {
+              "observation_id": "jag_observation_9999999999999999999999999999999999999999999999999999999999999999",
+              "identifier_strategy": {
+                "strategy": "semantic-content-sha256",
+                "stability": "observation-exact"
+              },
+              "label": "package.json",
+              "source_map_reference": null,
+              "properties": {
+                "bytes": 412,
+                "main_field": "main.js"
+              },
+              "evidence": {
+                "authority": "artifact-bytes",
+                "state": "observed",
+                "confidence": "exact",
+                "artifact": {
+                  "available": true,
+                  "artifact_id": "art_2222222222222222222222222222222222222222222222222222222222222222",
+                  "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                },
+                "location": {
+                  "available": true,
+                  "value": {
+                    "kind": "artifact-path",
+                    "path": "package.json"
+                  }
+                },
+                "extractor": {
+                  "name": "rea-javascript-artifact-reconstruction",
+                  "version": "1",
+                  "operation": "analyze_javascript_application",
+                  "executable_sha256": null
+                },
+                "coverage": {
+                  "status": "complete",
+                  "truncated": false,
+                  "omitted_count": 0,
+                  "limits": []
+                },
+                "limitations": [],
+                "evidence_ids": [
+                  "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "node_id": "jag_node_6666666666666666666666666666666666666666666666666666666666666666",
+          "kind": "electron-main",
+          "identity": {
+            "strategy": "canonical-path",
+            "stability": "artifact-version",
+            "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "path": "main.js"
+          },
+          "observations": [
+            {
+              "observation_id": "jag_observation_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "identifier_strategy": {
+                "strategy": "semantic-content-sha256",
+                "stability": "observation-exact"
+              },
+              "label": "main.js",
+              "source_map_reference": null,
+              "properties": {
+                "exports_ipc_main": true
+              },
+              "evidence": {
+                "authority": "artifact-bytes",
+                "state": "observed",
+                "confidence": "exact",
+                "artifact": {
+                  "available": true,
+                  "artifact_id": "art_3333333333333333333333333333333333333333333333333333333333333333",
+                  "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+                },
+                "location": {
+                  "available": true,
+                  "value": {
+                    "kind": "artifact-path",
+                    "path": "main.js"
+                  }
+                },
+                "extractor": {
+                  "name": "rea-javascript-ast-static-analysis",
+                  "version": "1",
+                  "operation": "analyze_javascript_application",
+                  "executable_sha256": null
+                },
+                "coverage": {
+                  "status": "complete",
+                  "truncated": false,
+                  "omitted_count": 0,
+                  "limits": []
+                },
+                "limitations": [],
+                "evidence_ids": [
+                  "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "node_id": "jag_node_7777777777777777777777777777777777777777777777777777777777777777",
+          "kind": "javascript-module",
+          "identity": {
+            "strategy": "canonical-path",
+            "stability": "artifact-version",
+            "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "path": "renderer.js"
+          },
+          "observations": [
+            {
+              "observation_id": "jag_observation_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "identifier_strategy": {
+                "strategy": "semantic-content-sha256",
+                "stability": "observation-exact"
+              },
+              "label": "renderer.js",
+              "source_map_reference": null,
+              "properties": {
+                "preload_candidate": true
+              },
+              "evidence": {
+                "authority": "static-relationship-inference",
+                "state": "inferred",
+                "confidence": "medium",
+                "artifact": {
+                  "available": true,
+                  "artifact_id": "art_4444444444444444444444444444444444444444444444444444444444444444",
+                  "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+                },
+                "location": {
+                  "available": false,
+                  "reason": "not-applicable",
+                  "detail": "A static relationship carries no single source range of its own."
+                },
+                "extractor": {
+                  "name": "rea-javascript-artifact-reconstruction",
+                  "version": "1",
+                  "operation": "analyze_javascript_application",
+                  "executable_sha256": null
+                },
+                "coverage": {
+                  "status": "partial",
+                  "truncated": false,
+                  "omitted_count": null,
+                  "limits": []
+                },
+                "limitations": [
+                  "Membership was inferred from require graph traversal."
+                ],
+                "evidence_ids": [
+                  "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "node_id": "jag_node_8888888888888888888888888888888888888888888888888888888888888888",
+          "kind": "unknown",
+          "identity": {
+            "strategy": "artifact-local-key",
+            "stability": "artifact-version",
+            "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "namespace": "ipc-channel",
+            "key": ""
+          },
+          "observations": [
+            {
+              "observation_id": "jag_observation_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "identifier_strategy": {
+                "strategy": "semantic-content-sha256",
+                "stability": "observation-exact"
+              },
+              "label": null,
+              "source_map_reference": null,
+              "properties": {},
+              "evidence": {
+                "authority": "unknown",
+                "state": "unknown",
+                "confidence": "unknown",
+                "artifact": {
+                  "available": false,
+                  "reason": "unresolved",
+                  "detail": "No inventoried file answers which channel this is."
+                },
+                "location": {
+                  "available": false,
+                  "reason": "provider-unavailable",
+                  "detail": "The channel name is computed at build time."
+                },
+                "extractor": {
+                  "name": "rea-javascript-artifact-reconstruction",
+                  "version": "1",
+                  "operation": "analyze_javascript_application",
+                  "executable_sha256": null
+                },
+                "coverage": {
+                  "status": "unknown",
+                  "truncated": false,
+                  "omitted_count": null,
+                  "limits": []
+                },
+                "limitations": [
+                  "The archive declares a dynamic IPC channel that static analysis cannot name."
+                ],
+                "evidence_ids": [
+                  "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "edge_id": "jag_edge_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "identifier_strategy": {
+            "strategy": "semantic-content-sha256",
+            "stability": "relationship-exact"
+          },
+          "source_node_id": "jag_node_5555555555555555555555555555555555555555555555555555555555555555",
+          "target_node_id": "jag_node_6666666666666666666666666666666666666666666666666666666666666666",
+          "relation": "contains",
+          "properties": {
+            "declared_by": "package.json#main"
+          },
+          "evidence": {
+            "authority": "static-relationship-inference",
+            "state": "inferred",
+            "confidence": "high",
+            "artifact": {
+              "available": true,
+              "artifact_id": "art_2222222222222222222222222222222222222222222222222222222222222222",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            },
+            "location": {
+              "available": false,
+              "reason": "not-applicable",
+              "detail": "A static relationship carries no single source range of its own."
+            },
+            "extractor": {
+              "name": "rea-javascript-artifact-reconstruction",
+              "version": "1",
+              "operation": "analyze_javascript_application",
+              "executable_sha256": null
+            },
+            "coverage": {
+              "status": "partial",
+              "truncated": false,
+              "omitted_count": null,
+              "limits": []
+            },
+            "limitations": [
+              "The main entry mapping was read from package metadata."
+            ],
+            "evidence_ids": [
+              "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          }
+        },
+        {
+          "edge_id": "jag_edge_0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+          "identifier_strategy": {
+            "strategy": "semantic-content-sha256",
+            "stability": "relationship-exact"
+          },
+          "source_node_id": "jag_node_6666666666666666666666666666666666666666666666666666666666666666",
+          "target_node_id": "jag_node_7777777777777777777777777777777777777777777777777777777777777777",
+          "relation": "loads",
+          "properties": {},
+          "evidence": {
+            "authority": "static-relationship-inference",
+            "state": "inferred",
+            "confidence": "high",
+            "artifact": {
+              "available": true,
+              "artifact_id": "art_3333333333333333333333333333333333333333333333333333333333333333",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+            },
+            "location": {
+              "available": false,
+              "reason": "not-applicable",
+              "detail": "A static relationship carries no single source range of its own."
+            },
+            "extractor": {
+              "name": "rea-javascript-artifact-reconstruction",
+              "version": "1",
+              "operation": "analyze_javascript_application",
+              "executable_sha256": null
+            },
+            "coverage": {
+              "status": "partial",
+              "truncated": false,
+              "omitted_count": null,
+              "limits": []
+            },
+            "limitations": [
+              "Load target inferred from a literal require specifier."
+            ],
+            "evidence_ids": [
+              "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          }
+        },
+        {
+          "edge_id": "jag_edge_f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+          "identifier_strategy": {
+            "strategy": "semantic-content-sha256",
+            "stability": "relationship-exact"
+          },
+          "source_node_id": "jag_node_6666666666666666666666666666666666666666666666666666666666666666",
+          "target_node_id": "jag_node_8888888888888888888888888888888888888888888888888888888888888888",
+          "relation": "sends",
+          "properties": {},
+          "evidence": {
+            "authority": "static-relationship-inference",
+            "state": "inferred",
+            "confidence": "high",
+            "artifact": {
+              "available": true,
+              "artifact_id": "art_3333333333333333333333333333333333333333333333333333333333333333",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+            },
+            "location": {
+              "available": false,
+              "reason": "not-applicable",
+              "detail": "A static relationship carries no single source range of its own."
+            },
+            "extractor": {
+              "name": "rea-javascript-artifact-reconstruction",
+              "version": "1",
+              "operation": "analyze_javascript_application",
+              "executable_sha256": null
+            },
+            "coverage": {
+              "status": "partial",
+              "truncated": false,
+              "omitted_count": null,
+              "limits": []
+            },
+            "limitations": [
+              "Channel name is computed; the sender edge is a guess."
+            ],
+            "evidence_ids": [
+              "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ]
+          }
+        }
+      ],
+      "coverage": {
+        "status": "partial",
+        "truncated": false,
+        "omitted_count": null,
+        "limits": []
+      },
+      "limitations": [
+        "Vendor bundles were not selected for source analysis."
+      ]
+    },
+    "summary": {
+      "browser_windows": 1,
+      "explicit_web_preferences": 2,
+      "preload_entrypoints": 1,
+      "context_bridge_apis": 3,
+      "exposed_api_members": 5,
+      "ipc": {
+        "operations": 4,
+        "literal_channels": 3,
+        "dynamic_channel_operations": 1,
+        "renderer_transmissions": 2,
+        "renderer_listeners": 1,
+        "main_handlers": 2,
+        "paired_renderer_transmissions": 1,
+        "ambiguous_renderer_transmissions": 1,
+        "unpaired_literal_renderer_transmissions": 0
+      },
+      "sender_validation_observations": 0,
+      "utility_processes": 0,
+      "resolved_utility_entrypoints": 0,
+      "native_addon_bindings": 0,
+      "resolved_native_addon_bindings": 0
+    },
+    "statistics": {
+      "relevant_files": 4,
+      "nested_asar_containers": 0,
+      "text_bytes_read": 20480,
+      "invalid_utf8_files": 0,
+      "parsed_javascript_files": 3,
+      "visited_ast_nodes": 1810,
+      "findings": 12,
+      "modules": 3,
+      "parse_failures": 0
+    },
+    "limitations": [
+      "No Electron runtime was started; this result is static only."
+    ],
+    "semantic_graph": {
+      "schema": "JavaScriptSemanticRelationGraph",
+      "graph_id": "jsrg_d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+      "root_artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "application_graph_id": "jag_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "root_node_ids": [
+        "jsrg_node_1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
+      ],
+      "evidence_contexts": [
+        {
+          "context_id": "jsrg_evidence_2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+          "authority": "ast-static-analysis",
+          "state": "observed",
+          "confidence": "exact",
+          "artifact": {
+            "available": true,
+            "artifact_id": "art_3333333333333333333333333333333333333333333333333333333333333333",
+            "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "extractor": {
+            "name": "rea-javascript-semantic-analysis",
+            "version": "1",
+            "operation": "analyze_javascript_application",
+            "executable_sha256": null
+          },
+          "coverage": {
+            "status": "complete",
+            "truncated": false,
+            "omitted_count": 0,
+            "limits": []
+          },
+          "limitations": [],
+          "evidence_ids": [
+            "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ]
+        }
+      ],
+      "nodes": [
+        {
+          "node_id": "jsrg_node_1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+          "kind": "module",
+          "identity": {
+            "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "module_path": "main.js",
+            "source_range": {
+              "start": {
+                "line": 1,
+                "column": 0
+              },
+              "end": {
+                "line": 40,
+                "column": 3
+              }
+            },
+            "role_key": "module:main.js"
+          },
+          "function_node_id": null,
+          "application_node_ids": [
+            "jag_node_6666666666666666666666666666666666666666666666666666666666666666"
+          ],
+          "label": "main.js",
+          "properties": {},
+          "evidence": {
+            "context_id": "jsrg_evidence_2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+            "location": {
+              "available": true,
+              "value": {
+                "kind": "artifact-path",
+                "path": "main.js"
+              }
+            }
+          }
+        }
+      ],
+      "relations": [],
+      "fingerprints": [],
+      "unknowns": [
+        {
+          "unknown_id": "jsrg_unknown_e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+          "node_id": "jsrg_node_1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+          "family": "call-flow",
+          "relation_kinds": [
+            "calls"
+          ],
+          "reason": "dynamic-call",
+          "detail": "A computed member call could not be resolved statically.",
+          "candidate_node_ids": [],
+          "evidence": {
+            "context_id": "jsrg_evidence_2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+            "location": {
+              "available": true,
+              "value": {
+                "kind": "source-range",
+                "source": "main.js",
+                "start": {
+                  "line": 12,
+                  "column": 4
+                },
+                "end": {
+                  "line": 12,
+                  "column": 29
+                }
+              }
+            }
+          }
+        }
+      ],
+      "coverage": {
+        "status": "partial",
+        "truncated": false,
+        "omitted_nodes": null,
+        "omitted_relations": 1,
+        "limits": [],
+        "families": [
+          {
+            "family": "boundary",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "call-flow",
+            "status": "partial",
+            "retained_relations": 0,
+            "omitted_relations": 1,
+            "unknown_ids": [
+              "jsrg_unknown_e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+            ]
+          },
+          {
+            "family": "child-process",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "closure",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "configuration",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "data-flow",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "event",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "object-flow",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "promise-ownership",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "request",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "resource-lifecycle",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          },
+          {
+            "family": "timer",
+            "status": "unsupported",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_ids": []
+          }
+        ]
+      },
+      "limitations": [
+        "Only the main process module was admitted into semantic IR."
+      ]
+    }
+  },
+  "confidence": "derived",
+  "authority": "shipped-artifact",
+  "environment": null,
+  "limitations": [
+    "No Electron runtime was started; this result is static only."
+  ],
+  "relationship_coverage": null,
+  "locations": [
+    {
+      "kind": "artifact-path",
+      "path": "artifact-root"
+    }
+  ],
+  "evidence_links": []
+}

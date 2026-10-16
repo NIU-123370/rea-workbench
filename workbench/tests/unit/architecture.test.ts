@@ -248,6 +248,18 @@ describe("module dependency direction (DESIGN §3)", () => {
     );
   });
 
+  it("reads a side-effect import but never a string that merely ends in the word", () => {
+    // The scanner is only trustworthy if tightening it kept the real form: a
+    // space-less `import"x"` is legal JavaScript and must still be seen...
+    expect(extractSpecifiers('import"./domain/real.ts";').sort()).toEqual(["./domain/real.ts"]);
+    // ...while a verbatim upstream enum member and an audit resource type are
+    // data, not dependencies.
+    const data = ['const kinds = ["managed-pinvoke-import", "unknown"];', 'resourceType: "import",'].join(
+      "\n",
+    );
+    expect(extractSpecifiers(data)).toEqual([]);
+  });
+
   it("catches a disallowed dependency and still lets an allowed one through", () => {
     // The allowlist for apps/web is deliberately empty, and the broker may not
     // reach an adapter; both must flag, while the real domain edge must not.
