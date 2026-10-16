@@ -144,6 +144,13 @@ function packageName(specifier: string): string {
     : (specifier.split("/")[0] as string);
 }
 
+// `packages/domain-adapter` must not satisfy the allowlist entry
+// `packages/domain`, so prefixes only count at directory boundaries.
+function withinAllowed(target: string, allowed: string): boolean {
+  const prefix = allowed.endsWith("/") ? allowed : `${allowed}/`;
+  return target === allowed || target.startsWith(prefix);
+}
+
 function isViolation(module: string, fileDir: string, specifier: string): boolean {
   const rule = RULES[module] as Rule;
   if (specifier.startsWith(".")) {
@@ -151,7 +158,7 @@ function isViolation(module: string, fileDir: string, specifier: string): boolea
       .relative(ROOT, path.resolve(ROOT, fileDir, specifier))
       .split(path.sep)
       .join("/");
-    return !rule.allowedInternal.some((allowed) => target.startsWith(allowed));
+    return !rule.allowedInternal.some((allowed) => withinAllowed(target, allowed));
   }
   if (specifier.startsWith("node:")) return !rule.allowedBuiltins.includes(specifier);
   return !rule.allowedPackages.includes(packageName(specifier));
@@ -235,5 +242,16 @@ describe("module dependency direction (DESIGN §3)", () => {
     expect(isViolation("packages/domain", "packages/domain", "node:crypto")).toBe(false);
     expect(isViolation("packages/contracts", "packages/contracts", "zod")).toBe(false);
     expect(isViolation("packages/domain", "packages/domain", "../contracts/jobs.ts")).toBe(true);
+  });
+
+  it("only honours allowlist entries at directory boundaries", () => {
+    // `packages/domain-adapter` shares a string prefix with `packages/domain`
+    // but is a different module and must flag.
+    expect(isViolation("packages/domain", "packages/domain", "../domain-adapter/x.ts")).toBe(true);
+    expect(isViolation("packages/contracts", "packages/contracts", "../domainx/y.ts")).toBe(true);
+    expect(withinAllowed("packages/domain/identity.ts", "packages/domain")).toBe(true);
+    expect(withinAllowed("packages/domain", "packages/domain")).toBe(true);
+    expect(withinAllowed("packages/domain-adapter/x.ts", "packages/domain")).toBe(false);
+    expect(withinAllowed("packages/adapters/storage/database.ts", "packages/")).toBe(true);
   });
 });

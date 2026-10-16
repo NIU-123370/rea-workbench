@@ -39,6 +39,17 @@ describe("identities", () => {
     expect(() => asInstant("2026-12-31T23:59:60Z")).toThrow(TypeError);
   });
 
+  it("keeps sub-millisecond RFC 3339 precision valid", () => {
+    for (const valid of [
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.1Z",
+      "2026-01-01T00:00:00.999999999Z",
+    ]) {
+      expect(() => asInstant(valid)).not.toThrow();
+    }
+    expect(() => asInstant("2026-02-30T00:00:00.123456Z")).toThrow(TypeError);
+  });
+
   it("keeps upstream evidence ids in their own shape", () => {
     const hex = "a".repeat(64);
     expect(isReaEvidenceId(`ev_${hex}`)).toBe(true);

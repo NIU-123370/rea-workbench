@@ -50,7 +50,9 @@ export function isInstant(value: unknown): value is Instant {
   if (value.slice(0, 19) !== rebuilt) return false;
   const fraction = value.slice(20, -1);
   if (fraction === "") return date.getUTCMilliseconds() === 0;
-  return Number(`0.${fraction}`) * 1000 === date.getUTCMilliseconds();
+  // RFC 3339 allows up to nine fractional digits; anything below a millisecond
+  // is representable in the parsed value only as a truncation, not a mismatch.
+  return Math.floor(Number(`0.${fraction}`) * 1000) === date.getUTCMilliseconds();
 }
 
 export function asInstant(value: string): Instant {
