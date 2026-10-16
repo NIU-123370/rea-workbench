@@ -91,14 +91,29 @@ const RULES: Record<string, Rule> = {
     allowedBuiltins: [],
   },
   "apps/broker": {
-    allowedInternal: ["packages/", "apps/broker"],
+    // The broker is a host supervisor speaking its own restricted protocol; it
+    // must not reach application services or any adapter (§3, §2).
+    allowedInternal: ["packages/domain", "packages/contracts", "apps/broker"],
     allowedPackages: [],
     allowedBuiltins: ["node:child_process", "node:net", "node:fs", "node:path", "node:crypto"],
   },
 };
 
-const IMPORT_FROM = /from\s*["']([^"']+)["']/g;
-const DYNAMIC_IMPORT = /import\(\s*["']([^"']+)["']\s*\)/g;
+const FROM_CLAUSE = /\b(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/g;
+const SIDE_EFFECT_IMPORT = /\bimport\s*["']([^"']+)["']/g;
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
+
+// The gate is only as good as this extractor, so every import form the language
+// allows has to land here — including a bare side-effect import, which carries
+// no `from` clause at all.
+function extractSpecifiers(text: string): string[] {
+  const found = new Set<string>();
+  for (const pattern of [FROM_CLAUSE, SIDE_EFFECT_IMPORT, DYNAMIC_IMPORT, REQUIRE_CALL]) {
+    for (const match of text.matchAll(pattern)) found.add(match[1] as string);
+  }
+  return [...found];
+}
 
 function sourcesOf(dir: string): string[] {
   const absolute = path.join(ROOT, dir);
@@ -113,12 +128,7 @@ function sourcesOf(dir: string): string[] {
 }
 
 function specifiersIn(file: string): string[] {
-  const content = readFileSync(file, "utf8");
-  const found = new Set<string>();
-  for (const pattern of [IMPORT_FROM, DYNAMIC_IMPORT]) {
-    for (const match of content.matchAll(pattern)) found.add(match[1] as string);
-  }
-  return [...found];
+  return extractSpecifiers(readFileSync(file, "utf8"));
 }
 
 function relativeTarget(file: string, specifier: string): string {
@@ -134,24 +144,27 @@ function packageName(specifier: string): string {
     : (specifier.split("/")[0] as string);
 }
 
-function violationsFor(module: string): string[] {
+function isViolation(module: string, fileDir: string, specifier: string): boolean {
   const rule = RULES[module] as Rule;
+  if (specifier.startsWith(".")) {
+    const target = path
+      .relative(ROOT, path.resolve(ROOT, fileDir, specifier))
+      .split(path.sep)
+      .join("/");
+    return !rule.allowedInternal.some((allowed) => target.startsWith(allowed));
+  }
+  if (specifier.startsWith("node:")) return !rule.allowedBuiltins.includes(specifier);
+  return !rule.allowedPackages.includes(packageName(specifier));
+}
+
+function violationsFor(module: string): string[] {
   const violations: string[] = [];
   for (const file of sourcesOf(module)) {
+    const fileDir = path.relative(ROOT, path.dirname(file));
     for (const specifier of specifiersIn(file)) {
-      const display = `${path.relative(ROOT, file)} -> ${specifier}`;
-      if (specifier.startsWith(".")) {
-        const target = relativeTarget(file, specifier);
-        if (!rule.allowedInternal.some((allowed) => target.startsWith(allowed))) {
-          violations.push(display);
-        }
-        continue;
+      if (isViolation(module, fileDir, specifier)) {
+        violations.push(`${path.relative(ROOT, file)} -> ${specifier}`);
       }
-      if (specifier.startsWith("node:")) {
-        if (!rule.allowedBuiltins.includes(specifier)) violations.push(display);
-        continue;
-      }
-      if (!rule.allowedPackages.includes(packageName(specifier))) violations.push(display);
     }
   }
   return violations;
@@ -187,5 +200,40 @@ describe("module dependency direction (DESIGN §3)", () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("extracts every dependency-carrying import form", () => {
+    const sample = [
+      'import { a } from "../domain/x.ts";',
+      'import type { B } from "../domain/y.ts";',
+      'import "../domain/side-effect.ts";',
+      'export * from "../domain/w.ts";',
+      'const c = await import("node:sqlite");',
+      'const d = require("node:child_process");',
+    ].join("\n");
+    expect(extractSpecifiers(sample).sort()).toEqual(
+      [
+        "../domain/side-effect.ts",
+        "../domain/w.ts",
+        "../domain/x.ts",
+        "../domain/y.ts",
+        "node:child_process",
+        "node:sqlite",
+      ].sort(),
+    );
+  });
+
+  it("catches a disallowed dependency and still lets an allowed one through", () => {
+    // The allowlist for apps/web is deliberately empty, and the broker may not
+    // reach an adapter; both must flag, while the real domain edge must not.
+    expect(RULES["apps/web"]?.allowedBuiltins).toEqual([]);
+    expect(isViolation("apps/web", "apps/web", "node:sqlite")).toBe(true);
+    expect(isViolation("apps/broker", "apps/broker", "../packages/adapters/storage/database.ts")).toBe(
+      true,
+    );
+    expect(isViolation("packages/domain", "packages/domain", "./identity.ts")).toBe(false);
+    expect(isViolation("packages/domain", "packages/domain", "node:crypto")).toBe(false);
+    expect(isViolation("packages/contracts", "packages/contracts", "zod")).toBe(false);
+    expect(isViolation("packages/domain", "packages/domain", "../contracts/jobs.ts")).toBe(true);
   });
 });

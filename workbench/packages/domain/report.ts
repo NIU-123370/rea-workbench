@@ -31,9 +31,12 @@ export function determineResult(input: {
   planApproved: boolean;
   identitiesCurrent: boolean;
 }): VerificationResult {
+  // An observed mismatch stays FAIL even after a bound identity moves: the
+  // report keeps result and currentness as separate dimensions, and delivery is
+  // blocked by currentness instead of by hiding the failure (DESIGN §10).
+  if (input.counts.failed > 0) return "FAIL";
   if (input.counts.total === 0) return "UNKNOWN";
   if (!input.planApproved || !input.identitiesCurrent) return "UNKNOWN";
-  if (input.counts.failed > 0) return "FAIL";
   if (input.requiredCoverageGap) return "UNKNOWN";
   const settled = input.counts.passed + input.counts.failed;
   if (settled !== input.counts.total) return "UNKNOWN";

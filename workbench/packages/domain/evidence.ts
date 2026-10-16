@@ -38,7 +38,9 @@ export type TargetSnapshot = {
   sourceKind: "url" | "har" | "asar";
   sourceArtifactId: Id | null;
   captureArtifactId: Id | null;
-  snapshotDigest: Digest | null;
+  // DESIGN §4 fixes this as a Digest: a snapshot without content identity is
+  // not a snapshot. An uncaptured URL target has no snapshot at all.
+  snapshotDigest: Digest;
   scope: JsonValue;
 };
 
@@ -113,23 +115,16 @@ export function projectRequiredClaims(
   if (required.length === 0) {
     return { status: "UNKNOWN", reasons: ["no-required-claims-in-scope"] };
   }
-  const reasons: string[] = [];
-  let sawInferentialBasis = false;
-  for (const claim of required) {
-    const projected = projectClaim(claim);
-    if (projected.status === "UNKNOWN") {
-      reasons.push(...projected.reasons);
-      continue;
-    }
-    if (projected.status === "INFERRED") {
-      sawInferentialBasis = true;
-      reasons.push(...projected.reasons);
-    }
-  }
-  if (reasons.some((reason) => !reason.startsWith("basis-"))) {
+  const projected = required.map(projectClaim);
+  const reasons = [...new Set(projected.flatMap((entry) => entry.reasons))];
+  // The weakest required claim decides the node; an explicitly unknown basis is
+  // unknown, not a benign reason.
+  if (projected.some((entry) => entry.status === "UNKNOWN")) {
     return { status: "UNKNOWN", reasons };
   }
-  if (sawInferentialBasis) return { status: "INFERRED", reasons };
+  if (projected.some((entry) => entry.status === "INFERRED")) {
+    return { status: "INFERRED", reasons };
+  }
   return { status: "SEEN", reasons: [] };
 }
 

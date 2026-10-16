@@ -3,15 +3,24 @@ import type { Id } from "./identity.ts";
 // Frozen plan versus full inventory (DESIGN §7.4). The plan denominator can
 // never be shrunk after execution to manufacture a PASS.
 
-export type ExclusionReasonCode = "outside-scope" | "superseded";
-
-export type ExcludedVector = {
-  vectorId: Id;
-  reasonCode: ExclusionReasonCode;
-  reason: string;
-  excludedBehavior: string;
-  supersededBy: Id | null;
-};
+// The two exclusion reasons are different claims about the inventory, so the
+// pairing is part of the type: a revision-chain exclusion must name its
+// successor, a scope exclusion must not (DESIGN §7.4).
+export type ExcludedVector =
+  | {
+      vectorId: Id;
+      reasonCode: "outside-scope";
+      reason: string;
+      excludedBehavior: string;
+      supersededBy: null;
+    }
+  | {
+      vectorId: Id;
+      reasonCode: "superseded";
+      reason: string;
+      excludedBehavior: string;
+      supersededBy: Id;
+    };
 
 export type InventoryCounts = {
   total: number;
@@ -36,6 +45,14 @@ export function inventoryCounts(input: {
     excluded.add(entry.vectorId);
     if (!inventory.has(entry.vectorId)) {
       throw new RangeError("excluded vector is outside the frozen inventory snapshot");
+    }
+    if (entry.reasonCode === "superseded") {
+      if (entry.supersededBy === entry.vectorId) {
+        throw new RangeError("a superseded vector cannot point at itself");
+      }
+      if (!inventory.has(entry.supersededBy)) {
+        throw new RangeError("supersededBy is outside the frozen inventory snapshot");
+      }
     }
   }
   for (const id of selected) {

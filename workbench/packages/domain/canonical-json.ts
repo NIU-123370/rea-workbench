@@ -41,17 +41,32 @@ export class CanonicalizationError extends Error {
   }
 }
 
-function encode(value: JsonValue, depth: number, limits: CanonicalLimits, out: string[]): void {
-  if (depth > limits.maxDepth) {
-    throw new CanonicalizationError("depth-limit", `exceeded ${limits.maxDepth}`);
+type Sink = { parts: string[]; codeUnits: number; limits: CanonicalLimits };
+
+function push(sink: Sink, text: string): void {
+  // The budget is charged as fragments are produced, so an oversized payload
+  // stops before the whole document is materialised (DESIGN §12: measure first).
+  sink.codeUnits += text.length;
+  if (sink.codeUnits > sink.limits.maxCodeUnits) {
+    throw new CanonicalizationError(
+      "size-limit",
+      `${sink.codeUnits} > ${sink.limits.maxCodeUnits}`,
+    );
+  }
+  sink.parts.push(text);
+}
+
+function encode(value: JsonValue, depth: number, sink: Sink): void {
+  if (depth > sink.limits.maxDepth) {
+    throw new CanonicalizationError("depth-limit", `exceeded ${sink.limits.maxDepth}`);
   }
   if (value === null) {
-    out.push("null");
+    push(sink, "null");
     return;
   }
   switch (typeof value) {
     case "string": {
-      out.push(JSON.stringify(value));
+      push(sink, JSON.stringify(value));
       return;
     }
     case "number": {
@@ -59,21 +74,21 @@ function encode(value: JsonValue, depth: number, limits: CanonicalLimits, out: s
         throw new CanonicalizationError("non-finite-number", String(value));
       }
       // -0 and 0 share one canonical representation.
-      out.push(Object.is(value, -0) ? "0" : JSON.stringify(value));
+      push(sink, Object.is(value, -0) ? "0" : JSON.stringify(value));
       return;
     }
     case "boolean": {
-      out.push(value ? "true" : "false");
+      push(sink, value ? "true" : "false");
       return;
     }
     case "object": {
       if (Array.isArray(value)) {
-        out.push("[");
+        push(sink, "[");
         for (let index = 0; index < value.length; index += 1) {
-          if (index > 0) out.push(",");
-          encode(value[index] as JsonValue, depth + 1, limits, out);
+          if (index > 0) push(sink, ",");
+          encode(value[index] as JsonValue, depth + 1, sink);
         }
-        out.push("]");
+        push(sink, "]");
         return;
       }
       const record = value as Record<string, JsonValue>;
@@ -81,21 +96,19 @@ function encode(value: JsonValue, depth: number, limits: CanonicalLimits, out: s
       // UTF-16 code-unit ordering, matching the JSON canonicalisation the
       // comparator digests rely on.
       keys.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
-      out.push("{");
+      push(sink, "{");
       for (let index = 0; index < keys.length; index += 1) {
         const key = keys[index] as string;
-        if (index > 0) out.push(",");
-        out.push(JSON.stringify(key), ":");
+        if (index > 0) push(sink, ",");
+        push(sink, JSON.stringify(key));
+        push(sink, ":");
         const member = record[key];
         if (member === undefined) {
-          throw new CanonicalizationError(
-            "unsupported-value",
-            `member ${key} is absent`,
-          );
+          throw new CanonicalizationError("unsupported-value", `member ${key} is absent`);
         }
-        encode(member, depth + 1, limits, out);
+        encode(member, depth + 1, sink);
       }
-      out.push("}");
+      push(sink, "}");
       return;
     }
     default: {
@@ -105,13 +118,9 @@ function encode(value: JsonValue, depth: number, limits: CanonicalLimits, out: s
 }
 
 export function canonicalJson(value: JsonValue, limits: CanonicalLimits): string {
-  const out: string[] = [];
-  encode(value, 1, limits, out);
-  const text = out.join("");
-  if (text.length > limits.maxCodeUnits) {
-    throw new CanonicalizationError("size-limit", `${text.length} > ${limits.maxCodeUnits}`);
-  }
-  return text;
+  const sink: Sink = { parts: [], codeUnits: 0, limits };
+  encode(value, 1, sink);
+  return sink.parts.join("");
 }
 
 export function digestCanonicalJson(value: JsonValue, limits: CanonicalLimits): Digest {

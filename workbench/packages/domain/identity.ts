@@ -32,9 +32,25 @@ export function nowInstant(): Instant {
   return new Date().toISOString() as Instant;
 }
 
+function pad(value: number, width: number): string {
+  return String(value).padStart(width, "0");
+}
+
 export function isInstant(value: unknown): value is Instant {
   if (typeof value !== "string" || !INSTANT_PATTERN.test(value)) return false;
-  return !Number.isNaN(Date.parse(value));
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) return false;
+  // Date.parse silently rolls impossible calendar dates forward
+  // (2026-02-30T00:00:00Z becomes 2026-03-02), so the parsed value must project
+  // back onto the exact source text before it can be a deadline or retry time.
+  const date = new Date(ms);
+  const rebuilt =
+    `${pad(date.getUTCFullYear(), 4)}-${pad(date.getUTCMonth() + 1, 2)}-${pad(date.getUTCDate(), 2)}` +
+    `T${pad(date.getUTCHours(), 2)}:${pad(date.getUTCMinutes(), 2)}:${pad(date.getUTCSeconds(), 2)}`;
+  if (value.slice(0, 19) !== rebuilt) return false;
+  const fraction = value.slice(20, -1);
+  if (fraction === "") return date.getUTCMilliseconds() === 0;
+  return Number(`0.${fraction}`) * 1000 === date.getUTCMilliseconds();
 }
 
 export function asInstant(value: string): Instant {

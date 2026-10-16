@@ -28,6 +28,17 @@ describe("identities", () => {
     expect(instantToEpochMs(asInstant("2026-01-01T00:00:00.000Z"))).toBe(Date.UTC(2026, 0, 1));
   });
 
+  it("rejects calendar dates that only look well-formed", () => {
+    // Date.parse rolls these forward instead of failing, which would silently
+    // move a job deadline.
+    expect(() => asInstant("2026-02-30T00:00:00Z")).toThrow(TypeError);
+    expect(() => asInstant("2026-04-31T00:00:00Z")).toThrow(TypeError);
+    expect(() => asInstant("2026-02-29T00:00:00Z")).toThrow(TypeError);
+    expect(() => asInstant("2024-02-29T00:00:00Z")).not.toThrow();
+    expect(() => asInstant("2026-12-31T23:59:59.999Z")).not.toThrow();
+    expect(() => asInstant("2026-12-31T23:59:60Z")).toThrow(TypeError);
+  });
+
   it("keeps upstream evidence ids in their own shape", () => {
     const hex = "a".repeat(64);
     expect(isReaEvidenceId(`ev_${hex}`)).toBe(true);

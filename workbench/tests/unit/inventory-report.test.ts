@@ -110,6 +110,43 @@ describe("inventory versus frozen plan (DESIGN §7.4)", () => {
     ).toThrow(/selected vectors must be unique/);
   });
 
+  it("ties a superseded exclusion to a successor inside the same snapshot", () => {
+    const base = {
+      inventoryVectorIds: ids,
+      selectedVectorIds: [] as Id[],
+      blockedVectorIds: [] as Id[],
+    };
+    expect(() =>
+      inventoryCounts({
+        ...base,
+        excluded: [
+          {
+            vectorId: SECOND,
+            reasonCode: "superseded",
+            reason: "replaced",
+            excludedBehavior: "b",
+            supersededBy: "33333333-3333-4333-8333-333333333333" as Id,
+          },
+        ],
+      }),
+    ).toThrow(/supersededBy is outside/);
+    expect(() =>
+      inventoryCounts({
+        ...base,
+        selectedVectorIds: [FIRST],
+        excluded: [
+          {
+            vectorId: FIRST,
+            reasonCode: "superseded",
+            reason: "self",
+            excludedBehavior: "b",
+            supersededBy: FIRST,
+          },
+        ],
+      }),
+    ).toThrow(/cannot point at itself/);
+  });
+
   it("counts plan cases by state", () => {
     expect(
       planCounts([
@@ -159,6 +196,21 @@ describe("delivery verdict (DESIGN §10)", () => {
     expect(determineResult({ counts: allPassed, requiredCoverageGap: false, planApproved: true, identitiesCurrent: false })).toBe(
       "UNKNOWN",
     );
+  });
+
+  it("keeps an observed mismatch as FAIL when a bound identity went stale", () => {
+    // Currentness is a separate dimension; hiding a real comparison failure
+    // behind staleness would erase the finding.
+    const mixed = planCounts([{ state: "passed" }, { state: "failed" }]);
+    expect(
+      determineResult({ counts: mixed, requiredCoverageGap: false, planApproved: true, identitiesCurrent: false }),
+    ).toBe("FAIL");
+    expect(
+      determineResult({ counts: mixed, requiredCoverageGap: false, planApproved: false, identitiesCurrent: true }),
+    ).toBe("FAIL");
+    expect(
+      determineResult({ counts: planCounts([{ state: "passed" }]), requiredCoverageGap: false, planApproved: true, identitiesCurrent: false }),
+    ).toBe("UNKNOWN");
   });
 
   it("reports passRate as null instead of a fake zero on an empty plan", () => {

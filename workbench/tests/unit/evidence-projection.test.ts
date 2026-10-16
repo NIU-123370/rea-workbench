@@ -48,6 +48,17 @@ describe("three-colour projection (DESIGN §6)", () => {
     }
   });
 
+  it("never aggregates an explicitly unknown basis into SEEN or INFERRED", () => {
+    // Regression: the aggregation used to key off reason prefixes, so a claim
+    // with basis `unknown` and no other deficiency came out green.
+    expect(projectRequiredClaims([claim({ basis: "unknown" })]).status).toBe("UNKNOWN");
+    expect(projectRequiredClaims([claim(), claim({ basis: "unknown" })]).status).toBe("UNKNOWN");
+    expect(
+      projectRequiredClaims([claim({ basis: "inferred" }), claim({ basis: "unknown" })]).status,
+    ).toBe("UNKNOWN");
+    expect(blocksStrictBlueprint(projectRequiredClaims([claim({ basis: "unknown" })]))).toBe(true);
+  });
+
   it("has no required claims means UNKNOWN, not an empty green", () => {
     expect(projectRequiredClaims([]).status).toBe("UNKNOWN");
   });

@@ -62,6 +62,23 @@ describe("canonical JSON", () => {
     expect(digestBytes(new TextEncoder().encode("a"))).not.toBe(jsonDigest);
   });
 
+  it("charges the budget before materialising the rest of the payload", () => {
+    // DESIGN §12 measures before allocating: an oversized prefix must stop the
+    // encoder before it ever reads the remaining members.
+    const read: string[] = [];
+    const source = {
+      a: "x".repeat(50),
+      get z(): JsonValue {
+        read.push("z");
+        return "y".repeat(50);
+      },
+    };
+    expect(() =>
+      canonicalJson(source as unknown as JsonValue, { ...LIMITS, maxCodeUnits: 40 }),
+    ).toThrow("size-limit");
+    expect(read).toEqual([]);
+  });
+
   it("validates digest shape", () => {
     expect(isDigest("0".repeat(64))).toBe(true);
     expect(isDigest("0".repeat(63))).toBe(false);
