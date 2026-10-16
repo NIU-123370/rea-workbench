@@ -1,0 +1,55 @@
+name: review-on-push
+
+# Every new head commit on an open pull request asks the Codex connector to
+# review it, so a push is never merged on a stale review. The marker records the
+# exact head SHA: a re-run for the same commit does nothing, which is what keeps
+# this from looping when a review itself touches the thread.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: review-on-push-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  request-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request a Codex review for this head SHA, once per SHA
+        env:
+          # A repository-secret PAT makes the comment appear as the owner, which
+          # is the form the connector is documented to react to. Without it the
+          # step still posts, but as github-actions[bot] and Codex may ignore it.
+          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          marker="<!-- review-on-push: ${SHA} -->"
+
+          if ! gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha' | grep -qF "${SHA}"; then
+            echo "head sha moved while this run started; skipping stale request"
+            exit 0
+          fi
+
+          if gh api "repos/${REPO}/issues/${PR}/comments" --paginate --jq '.[].body' \
+               | grep -qF "${marker}"; then
+            echo "Codex review already requested for ${SHA}; nothing to do"
+            exit 0
+          fi
+
+          gh api "repos/${REPO}/issues/${PR}/comments" --method POST \
+            -f body="@codex review
+
+          Requested automatically for head \`${SHA:0:7}\`.
+
+          ${marker}" > /dev/null
+
+          echo "requested Codex review for ${SHA}"
