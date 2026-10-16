@@ -19,8 +19,9 @@ import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/
 import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
 import { vectorPageSchema, vectorReviewReceiptSchema } from "../../packages/contracts/vectors.ts";
 import { contractReviewReceiptSchema, planReviewReceiptSchema } from "../../packages/contracts/behaviors.ts";
+import { blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
-import { IdempotencyJournal } from "../../packages/application/idempotency.ts";
+import { IdempotencyJournal, MAX_IDEMPOTENCY_KEY_LENGTH } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
 import { SESSION_COOKIE_NAME } from "../../packages/application/session.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
@@ -1949,5 +1950,273 @@ describe("the three review routes (§8 lines 285, 287, 291 / issue #58)", () => 
       expect(refused.text).toContain(reason);
       expect(refused.text).not.toContain("not-a-uuid");
     }
+  });
+});
+
+describe("the freeze route (§8 line 292 / issue #58)", () => {
+  // The last step of the chain the three review doors opened: an approved plan becomes the
+  // blueprint the Builder may be handed. This route is a creation, so §8 line 261 gives it an
+  // Idempotency-Key, and the tests below are mostly about what that key must NOT do - replay a
+  // refusal as if it were a result, or let a second body reuse a committed freeze.
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string; reviewerId: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    const current = await call("GET", `${API_PREFIX}/session`, { headers: { host: host(), cookie } });
+    const view = JSON.parse(current.text) as { reviewerId?: string; data?: { reviewerId?: string } };
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "", reviewerId: view.data?.reviewerId ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `freeze-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  type FreezeSession = Session & { projectId: Id };
+
+  function send(session: FreezeSession, payload: Record<string, JsonValue>, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    return call("POST", `${API_PREFIX}/projects/${session.projectId}/blueprints`, { body: JSON.stringify(payload), headers });
+  }
+
+  async function chain(name: string, approve: boolean): Promise<{ session: FreezeSession; seeded: Awaited<ReturnType<typeof seedReviewChain> > }> {
+    const paired = await pairSession();
+    const projectId = await freshProject(paired, name);
+    const session: FreezeSession = { ...paired, projectId };
+    const seeded = await seedReviewChain({ writer: worker.writeConnection, store: new ArtifactStore(dataDir), projectId, name });
+    if (approve) {
+      // The inventory revision is re-read before each inventory-bound step: approving the sample
+      // moves the inventory, so the plan review has to name the one it was prepared against. The
+      // 409 this fixture used to hit is now legible because both sides of it ride the wire
+      // (issue #59).
+      const live = () => {
+        const project = worker.writeConnection.transact((tx) => tx.getProject(projectId));
+        if (!project.ok || project.value === null) throw new Error("project missing");
+        return project.value.inventoryRevision;
+      };
+      const steps: readonly (readonly [string, () => Record<string, JsonValue>])[] = [
+        [`vectors/${String(seeded.vectorId)}/review`, () => ({ decision: "approved", expectedDigest: seeded.vectorDigest, expectedInventoryRevision: live() })],
+        [`contracts/${String(seeded.contractId)}/review`, () => ({ decision: "approved", expectedDigest: seeded.contractDigest })],
+        [`verification-plans/${String(seeded.planId)}/review`, () => ({ decision: "approved", expectedDigest: seeded.planDigest, expectedInventoryRevision: live() })],
+      ];
+      for (const [path, build] of steps) {
+        const step = await call("POST", `${API_PREFIX}/projects/${String(projectId)}/${path}`, {
+          body: JSON.stringify(build()),
+          headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "x-csrf-token": session.csrf, "content-type": "application/json" },
+        });
+        expect(step.status, `${path}: ${step.text}`).toBe(200);
+      }
+    }
+    return { session, seeded };
+  }
+
+  it("freezes an approved chain and gives the counts the gate proved", async () => {
+    const { session, seeded } = await chain("freeze-ok", true);
+    const frozen = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-1");
+    expect(frozen.status, frozen.text).toBe(201);
+    const receipt = blueprintFreezeReceiptSchema.safeParse(JSON.parse(frozen.text) as JsonValue);
+    if (!receipt.success) throw new Error(frozen.text);
+    expect(receipt.data.planId).toBe(String(seeded.planId));
+    // The freeze is where §7.4's denominator becomes visible: one public sample, no holdout, and
+    // the one contract this plan binds. A receipt that reported zero here would still be a 201.
+    expect(receipt.data.publicVectorCount).toBe(1);
+    expect(receipt.data.holdoutVectorCount).toBe(0);
+    expect(receipt.data.contractCount).toBe(1);
+    expect(receipt.data.digest).not.toBe(receipt.data.manifestDigest);
+
+    // Same key, same body: the original 201 field for field, with a fresh request id of its own,
+    // and the worker is not asked a second time (the blueprint would be a second row).
+    const again = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-1");
+    expect(again.status, again.text).toBe(201);
+    expect(JSON.parse(again.text)).toEqual(JSON.parse(frozen.text));
+    // The id is a response header on a success (§8's ApiError carries it in the body only for a
+    // failure), so the replay's freshness is read from there.
+    const replayedId = again.headers.get("x-request-id") ?? "";
+    const originalId = frozen.headers.get("x-request-id") ?? "";
+    expect(replayedId).not.toBe("");
+    expect(replayedId).not.toBe(originalId);
+
+    // The journal is the independent count: a replay that reached the worker a second time would
+    // leave a second allow row for the same action. (My first version of this assertion asked the
+    // writer for a method it does not have and passed on `undefined ?? null` - a vacuous green,
+    // which is why it is replaced by a count over a surface that exists.)
+    const journal = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/audit?limit=50`, { headers: { host: host(), cookie: session.cookie } });
+    const page = JSON.parse(journal.text) as { data?: { entries?: { action: string; decision: string }[] }; entries?: { action: string; decision: string }[] };
+    const entries = page.data?.entries ?? page.entries ?? [];
+    expect(entries.filter((entry) => entry.action === "blueprint.freeze" && entry.decision === "allow")).toHaveLength(1);
+    expect(entries.length).toBeGreaterThan(0);
+  });
+
+  it("refuses a caller that restates what the plan already derives", async () => {
+    const { session, seeded } = await chain("freeze-derive", true);
+    const overreaching = await send(session, {
+      verificationPlanId: String(seeded.planId),
+      // §8 line 292 names all four; §7.4 makes the first three functions of the approved plan and
+      // the sensitive list belongs to the capture, not to a freeze.
+      targetId: String(seeded.targetId),
+      contractRevisionIds: [String(seeded.contractId)],
+      expectedGraphRevision: 0,
+      sensitiveValues: ["hunter2"],
+    }, "freeze-key-2");
+    expect(overreaching.status, overreaching.text).toBe(400);
+    const keys = ((JSON.parse(overreaching.text) as { error: { details: { rejectedKeys?: string[] } } }).error.details.rejectedKeys ?? []).sort();
+    expect(keys).toEqual(["contractRevisionIds", "expectedGraphRevision", "sensitiveValues", "targetId"]);
+    // The declared sensitive value is a *value*, and §12.1 keeps it out of the echo.
+    expect(overreaching.text).not.toContain("hunter2");
+  });
+
+  it("keeps the key honest: required, and not reusable for a different request", async () => {
+    const { session, seeded } = await chain("freeze-key", true);
+    const missing = await send(session, { verificationPlanId: String(seeded.planId) }, null);
+    expect(missing.status, missing.text).toBe(400);
+    expect(missing.text).toContain("idempotency-key-required");
+
+    const committed = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-3");
+    expect(committed.status, committed.text).toBe(201);
+    const divergent = await send(session, { verificationPlanId: String(newId()) }, "freeze-key-3");
+    expect(divergent.status, divergent.text).toBe(409);
+    expect(divergent.text).toContain("idempotency-key-reused");
+  });
+
+  it("a plan nobody approved does not become a blueprint, and the refusal counts its reasons", async () => {
+    const { session, seeded } = await chain("freeze-blocked", false);
+    const blocked = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-4");
+    expect(blocked.status, blocked.text).toBe(422);
+    const body = JSON.parse(blocked.text) as { error: { code: string; details: Record<string, unknown> } };
+    expect(body.error.code).toBe("BLUEPRINT_BLOCKED");
+    // Issue #59 in the wild: the count of blocking reasons crosses the socket, the list of them
+    // does not, and the reason that names the gate is the one the service put first.
+    expect(body.error.details["reasonCount"]).toBe(1);
+    expect(body.error.details["reason"]).toBe("plan-not-approved");
+    expect(JSON.stringify(body.error.details)).not.toContain("contract-not-approved");
+  });
+
+  it("holds the door behind the session and the CSRF header", async () => {
+    const id = newId();
+    const anonymous = await call("POST", `${API_PREFIX}/projects/${String(id)}/blueprints`, {
+      body: "{}",
+      headers: { host: host(), origin: `http://${host()}`, "content-type": "application/json", "idempotency-key": "freeze-anon" },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+    expect(anonymous.text).toContain("cookie-absent");
+  });
+
+  it("a refusal does not burn the key: the blocked freeze succeeds on retry once the plan is approved", async () => {
+    const { session, seeded } = await chain("freeze-retry", false);
+    const blocked = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-6");
+    expect(blocked.status, blocked.text).toBe(422);
+
+    // Same key, same body, one correction in between: the key was given back by the failed
+    // attempt, so this second call is a fresh creation rather than a replay of the refusal.
+    const project = worker.writeConnection.transact((tx) => tx.getProject(session.projectId));
+    if (!project.ok || project.value === null) throw new Error("project missing");
+    const at = project.value.inventoryRevision;
+    for (const [path, payload] of [
+      [`vectors/${String(seeded.vectorId)}/review`, { decision: "approved", expectedDigest: seeded.vectorDigest, expectedInventoryRevision: at }],
+      [`contracts/${String(seeded.contractId)}/review`, { decision: "approved", expectedDigest: seeded.contractDigest }],
+      [`verification-plans/${String(seeded.planId)}/review`, { decision: "approved", expectedDigest: seeded.planDigest, expectedInventoryRevision: at + 1 }],
+    ] as const) {
+      const step = await call("POST", `${API_PREFIX}/projects/${String(session.projectId)}/${path}`, {
+        body: JSON.stringify(payload),
+        headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "x-csrf-token": session.csrf, "content-type": "application/json" },
+      });
+      expect(step.status, `${path}: ${step.text}`).toBe(200);
+    }
+
+    const frozen = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-6");
+    expect(frozen.status, frozen.text).toBe(201);
+    const body = JSON.parse(blocked.text) as { error: { requestId?: string } };
+    const replayHeaders = frozen.headers.get("x-request-id") ?? "";
+    // A 201 with a fresh id, and not the refusal's: the second call really ran.
+    expect(replayHeaders).not.toBe("");
+    expect(replayHeaders).not.toBe(body.error.requestId);
+  });
+
+  it("scopes the same key to one project, not to the reviewer's whole session", async () => {
+    // One session, two projects: two sessions would put a different reviewer id in each journal
+    // scope and hide the project dimension entirely (which is exactly how a first version of this
+    // test stayed green against a scope that had dropped it).
+    const paired = await pairSession();
+    const projectA = await freshProject(paired, "freeze-scope-a");
+    const projectB = await freshProject(paired, "freeze-scope-b");
+    const first: FreezeSession = { ...paired, projectId: projectA };
+    const second: FreezeSession = { ...paired, projectId: projectB };
+    const seededA = await seedReviewChain({ writer: worker.writeConnection, store: new ArtifactStore(dataDir), projectId: projectA, name: "freeze-scope-a" });
+    const seededB = await seedReviewChain({ writer: worker.writeConnection, store: new ArtifactStore(dataDir), projectId: projectB, name: "freeze-scope-b" });
+    for (const [session, seeded] of [[first, seededA], [second, seededB]] as const) {
+      for (const path of [`vectors/${String(seeded.vectorId)}/review`, `contracts/${String(seeded.contractId)}/review`, `verification-plans/${String(seeded.planId)}/review`]) {
+        const project = worker.writeConnection.transact((tx) => tx.getProject(session.projectId));
+        if (!project.ok || project.value === null) throw new Error("project missing");
+        const at = project.value.inventoryRevision;
+        const payload: Record<string, JsonValue> = path.startsWith("contracts/")
+          ? { decision: "approved", expectedDigest: seeded.contractDigest }
+          : {
+              decision: "approved",
+              expectedDigest: path.startsWith("vectors/") ? seeded.vectorDigest : seeded.planDigest,
+              expectedInventoryRevision: at,
+            };
+        const step = await call("POST", `${API_PREFIX}/projects/${String(session.projectId)}/${path}`, {
+          body: JSON.stringify(payload),
+          headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "x-csrf-token": session.csrf, "content-type": "application/json" },
+        });
+        expect(step.status, `${path}: ${step.text}`).toBe(200);
+      }
+    }
+    const a = await send(first, { verificationPlanId: String(seededA.planId) }, "shared-key");
+    expect(a.status, a.text).toBe(201);
+    // Same reviewer, same key, a different project: a second creation, not a
+    // `idempotency-key-reused` conflict - and not a replay of the first blueprint either, which
+    // would name a plan from the other project.
+    const b = await send(second, { verificationPlanId: String(seededB.planId) }, "shared-key");
+    expect(b.status, b.text).toBe(201);
+    const bodyA = JSON.parse(a.text) as Record<string, JsonValue>;
+    const bodyB = JSON.parse(b.text) as Record<string, JsonValue>;
+    expect(bodyB["planId"]).toBe(String(seededB.planId));
+    expect(bodyA["planId"]).toBe(String(seededA.planId));
+    expect(bodyB["blueprintId"]).not.toBe(bodyA["blueprintId"]);
+  });
+
+  it("refuses an over-long key at the shape the route table declares", async () => {
+    const { session, seeded } = await chain("freeze-long-key", true);
+    const tooLong = await send(session, { verificationPlanId: String(seeded.planId) }, "k".repeat(MAX_IDEMPOTENCY_KEY_LENGTH + 1));
+    expect(tooLong.status, tooLong.text).toBe(400);
+    expect(tooLong.text).toContain("idempotency-key-required");
+    // The freeze never reached the worker, so nothing was committed under the rejected key.
+    const good = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-key-7");
+    expect(good.status, good.text).toBe(201);
+  });
+
+  it("an unparseable plan id in the body is a refusal, not a lookup miss", async () => {
+    const { session } = await chain("freeze-bad-id", false);
+    const bad = await send(session, { verificationPlanId: "not-a-uuid" }, "freeze-key-5");
+    expect(bad.status, bad.text).toBe(400);
+    expect(bad.text).not.toContain("not-a-uuid");
   });
 });
