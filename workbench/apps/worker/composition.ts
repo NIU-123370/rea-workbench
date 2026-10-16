@@ -11,6 +11,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { asDigest } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
@@ -39,6 +40,7 @@ import { ContractService } from "../../packages/application/contract-service.ts"
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
+import { BUILDER_STAGING_DIRNAME, makeBuilderProcessProducer, sweepRoleStaging } from "./builder-process.ts";
 import { ExportService } from "../../packages/application/export-service.ts";
 import { GraphReadService } from "../../packages/application/graph-read.ts";
 import { CandidateReadService } from "../../packages/application/candidate-read.ts";
@@ -365,6 +367,11 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     return { ok: false, error: { kind: "lock", reasons: ["worker-lock-held-by-another-process"] } };
   }
   const held = lock.value;
+  // A role run that outlived its worker is staging this code owns, and §5 says crash
+  // recovery may reclaim exactly that. It happens before the first command is served, so no
+  // live run can be mistaken for an orphan.
+  const builderStagingRoot = path.join(config.dataDir, BUILDER_STAGING_DIRNAME);
+  const sweptRoleRuns = sweepRoleStaging(builderStagingRoot);
 
   const opened = openWriteConnection(config.dataDir);
   if (!opened.ok) {
@@ -412,7 +419,18 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
-  const builder = new BuilderService({ storage: writer, artifacts: store, limits: LIMITS });
+  // §2 and §5 line 425 put the Builder in its own process with its own file view, so the
+  // worker hands the role one handoff file in a directory the role owns and verifies what
+  // comes back. The service still owns publishing and the candidate identity.
+  const builder = new BuilderService({
+    storage: writer,
+    artifacts: store,
+    limits: LIMITS,
+    produce: makeBuilderProcessProducer({
+      stagingRoot: builderStagingRoot,
+      entryFile: fileURLToPath(new URL("builder-child.ts", import.meta.url)),
+    }),
+  });
   const verifications = new VerificationService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
   const graph = new GraphReadService({ storage: writer });
   const candidateRead = new CandidateReadService({ storage: writer, artifacts: store });
@@ -858,7 +876,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
             ? { state: "ok", facts: { policy: profile.profile.networkPolicyId } }
             : { state: "degraded", reasons: ["egress-policy-not-enforced-on-this-host"] },
       },
-      { name: "storage-layout", run: (): CheckOutcome => ({ state: "ok", facts: { migrationsApplied } }) },
+      { name: "storage-layout", run: (): CheckOutcome => ({ state: "ok", facts: { migrationsApplied, sweptRoleRuns } }) },
       { name: "worker-lock", run: (): CheckOutcome => ({ state: "ok", facts: { held: true } }) },
       {
         name: "limits",
