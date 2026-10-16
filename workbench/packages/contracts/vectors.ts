@@ -154,16 +154,18 @@ export const vectorReviewRequestSchema = z.strictObject({
   }
 });
 
-// The vector review route's own body and receipt (§8 line 285 / issue #58). Same two rules as
-// the contract and plan review surface: `expectedDigest` is the document's name for what the
-// service calls `digest`, and no caller may name its own reviewer - the session does that.
+// The vector doors' body and receipt (§8 lines 282 and 285 / issue #58). The review body keeps
+// the two rules the contract and plan doors share: `expectedDigest` is the document's name for
+// what the service calls `digest`, and no caller may name its own reviewer - the session does
+// that. One receipt serves creation and review because `vector.create` and `vector.review` both
+// answer with the same commit.
 export const vectorReviewHttpRequestSchema = z.strictObject({
   decision: z.enum(["approved", "rejected"]),
   expectedDigest: digestSchema.nullable(),
   expectedInventoryRevision: z.int().nonnegative(),
 });
 
-export const vectorReviewReceiptSchema = z.strictObject({
+export const vectorCommitReceiptSchema = z.strictObject({
   vectorId: idSchema,
   digest: digestSchema,
   eligibility: z.enum(["usable", "blocked"]),

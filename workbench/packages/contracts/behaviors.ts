@@ -118,6 +118,11 @@ export const contractReviewRequestSchema = z.strictObject({
 
 export const REVIEW_DECISIONS = ["approved", "rejected"] as const;
 
+// What a record's review field can *hold*, which is one wider than what a caller may decide:
+// a fresh creation is a draft, and the same receipt shape serves the create door and the review
+// door. Naming the two apart is what caught me reusing the decision enum for a draft reply.
+export const REVIEW_STATUSES = ["draft", "approved", "rejected"] as const;
+
 export const contractReviewHttpRequestSchema = z.strictObject({
   decision: z.enum(REVIEW_DECISIONS),
   expectedDigest: digestSchema.nullable(),
@@ -129,22 +134,24 @@ export const planReviewHttpRequestSchema = z.strictObject({
   expectedInventoryRevision: z.int().nonnegative(),
 });
 
-// The receipt is what the review command actually answers: the decision's outcome on that
-// record, not the record itself. §8's third column says "200 ContractRevision" and
+// The receipts are what these commands answer: the commit each service makes about one row, so
+// the create door and the review door share a shape instead of inventing two. Not the record
+// itself - §8's third column names the full record, and no command on the closed surface returns
+// one for a contract (`contract.*` has no read), so this says what the command proved. §8's third column says "200 ContractRevision" and
 // "200 VerificationPlan", and no command on the closed surface returns those bodies -
 // `contract.*` and `plan.*` have no read. Saying so from a named schema is the honest version
 // of a reply that would otherwise be a dump of whatever the service happened to build.
-export const contractReviewReceiptSchema = z.strictObject({
+export const contractCommitReceiptSchema = z.strictObject({
   contractId: idSchema,
   contractKey: nonEmptyString,
   revision: z.int().nonnegative(),
   digest: digestSchema,
-  reviewStatus: z.enum(REVIEW_DECISIONS),
+  reviewStatus: z.enum(REVIEW_STATUSES),
   auditSeq: z.int().nonnegative(),
   eventSeq: z.int().nonnegative().nullable(),
 });
 
-export const planReviewReceiptSchema = z.strictObject({
+export const planCommitReceiptSchema = z.strictObject({
   planId: idSchema,
   digest: digestSchema,
   inventoryDigest: digestSchema,
@@ -152,7 +159,7 @@ export const planReviewReceiptSchema = z.strictObject({
   excludedCount: z.int().nonnegative(),
   graphRevision: z.int().nonnegative(),
   inventoryRevision: z.int().nonnegative(),
-  reviewStatus: z.enum(REVIEW_DECISIONS),
+  reviewStatus: z.enum(REVIEW_STATUSES),
   auditSeq: z.int().nonnegative(),
   eventSeq: z.int().nonnegative().nullable(),
 });
@@ -215,6 +222,18 @@ export const planReviewRequestSchema = z.strictObject({
   if (request.decision === "approved" && request.digest === null) {
     ctx.addIssue({ code: "custom", message: "an approval must name the digest it approved" });
   }
+});
+
+// §8 line 289's plan creation body. It is the service's `planBuildRequestSchema` with the
+// document's name for one field: §8 calls the list `exclusions`, the service calls the identical
+// list `excludedVectors`, and the door maps between them in one line. The item shape is not
+// redeclared here - a second definition of the same record is how two doors start disagreeing.
+export const planBuildHttpRequestSchema = z.strictObject({
+  targetId: idSchema,
+  snapshotDigest: digestSchema,
+  contractRevisionIds: z.array(idSchema).min(1),
+  exclusions: z.array(excludedVectorSchema),
+  expectedInventoryRevision: z.int().nonnegative(),
 });
 
 export const planListQuerySchema = z.strictObject({

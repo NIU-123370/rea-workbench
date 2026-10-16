@@ -268,11 +268,13 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **24 条**，仍缺 **16 条**。
-这 24 条里最近补上的是四个改变状态的动作（`POST .../vectors/:v/review`、`.../contracts/:c/review`、
-`.../verification-plans/:v/review`、`POST .../blueprints`，§8 的 285／287／291／292 行）——它们的命令
-一直都在，缺的只是门，所以「审阅样本 → 批契约 → 批计划 → **冻蓝图**」这条链现在可以由一次 HTTP 请求
-从头走到尾（浏览器实测见下）。冻结是 §8 line 261 点名的创建动作，所以它带 `Idempotency-Key`。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **27 条**，仍缺 **13 条**。
+这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
+§8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
+命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
+现在能由一个配对会话里的 HTTP 请求走完（浏览器实测见下）。每个记录类型只有**一份投影**
+（`COMMIT_PROJECTIONS`）：创建门与审阅门回答的是同一行的同一件事，写成两份就是两份会各自漂的清单；
+创建门回 201、审阅门回 200，这是 §8 那一列自己定的。冻结是 §8 line 261 点名的创建动作，所以它带 `Idempotency-Key`。
 顺带把一条**没人读的声明**变成了规则：路由表上的 `requiresIdempotencyKey` 此前无任何消费者，
 每个创建自己复述一遍检查（而且两处不一致——一处校验键的形状、一处只看有没有）；现在流水线统一
 按声明校验形状（§8 的 200 字符上限），门不再各写一份。审阅门有三处与文档不一致，都是本轮裁决并写进代码的，等 #58 上由你确认：
@@ -282,7 +284,19 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 所以门拒绝它而不是收下后丢掉（页面不能以为自己记下了一个没人保存的理由）；③§8 的三条回包写的是
 「200 TestVector／ContractRevision／VerificationPlan」，而封闭命令表里 `contract.*`／`plan.*` 都没有
 读命令，门只能出服务真正回答的那份回执（receipt），它是一份具名契约而不是命令返回值的转储。
-缺的 16 条里 `GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v` 三条连命令都还没有；
+缺的 13 条里 `GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v` 三条连命令都还没有
+（`contract.*` 只有 create／review，服务侧的 `read` 还没上封闭命令表）；
+三个创建门各有一处 §8 偏离，都是「文档给了字段而实现无处安放」：vector 的 `sensitiveValues`、
+plan／contract 的 `expectedGraphRevision`（§7.4 让计划自己绑图版本）都由门**具名拒收**，
+而 contract 不在 §8 line 261 的幂等清单里，所以那扇门没有键——浏览器实测同键重发拿到的是
+revision 2 新行（`review=draft`），与 §8 line 286 的描述一致，也记在 #58 等你确认。
+真浏览器读数（一个配对会话、页面自己的中继，2026-10-16）：审计日志按 seq 排出
+`vector.create#2 → contract.create#3 → vector.review#4 → contract.review#8 → plan.build#11 →
+plan.review#12 → blueprint.freeze#13`；计划那次 `exclusions` 交了一条越界样本，回执就是
+`selectedCount 1 / excludedCount 1`；冻结 201 的 `auditSeq` 正是 13。契约审阅第一次是
+**422 `schema-inputSchema-dialect-not-2020-12`**——门禁要求 JSON Schema 2020-12 方言，
+这不是门的错，是门的证明。
+
 冻结的回包同样是一张**具名回执**（blueprintId／两份摘要／planId／三个计数／auditSeq），因为 §8 那一行还
 写了 `planDigest`、`scope`、`limitations`——它们在蓝图 artifact 的正文里，读回来要等 `GET /blueprints/:b`
 那条命令；调用体里 §8 列的 `targetId`、`contractRevisionIds`、`expectedGraphRevision` 一律**拒收**并报出

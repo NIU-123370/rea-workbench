@@ -17,8 +17,8 @@ import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
-import { vectorPageSchema, vectorReviewReceiptSchema } from "../../packages/contracts/vectors.ts";
-import { contractReviewReceiptSchema, planReviewReceiptSchema } from "../../packages/contracts/behaviors.ts";
+import { vectorCommitReceiptSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
+import { contractCommitReceiptSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
 import { blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal, MAX_IDEMPOTENCY_KEY_LENGTH } from "../../packages/application/idempotency.ts";
@@ -1864,7 +1864,7 @@ describe("the three review routes (§8 lines 285, 287, 291 / issue #58)", () => 
       expectedInventoryRevision: inventoryRevision(seeded.projectId),
     });
     expect(vector.status, vector.text).toBe(200);
-    const vectorReceipt = vectorReviewReceiptSchema.safeParse(JSON.parse(vector.text) as JsonValue);
+    const vectorReceipt = vectorCommitReceiptSchema.safeParse(JSON.parse(vector.text) as JsonValue);
     if (!vectorReceipt.success) throw new Error(vector.text);
     expect(vectorReceipt.data.eligibility).toBe("usable");
     // The approval is what moved the inventory, and the receipt reports the revision after it.
@@ -1875,7 +1875,7 @@ describe("the three review routes (§8 lines 285, 287, 291 / issue #58)", () => 
       expectedDigest: seeded.seeded.contractDigest,
     });
     expect(contract.status, contract.text).toBe(200);
-    const contractReceipt = contractReviewReceiptSchema.safeParse(JSON.parse(contract.text) as JsonValue);
+    const contractReceipt = contractCommitReceiptSchema.safeParse(JSON.parse(contract.text) as JsonValue);
     if (!contractReceipt.success) throw new Error(contract.text);
     expect(contractReceipt.data.contractId).toBe(String(seeded.seeded.contractId));
     expect(contractReceipt.data.reviewStatus).toBe("approved");
@@ -1886,7 +1886,7 @@ describe("the three review routes (§8 lines 285, 287, 291 / issue #58)", () => 
       expectedInventoryRevision: inventoryRevision(seeded.projectId),
     });
     expect(plan.status, plan.text).toBe(200);
-    const planReceipt = planReviewReceiptSchema.safeParse(JSON.parse(plan.text) as JsonValue);
+    const planReceipt = planCommitReceiptSchema.safeParse(JSON.parse(plan.text) as JsonValue);
     if (!planReceipt.success) throw new Error(plan.text);
     expect(planReceipt.data.selectedCount).toBe(1);
     expect(planReceipt.data.reviewStatus).toBe("approved");
@@ -2218,5 +2218,224 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     const bad = await send(session, { verificationPlanId: "not-a-uuid" }, "freeze-key-5");
     expect(bad.status, bad.text).toBe(400);
     expect(bad.text).not.toContain("not-a-uuid");
+  });
+});
+
+describe("the three creation doors (§8 lines 282, 286, 289 / issue #58)", () => {
+  // What a door owns is the mapping and the journal, so these tests ask each one for a real
+  // creation and then read the record back through the door that already existed for it. The
+  // evidence behind them is a real REA capture envelope (`seedReviewChain`), which is what
+  // `vector.create` re-hashes and parses - a fixture that faked it would be refused, and that
+  // refusal would prove nothing about this door.
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string; reviewerId: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    const current = await call("GET", `${API_PREFIX}/session`, { headers: { host: host(), cookie } });
+    const view = JSON.parse(current.text) as { reviewerId?: string; data?: { reviewerId?: string } };
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "", reviewerId: view.data?.reviewerId ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `create-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  function post(session: Session, pathname: string, payload: Record<string, JsonValue>, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    return call("POST", pathname, { body: JSON.stringify(payload), headers });
+  }
+
+  function rejected(text: string): string[] {
+    return ((JSON.parse(text) as { error: { details: { rejectedKeys?: string[] } } }).error.details.rejectedKeys ?? []).sort();
+  }
+
+  async function seeded(name: string): Promise<{ session: Session; projectId: Id; seeded: Awaited<ReturnType<typeof seedReviewChain>> }> {
+    const session = await pairSession();
+    const projectId = await freshProject(session, name);
+    return { session, projectId, seeded: await seedReviewChain({ writer: worker.writeConnection, store: new ArtifactStore(dataDir), projectId, name }) };
+  }
+
+  function vectorBody(fix: { projectId: Id; seeded: Awaited<ReturnType<typeof seedReviewChain>> }, caseKey: string): Record<string, JsonValue> {
+    return {
+      targetId: String(fix.seeded.targetId),
+      snapshotDigest: fix.seeded.snapshotDigest,
+      source: { evidenceId: fix.seeded.evidenceId, captureId: null, recordOrdinal: 0, pointer: "/records/0/reported", transactionId: null },
+      operationId: "getCart",
+      caseKey,
+      sdkInput: { include: "items" },
+      expectedOutcome: { kind: "return", value: { items: [] } },
+      visibility: "public",
+      replacesId: null,
+    };
+  }
+
+  it("creates a vector from the stored capture and reads it back as a draft sample", async () => {
+    const fix = await seeded("door-vector");
+    const created = await post(fix.session, `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`, vectorBody(fix, "cart-door"), "vector-door-1");
+    expect(created.status, created.text).toBe(201);
+    const receipt = vectorCommitReceiptSchema.safeParse(JSON.parse(created.text) as JsonValue);
+    if (!receipt.success) throw new Error(created.text);
+    expect(receipt.data.eligibility).toBe("usable");
+    expect(receipt.data.inventoryRevision).toBe(2);
+    // The digest is the service's own over the record it read, so a door that re-used the
+    // evidence digest would still be a 201 and a wrong answer.
+    expect(receipt.data.digest).not.toBe(fix.seeded.vectorDigest);
+
+    const read = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/vectors/${String(receipt.data.vectorId)}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(read.status, read.text).toBe(200);
+    const view = JSON.parse(read.text) as { review?: { status?: string }; digest?: string };
+    expect(view.review?.status).toBe("draft");
+    expect(view.digest).toBe(receipt.data.digest);
+
+    // Same key, same body: the original 201, and the sample inventory moved exactly once.
+    const replay = await post(fix.session, `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`, vectorBody(fix, "cart-door"), "vector-door-1");
+    expect(replay.status, replay.text).toBe(201);
+    expect(JSON.parse(replay.text)).toEqual(JSON.parse(created.text));
+  });
+
+  it("keeps the vector door shut on the key, the session and a restated sensitive list", async () => {
+    const fix = await seeded("door-vector-guard");
+    const anonymous = await call("POST", `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`, {
+      body: JSON.stringify(vectorBody(fix, "cart-anon")),
+      headers: { host: host(), origin: `http://${host()}`, "content-type": "application/json", "idempotency-key": "vector-anon" },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+
+    const noKey = await post(fix.session, `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`, vectorBody(fix, "cart-no-key"), null);
+    expect(noKey.status, noKey.text).toBe(400);
+    expect(noKey.text).toContain("idempotency-key-required");
+
+    // §8 line 282 offers `sensitiveValues` to a vector create; nothing in the create path or the
+    // stored sample has an owner for it (the declaration belongs to the capture), so the door
+    // names it rather than dropping it.
+    const withSensitive = await post(fix.session, `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`, { ...vectorBody(fix, "cart-sensitive"), sensitiveValues: ["hunter2"] }, "vector-sensitive");
+    expect(withSensitive.status, withSensitive.text).toBe(400);
+    expect(rejected(withSensitive.text)).toEqual(["sensitiveValues"]);
+    expect(withSensitive.text).not.toContain("hunter2");
+  });
+
+  it("creates a contract draft and reports the revision the service chose", async () => {
+    const fix = await seeded("door-contract");
+    const body: Record<string, JsonValue> = {
+      contractKey: "cart-door",
+      targetId: String(fix.seeded.targetId),
+      scope: { snapshotDigest: fix.seeded.snapshotDigest, operationIds: ["getCart"], excludedBehaviors: [] },
+      behaviorSpec: "GET /api/cart returns the item list",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      httpOperations: [
+        {
+          operationId: "getCart",
+          method: "GET",
+          path: "/api/cart",
+          requestMediaType: null,
+          responses: [{ status: 200, mediaType: "application/json", schema: { type: "object" } }],
+        },
+      ],
+      errorCases: [],
+      limitations: [],
+      unknowns: [],
+      sourceClaimIds: [String(fix.seeded.claimId)],
+      requiredCases: [{ caseKey: "cart-ok", claimId: String(fix.seeded.claimId), kind: "success", vectorIds: [String(fix.seeded.vectorId)] }],
+    };
+    const path = `${API_PREFIX}/projects/${String(fix.projectId)}/contracts`;
+    // A state change without the session's CSRF token is refused even with the cookie present:
+    // the door is `mutating`, and that flag is what this assertion makes load-bearing.
+    const noCsrf = await call("POST", path, {
+      body: JSON.stringify(body),
+      headers: { host: host(), origin: `http://${host()}`, cookie: fix.session.cookie, "content-type": "application/json" },
+    });
+    expect(noCsrf.status, noCsrf.text).toBe(403);
+    expect(noCsrf.text).toContain("csrf-token-missing");
+
+    const created = await post(fix.session, path, body, null);
+    expect(created.status, created.text).toBe(201);
+    const receipt = contractCommitReceiptSchema.safeParse(JSON.parse(created.text) as JsonValue);
+    if (!receipt.success) throw new Error(created.text);
+    expect(receipt.data.revision).toBe(1);
+    expect(receipt.data.reviewStatus).toBe("draft");
+
+    // §8 line 261 does not list contracts among the keyed creations, so a repeat is the
+    // service's own question about content, not this process replaying a body. Recorded on #58:
+    // what actually happens here is a second revision, which is what §8 line 286 describes.
+    const again = await post(fix.session, path, body, null);
+    expect(again.status, again.text).toBe(201);
+    const second = contractCommitReceiptSchema.safeParse(JSON.parse(again.text) as JsonValue);
+    if (!second.success) throw new Error(again.text);
+    expect(second.data.contractId).not.toBe(receipt.data.contractId);
+    expect(second.data.revision).toBe(2);
+  });
+
+  it("builds a plan from §8's `exclusions` name and reports the derived counts", async () => {
+    const fix = await seeded("door-plan");
+    // §8 line 289's plan is a function of the *approved* contracts, so the door is tested on a
+    // chain where that is true rather than on one where the build is legitimately refused.
+    const approved = await post(fix.session, `${API_PREFIX}/projects/${String(fix.projectId)}/contracts/${String(fix.seeded.contractId)}/review`, { decision: "approved", expectedDigest: fix.seeded.contractDigest }, null);
+    expect(approved.status, approved.text).toBe(200);
+    const body: Record<string, JsonValue> = {
+      targetId: String(fix.seeded.targetId),
+      snapshotDigest: fix.seeded.snapshotDigest,
+      contractRevisionIds: [String(fix.seeded.contractId)],
+      exclusions: [],
+      expectedInventoryRevision: 1,
+    };
+    const path = `${API_PREFIX}/projects/${String(fix.projectId)}/verification-plans`;
+    const built = await post(fix.session, path, body, "plan-door-1");
+    expect(built.status, built.text).toBe(201);
+    const receipt = planCommitReceiptSchema.safeParse(JSON.parse(built.text) as JsonValue);
+    if (!receipt.success) throw new Error(built.text);
+    // selected is derived from the approved contracts' requiredCases (§7.4), never sent: the
+    // seeded contract requires the seeded vector, so a build sees exactly one.
+    expect(receipt.data.selectedCount).toBe(1);
+    expect(receipt.data.excludedCount).toBe(0);
+    expect(receipt.data.reviewStatus).toBe("draft");
+
+    const read = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/verification-plans/${String(receipt.data.planId)}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(read.status, read.text).toBe(200);
+
+    // §8 line 289 also names `expectedGraphRevision`; the plan binds the graph revision the
+    // server reads, so a caller-supplied one is refused by name rather than accepted and ignored.
+    const withGraphRevision = await post(fix.session, path, { ...body, expectedGraphRevision: 7 }, "plan-door-2");
+    expect(withGraphRevision.status, withGraphRevision.text).toBe(400);
+    expect(rejected(withGraphRevision.text)).toEqual(["expectedGraphRevision"]);
+
+    // A stale inventory revision is the service's own conflict, and both sides of it arrive
+    // (issue #59) rather than a bare reason code. The live number is read rather than written
+    // down, so this stays true when the fixture's own bumps change.
+    const live = worker.writeConnection.transact((tx) => tx.getProject(fix.projectId));
+    if (!live.ok || live.value === null) throw new Error("project missing");
+    const stale = await post(fix.session, path, { ...body, expectedInventoryRevision: live.value.inventoryRevision + 40 }, "plan-door-3");
+    expect(stale.status, stale.text).toBe(409);
+    const details = (JSON.parse(stale.text) as { error: { details: Record<string, unknown> } }).error.details;
+    expect(details["expected"]).toBe(live.value.inventoryRevision + 40);
+    expect(details["actual"]).toBe(live.value.inventoryRevision);
   });
 });
