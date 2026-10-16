@@ -205,7 +205,7 @@ export class VerificationService {
     const staging = await this.artifacts.readStaging(projectId, completion.reportStagingId);
     if (!staging.ok) {
       return gateFail("REA_CONTRACT_MISMATCH", "transcript-unreadable", staging.error.code, {
-          portCode: staging.error.code,
+          sourceCode: staging.error.code,
         });
     }
     if (digestBytes(staging.value) !== completion.reportSha256) {
@@ -440,7 +440,7 @@ export class VerificationService {
     const bytes = await this.artifacts.read(projectId, artifact.storageKey);
     if (!bytes.ok) {
       return gateFail("REA_CONTRACT_MISMATCH", "report-unreadable", bytes.error.code, {
-        portCode: bytes.error.code,
+        sourceCode: bytes.error.code,
       });
     }
     if (digestBytes(bytes.value) !== artifact.sha256) {

@@ -13,7 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
-  evidenceMetaLine,
+  evidenceMetaLine, refusalFactsLine,
   pickCandidateSource,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
@@ -354,5 +354,25 @@ describe("evidenceMetaLine (§8 line 281)", () => {
     const line = evidenceMetaLine({ mediaType: "application/octet-stream", byteLength: 0, sha256: null });
     expect(line).toContain("未公开");
     expect(line).not.toMatch(/sha256 (null|undefined)/);
+  });
+});
+
+describe("the numbers a refusal published (§8's ApiError.details, issue #59)", () => {
+  it("names both sides of a size cap, in a stable order", () => {
+    // Sorted, because the object came off a socket: the same refusal must read the same way
+    // twice, or a page that re-renders looks like the server changed its answer.
+    expect(refusalFactsLine({ limit: 1_048_576, byteLength: 1_048_577 })).toBe("byteLength 1048577 · limit 1048576");
+    expect(refusalFactsLine({ byteLength: 1_048_577, limit: 1_048_576 })).toBe("byteLength 1048577 · limit 1048576");
+  });
+
+  it("renders a boolean as the value it is", () => {
+    expect(refusalFactsLine({ retryable: false })).toBe("retryable false");
+    expect(refusalFactsLine({ retryable: true, attempt: 3 })).toBe("attempt 3 · retryable true");
+  });
+
+  it("says nothing when the refusal published no number", () => {
+    // `null` rather than an empty string, so the caller does not draw a pair of brackets
+    // around absence.
+    expect(refusalFactsLine({})).toBeNull();
   });
 });

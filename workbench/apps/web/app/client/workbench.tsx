@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, listView, pickCandidateSource } from "../../ui/view-model.ts";
+import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, listView, pickCandidateSource, refusalFactsLine } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, LeftPanel, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
@@ -52,12 +52,24 @@ export type CandidatePayload = {
   files: { id: string; path: string; byteLength: number; language: string }[];
 };
 
-async function getJson(path: string): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string }> {
+// A refusal's `details` is the declared-safe subset the API published (§12.1): the reason plus
+// whatever numbers the service named. This is where JSON becomes a typed value again, so the
+// type test is the parse, not a defence against the server.
+type RefusalBody = { error?: { code?: string; message?: string; details?: Record<string, unknown> } };
+
+async function getJson(
+  path: string,
+): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
   const response = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    const error = (payload as { error?: { details?: { reason?: string } } } | null)?.error;
-    return { ok: false, status: response.status, reason: error?.details?.reason ?? "request-refused" };
+    const details = (payload as RefusalBody | null)?.error?.details ?? {};
+    const facts: Record<string, number | boolean> = {};
+    for (const [name, value] of Object.entries(details)) {
+      if (name === "reason") continue;
+      if (typeof value === "number" || typeof value === "boolean") facts[name] = value;
+    }
+    return { ok: false, status: response.status, reason: typeof details["reason"] === "string" ? details["reason"] : "request-refused", facts };
   }
   return { ok: true, value: payload };
 }
@@ -262,7 +274,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       const got = await getJson(`/api/v1/projects/${props.projectId}/evidence/${evidenceId}`);
       if (!got.ok) {
         setEvidence(null);
-        setEvidenceNotice(`读取被拒：${got.reason}`);
+        const facts = refusalFactsLine(got.facts);
+        setEvidenceNotice(facts === null ? `读取被拒：${got.reason}` : `读取被拒：${got.reason}（${facts}）`);
         return;
       }
       const view = got.value as { evidence: unknown; mediaType: string; byteLength: number; sha256: string | null };

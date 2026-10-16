@@ -38,6 +38,10 @@ export const rpcFailureSchema = z.strictObject({
   code: nonEmptyString,
   reason: nonEmptyString,
   message: nonEmptyString,
+  // Required, and left broad on purpose: the worker publishes only its declared-safe numbers,
+  // but a broad field with a strict reader is what makes one unexpected string cost a dropped
+  // key instead of costing the whole refusal its reason code (§12.1).
+  details: jsonValueSchema,
 });
 
 export const rpcReplySchema = z.union([
@@ -50,7 +54,7 @@ export const rpcReplySchema = z.union([
 // would be a second definition of what a payload may be.
 export type RpcActorWire = { actorId: string; actorKind: RpcActorKind };
 export type RpcFrameWire = { id: number; command: string; payload: JsonValue; actor: RpcActorWire };
-export type RpcFailureWire = { code: string; reason: string; message: string };
+export type RpcFailureWire = { code: string; reason: string; message: string; details: JsonValue };
 export type RpcReplyWire = { id: number; ok: true; value: JsonValue } | { id: number; ok: false; error: RpcFailureWire };
 
 // One frame per line, one reply per line: the socket never buffers a partial object

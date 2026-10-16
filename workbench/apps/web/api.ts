@@ -189,10 +189,15 @@ function refused(
   return errorResponse(requestId, { code, message, details: { reason, ...details } }, declaration);
 }
 
+// Only a failure read off the worker's socket arrives here, and both ends of that socket apply
+// the declared-key list (§12.1), so this hop adds no filter of its own - three copies of one
+// rule would only create a third thing that can drift. What it owns is the shape: `reason`
+// first, because the page's contract reads the reason out of `details`, then the numbers the
+// worker published (§8's ApiError.details).
 function fromWorker(requestId: string, failure: WorkerFailure, declaration: SensitiveDeclaration): ApiResponse {
   return errorResponse(
     requestId,
-    { code: failure.code, message: failure.message, details: { reason: failure.reason } },
+    { code: failure.code, message: failure.message, details: { reason: failure.reason, ...failure.details } },
     declaration,
   );
 }
@@ -363,7 +368,10 @@ async function createProject(ctx: Context, deps: ApiDependencies, key: string): 
     ctx.declaration,
     deps.limits,
   );
-  if (!digest.ok) return fromWorker(ctx.requestId, digest.error, ctx.declaration);
+  // A refusal this process made itself names its facts at the call site rather than relaying
+  // whatever a helper put in `details` - `refused` is the only shape for that, and it publishes
+  // the reason and nothing else.
+  if (!digest.ok) return refused(ctx.requestId, digest.error.code, digest.error.reason, digest.error.message, ctx.declaration);
   const scope = journalScope(String((ctx.session as CurrentSession).reviewerId), `${API_PREFIX}/projects`);
   const claim = deps.journal.claim(scope, key, digest.value);
   if (claim.kind === "divergent") {

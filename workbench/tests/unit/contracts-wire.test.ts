@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { HTTP_STATUS_BY_ERROR_CODE, NAMED_ERROR_CODES, apiErrorBodySchema, makeApiError } from "../../packages/contracts/errors.ts";
+import { HTTP_STATUS_BY_ERROR_CODE, NAMED_ERROR_CODES, SAFE_DETAIL_KEYS, apiErrorBodySchema, makeApiError, safeFailureDetails } from "../../packages/contracts/errors.ts";
+
 import { jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { EVENT_TYPES, committedEventSchema, eventPayloadSchema } from "../../packages/contracts/events.ts";
 import { healthResponseSchema, effectiveProfileSchema } from "../../packages/contracts/health.ts";
@@ -299,5 +300,52 @@ describe("session and project surfaces (DESIGN §8)", () => {
       evidenceIds: ["evidence-3"],
       importJobId: ID,
     });
+  });
+});
+
+// What a refusal is allowed to say beyond its reason code (§8's ApiError.details, §12.1).
+//
+// The rule has two conditions and the test holds both up separately: a key must be declared,
+// and its value must be a number or a boolean. Either half alone would be the wrong rule -
+// names alone would let `caseKey` carry whatever string a caller typed, and types alone would
+// hand every future numeric detail an automatic right to leave the process.
+
+describe("safeFailureDetails (§12.1)", () => {
+  it("passes declared keys whose value is a number or a boolean", () => {
+    expect(
+      safeFailureDetails({ byteLength: 1048577, limit: 1048576, maxLimit: 200, retryable: true, attempt: 3 }),
+    ).toEqual({ byteLength: 1048577, limit: 1048576, maxLimit: 200, retryable: true, attempt: 3 });
+  });
+
+  it("passes every name on the list, so undeclaring one is a failing test", () => {
+    // Derived from the list itself rather than written out a second time: dropping a key from
+    // the contract then stops passing at the boundary, which is the red test that claim needs.
+    const every = Object.fromEntries(SAFE_DETAIL_KEYS.map((key) => [key, 1]));
+    expect(Object.keys(safeFailureDetails(every)).sort()).toEqual([...SAFE_DETAIL_KEYS].sort());
+    expect(SAFE_DETAIL_KEYS.length).toBeGreaterThan(0);
+  });
+
+  it("drops a key nobody declared, even when its value is a harmless number", () => {
+    const safe = safeFailureDetails({ internalRowId: 7, secretCount: 2, limit: 50 });
+    expect(safe).toEqual({ limit: 50 });
+  });
+
+  it("drops a declared key whose value is text, a list or an object", () => {
+    // `caseKey`/`reasons`/`issues` are the shapes that would carry a caller's own string or
+    // a holdout identifier out of the process if the name alone decided.
+    expect(safeFailureDetails({ caseKey: "cart-add", reasons: ["a"], issues: [{ path: "x" }], limit: "50" })).toEqual({});
+    expect(safeFailureDetails({ limit: null, byteLength: undefined, seq: [1] })).toEqual({});
+  });
+
+  it("treats a non-object payload as nothing safe rather than as a surprise", () => {
+    expect(safeFailureDetails({})).toEqual({});
+    // The signature takes a record; the callers that could hand it anything are the ones
+    // that parsed JSON, so the function must not throw on the shapes they can produce.
+    expect(safeFailureDetails({ nested: { limit: 1 }, limit: 2 })).toEqual({ limit: 2 });
+  });
+
+  it("is idempotent, because both ends of the RPC socket apply this same list", () => {
+    const once = safeFailureDetails({ limit: 200, reasons: ["with-held"] });
+    expect(safeFailureDetails(once)).toEqual(once);
   });
 });

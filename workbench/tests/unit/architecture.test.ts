@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 // only way the isolation promises stay checkable without reading every file,
 // so it is asserted here rather than left to review.
 
+import { SAFE_DETAIL_KEYS } from "../../packages/contracts/errors.ts";
+
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 const MODULES = [
@@ -151,10 +153,23 @@ const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
 // The gate is only as good as this extractor, so every import form the language
 // allows has to land here — including a bare side-effect import, which carries
 // no `from` clause at all.
+// Prose is not a dependency. `FROM_CLAUSE` has to span the lines of a real multi-line
+// `import { ... } from "./x"`, which means `[^;]*?` walks across newlines - and without this
+// strip it also walks across a comment, so a sentence that happened to read
+// `export const X = [...]` … `tell "a" from "b"` in a doc comment manufactured a phantom
+// dependency and turned a green module red. A gate that can be tripped by prose is a gate
+// people learn to distrust, so the text is emptied of comments before any pattern sees it.
+function withoutComments(text: string): string {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
 function extractSpecifiers(text: string): string[] {
   const found = new Set<string>();
+  const code = withoutComments(text);
   for (const pattern of [FROM_CLAUSE, SIDE_EFFECT_IMPORT, DYNAMIC_IMPORT, REQUIRE_CALL]) {
-    for (const match of text.matchAll(pattern)) found.add(match[1] as string);
+    for (const match of code.matchAll(new RegExp(pattern.source, "gm"))) found.add(match[1] as string);
   }
   return [...found];
 }
@@ -288,6 +303,24 @@ describe("module dependency direction (DESIGN §3)", () => {
     );
   });
 
+  it("never reads a dependency out of prose, however import-shaped the sentence is", () => {
+    // The real hazard this test exists for: the `from` pattern must span a genuine
+    // multi-line `import { ... } from "./x"`, so it walks across newlines. Without the
+    // comment strip it also walks across a doc comment, and a sentence that says
+    // `tell "too big" from "not found"` after any `export` line manufactures a dependency
+    // on a module called "not found" - a green module turned red by wording.
+    const prose = [
+      "export const SAFE_DETAIL_KEYS = [",
+      '  // tell "too big" from "not found",',
+      '  "limit",',
+      "];",
+      "/* and it arrived from \"phantom/module\" somewhere */",
+      'const url = "https://example.invalid/path"; // trailing note about "other/x"',
+      'import { real } from "../domain/real.ts";',
+    ].join("\n");
+    expect(extractSpecifiers(prose)).toEqual(["../domain/real.ts"]);
+  });
+
   it("reads a side-effect import but never a string that merely ends in the word", () => {
     // The scanner is only trustworthy if tightening it kept the real form: a
     // space-less `import"x"` is legal JavaScript and must still be seen...
@@ -377,5 +410,137 @@ describe("module dependency direction (DESIGN §3)", () => {
     expect(withinAllowed("packages/domain", "packages/domain")).toBe(true);
     expect(withinAllowed("packages/domain-adapter/x.ts", "packages/domain")).toBe(false);
     expect(withinAllowed("packages/adapters/storage/database.ts", "packages/")).toBe(true);
+  });
+});
+
+// --- What the refusal-details allowlist is allowed to name (§12.1 / issue #59) ---------
+//
+// A permission list nobody can trace back to a real refusal is a list nobody can check: it
+// grows one speculative key at a time and each entry then reads as if something produced it.
+// So the gate reads the source for the keys control-plane refusals actually hand to the RPC
+// boundary, and refuses to let the contract declare one that no refusal emits. The scan is
+// deliberately narrow - only a literal object in the details position of `gateFail` or
+// `blockedByReasons` counts, so a service that publishes through a computed object is not
+// silently counted, and a name mentioned in prose is not counted either.
+// Refusals are found by name: `gateFail`, the helper every service builds one with, and the local
+// `fail` alias vector-service uses for the same shape. A helper named something else is not seen,
+// and the direction that mistake goes is loud rather than quiet - the key it publishes then reads
+// as unproduced and the gate below turns red until someone adds the name.
+const REFUSAL_CALL = /\b(?:gateFail|fail)\s*\(/g;
+
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote = "";
+  let current = "";
+  for (const character of text) {
+    if (quote !== "") {
+      current += character;
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "\"" || character === "'" || character === "`") {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if ("([{".includes(character)) depth += 1;
+    if (")]}".includes(character)) depth -= 1;
+    if (character === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  parts.push(current);
+  return parts;
+}
+
+// The closing paren of one call, found by balancing from its opening one.
+function argumentsOf(code: string, open: number): string[] {
+  let depth = 0;
+  let quote = "";
+  for (let index = open; index < code.length; index += 1) {
+    const character = code[index] as string;
+    if (quote !== "") {
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "\"" || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "(") depth += 1;
+    if (character !== ")") continue;
+    depth -= 1;
+    if (depth === 0) return splitTopLevel(code.slice(open + 1, index));
+  }
+  return [];
+}
+
+function keysInDetails(call: string): string[] {
+  const open = call.indexOf("(");
+  if (open < 0) return [];
+  // A multi-line call ends in a trailing comma, which leaves an empty slot; the details
+  // argument is the last one that is actually there.
+  const args = argumentsOf(call, open).filter((argument) => argument.trim() !== "");
+  const details = args[args.length - 1];
+  if (details === undefined) return [];
+  const trimmed = details.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return [];
+  const keys: string[] = [];
+  for (const pair of splitTopLevel(trimmed.slice(1, -1))) {
+    const entry = pair.trim();
+    // `{ maxLimit: VECTOR_PAGE_MAX_LIMIT }` names its key; `{ pinnedRevision }` names it too,
+    // and that shorthand form is what a service publishes when the value is already a local.
+    const quoted = /^\s*"?([A-Za-z][A-Za-z0-9]*)"?\s*:/.exec(entry);
+    const name = quoted !== null ? quoted[1] : (/^[A-Za-z][A-Za-z0-9_]*$/.test(entry) ? entry : undefined);
+    if (name !== undefined) keys.push(name);
+  }
+  return keys;
+}
+
+function emittedRefusalKeys(dirs: string[]): Set<string> {
+  const keys = new Set<string>();
+  for (const dir of dirs) {
+    for (const file of sourcesOf(dir)) {
+      const code = withoutComments(readFileSync(file, "utf8"));
+      for (const match of code.matchAll(REFUSAL_CALL)) {
+        for (const key of keysInDetails(code.slice(match.index ?? 0))) keys.add(key);
+      }
+    }
+  }
+  return keys;
+}
+
+const REFUSAL_SOURCE_DIRS = ["packages/application", "packages/adapters", "apps/worker"];
+
+describe("the refusal-details allowlist (DESIGN §12.1)", () => {
+  const emitted = emittedRefusalKeys(REFUSAL_SOURCE_DIRS);
+
+  it("reads a details object and nothing that merely looks like one", () => {
+    // The gate is only as good as this reader, so both directions are pinned on fixtures:
+    // top-level keys only (a nested `seq` is not a published fact), a call without details
+    // contributes nothing, and a details argument that is a variable is not counted.
+    expect(keysInDetails('gateFail("A", "r", "m", { limit: 1, nested: { seq: 2 } })')).toEqual(["limit", "nested"]);
+    expect(keysInDetails('gateFail("A", "r", "m")')).toEqual([]);
+    expect(keysInDetails("blockedByReasons(x, \"A\", \"m\", computedDetails)")).toEqual([]);
+    expect(keysInDetails('gateFail("A", "r", "m", { "quoted": 1 })')).toEqual(["quoted"]);
+    expect(keysInDetails('gateFail("A", "r", "m", { pinnedRevision, currentRevision: 7 })')).toEqual(["pinnedRevision", "currentRevision"]);
+    expect(keysInDetails('gateFail("A", "r", "text with { fakeKey: 1 } inside", { actual: 2 })')).toEqual(["actual"]);
+    expect(keysInDetails('gateFail(\n  "A",\n  "r",\n  "m",\n  { expected: 4, actual: 6 },\n)')).toEqual(["expected", "actual"]);
+  });
+
+  it("scans the directories that own a refusal", () => {
+    // A scan that found nothing would pass the claim below vacuously, so the two keys the
+    // size-and-page refusals publish are asserted here by name.
+    expect(emitted.has("byteLength")).toBe(true);
+    expect(emitted.has("maxAttempts")).toBe(true);
+    expect(emitted.has("reasonCount")).toBe(true);
+  });
+
+  it("declares no key that no refusal in this repository publishes", () => {
+    expect([...SAFE_DETAIL_KEYS].filter((key) => !emitted.has(key))).toEqual([]);
   });
 });

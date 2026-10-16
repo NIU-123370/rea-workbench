@@ -1344,12 +1344,13 @@ describe("the §8 read routes (issue #58)", () => {
     // provider record would read as a record.
     expect(read.text).toContain(String(EVIDENCE_INLINE_LIMIT_BYTES));
     expect(read.text).toContain(String(EVIDENCE_INLINE_LIMIT_BYTES + 1));
-    // Pinned, not assumed: the worker's refusal carries `{byteLength, limit}` in `details`,
-    // and `fromWorker` relays **only** `reason` onto the wire. That is today's contract for
-    // every command, so a page that wants the numbers has to read them out of the sentence.
-    // Recorded as an open question in the issue list rather than changed here.
+    // Issue #59, now closed: the numbers travel. They crossed two filters to get here - the
+    // worker applied the declared-key list at its own socket boundary, this side re-checked
+    // the frame - and both of the values the refusal named arrive as themselves.
     const refusal = JSON.parse(read.text) as { error: { details: Record<string, unknown> } };
-    expect(Object.keys(refusal.error.details)).toEqual(["reason"]);
+    expect(refusal.error.details["limit"]).toBe(EVIDENCE_INLINE_LIMIT_BYTES);
+    expect(refusal.error.details["byteLength"]).toBe(EVIDENCE_INLINE_LIMIT_BYTES + 1);
+    expect(refusal.error.details["reason"]).toBe("evidence-over-inline-limit");
     // None of the stored bytes ride along in the refusal.
     expect(read.text).not.toContain("{{{");
 

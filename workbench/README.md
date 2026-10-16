@@ -277,11 +277,21 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 命令侧有实现，页面上点不到，所以「审阅样本 → 批契约 → 批计划 → 冻蓝图」这条真正改变项目状态的链
 仍然只能由测试或脚本走完。注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
 
-还有一条同一轮里钉住的现状（issue #59）：`fromWorker()` 把 worker 的拒绝转成 HTTP 回包时，
-`details` 里**只出 `reason` 一个键**。所以「带 `{byteLength, limit}` 的 RESOURCE_LIMIT」这类说法只在
-服务层为真，过 HTTP 这一跳操作者看到的是 code＋message＋reason。本轮没有改它（放行 `details` 需要
-一个具名键白名单，不能默认全透传），但用一条用例把「只出 reason」钉成被审视过的事实，
-而不是没人看过的偶然。
+拒绝回包里的数字现在能到操作者（issue #59 已闭合）。做法是一份**具名键白名单**
+（`packages/contracts/errors.ts` 的 `SAFE_DETAIL_KEYS`，21 个键：字节数、上限、代数、修订号两侧、
+seq、`reasonCount`、`retryable`），两条边界各套同一份表：worker 在 `errorFrame()` 出进程前过滤，
+web 侧 `worker-client.ts` 收到帧后按同一张表再过一遍。只按类型筛不够——`portCode: 4821` 是个数字，
+而它的值本身就是配对码，所以名单与类型是两个条件（§12.1）。`details` 因此进了 RPC 契约
+（`rpcFailureSchema` 里 required，缺它即 `reply-shape-rejected`），`fromWorker()` 出
+`{reason, ...数字}` 而不再第三次复制这条规则；进程内自己造的拒绝（幂等摘要失败）改走 `refused()`，
+键在调用点写死。新增的架构闸把「白名单里有没人发的键」变成红的：它按名字扫 `gateFail`/`fail` 的
+details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键每个都有真拒绝在发它；顺带这一扫
+查出 `verification-service` 里两处把错误码起名成 `portCode` 的键（已改 `sourceCode`）。
+实测：`GET .../evidence/:e` 读超大正文时页面拿到 `limit=1048576`、`byteLength=1048577`；
+变异 21 支全杀（worker 不过滤／客户端只筛类型／契约把 details 变可选或删掉／中继丢数字或丢 reason／
+名单删判定条件／加一个没人发的键／扫描器停用某个名字），另有 3 支按定义杀不掉：从名单里删掉一个
+真键（白名单内容本身是评审决定）、删掉一条冗余夹具断言、把断言换成恒真式——最后一类是变异测试的
+结构极限，只能靠看 diff。
 
 浏览器实测（2026-10-16，真 Chrome 1440×832；worker、`npm run web`、`next dev` 三个真进程）：
 
