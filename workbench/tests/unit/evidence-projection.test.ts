@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   blocksStrictBlueprint,
   coverageDeficiencyReasons,
+  coverageIsSufficient,
   projectClaim,
   projectRequiredClaims,
   type ClaimEvidenceState,
@@ -85,6 +86,37 @@ describe("three-colour projection (DESIGN §6)", () => {
     expect(coverageDeficiencyReasons({ state: "complete", examined: 1, total: 3, reasons: [] })).toEqual([
       "coverage-complete-count-mismatch",
     ]);
+  });
+
+  it("treats a complete coverage with only one count as undetermined, not sufficient", () => {
+    const oneSided: Coverage[] = [
+      { state: "complete", examined: null, total: 3, reasons: [] },
+      { state: "complete", examined: 3, total: null, reasons: [] },
+    ];
+    for (const coverage of oneSided) {
+      expect(coverageDeficiencyReasons(coverage)).toEqual(["coverage-complete-count-indeterminate"]);
+      expect(coverageIsSufficient(coverage)).toBe(false);
+      const projected = projectClaim(claim({ coverage }));
+      expect(projected.status).toBe("UNKNOWN");
+      expect(projectRequiredClaims([claim({ coverage })]).status).toBe("UNKNOWN");
+    }
+    // Declaring completeness without any counts stays valid (upstream does this).
+    const noCounts: Coverage = { state: "complete", examined: null, total: null, reasons: [] };
+    expect(coverageDeficiencyReasons(noCounts)).toEqual([]);
+    expect(coverageIsSufficient(noCounts)).toBe(true);
+    expect(coverageIsSufficient({ state: "complete", examined: 2, total: 3, reasons: [] })).toBe(
+      false,
+    );
+    expect(coverageIsSufficient({ state: "partial", examined: 3, total: 3, reasons: [] })).toBe(
+      false,
+    );
+    expect(
+      projectClaim(
+        claim({
+          coverage: { state: "complete", examined: null, total: null, reasons: [] },
+        }),
+      ).status,
+    ).toBe("SEEN");
   });
 
   it("blocks a strict blueprint on yellow and red alike, with no review override", () => {

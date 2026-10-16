@@ -44,17 +44,14 @@ export type TargetSnapshot = {
   scope: JsonValue;
 };
 
-export function coverageIsSufficient(coverage: Coverage): boolean {
-  if (coverage.state !== "complete") return false;
-  if (coverage.examined === null || coverage.total === null) return true;
-  // `complete` only ever means the declared set was fully examined.
-  return coverage.examined === coverage.total;
-}
-
 export function coverageDeficiencyReasons(coverage: Coverage): string[] {
   switch (coverage.state) {
     case "complete": {
-      if (coverage.examined !== null && coverage.total !== null && coverage.examined !== coverage.total) {
+      if (coverage.examined === null && coverage.total === null) return [];
+      if (coverage.examined === null || coverage.total === null) {
+        return ["coverage-complete-count-indeterminate"];
+      }
+      if (coverage.examined !== coverage.total) {
         return ["coverage-complete-count-mismatch"];
       }
       return [];
@@ -67,6 +64,12 @@ export function coverageDeficiencyReasons(coverage: Coverage): string[] {
     case "unavailable":
       return ["coverage-unavailable"];
   }
+}
+
+// One rule, one owner: sufficiency is a projection of the reasons above, so the
+// two can never disagree about a half-declared `complete` coverage.
+export function coverageIsSufficient(coverage: Coverage): boolean {
+  return coverageDeficiencyReasons(coverage).length === 0;
 }
 
 export type ClaimEvidenceState = {

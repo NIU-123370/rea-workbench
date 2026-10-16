@@ -59,16 +59,28 @@ export const REPORT_IDENTITY_FIELDS = [
   "runnerImageDigest",
 ] as const satisfies readonly (keyof ReportIdentities)[];
 
-// Any bound identity changing, or new Evidence contradicting a selected scope,
-// makes the related report stale (DESIGN §10).
+// Any bound identity changing, newly imported Evidence contradicting the
+// selected scope, or the selected range itself changing makes the related
+// report stale (DESIGN §10). Unrelated new evidence must not be signalled
+// here, or every report in the project would flip on each import.
+export type StalenessSignal = {
+  contradictingEvidenceIds?: readonly string[];
+  selectedScopeChanged?: boolean;
+};
+
 export function staleReasons(
   bound: ReportIdentities,
   current: ReportIdentities,
+  signal: StalenessSignal = {},
 ): string[] {
   const reasons: string[] = [];
   for (const field of REPORT_IDENTITY_FIELDS) {
     if (bound[field] !== current[field]) reasons.push(`identity-changed:${field}`);
   }
+  for (const evidenceId of signal.contradictingEvidenceIds ?? []) {
+    reasons.push(`evidence-contradiction:${evidenceId}`);
+  }
+  if (signal.selectedScopeChanged === true) reasons.push("selected-scope-changed");
   return reasons;
 }
 

@@ -225,6 +225,25 @@ describe("delivery verdict (DESIGN §10)", () => {
     expect(staleReasons(identities(), identities())).toEqual([]);
   });
 
+  it("goes stale on contradicting evidence or a moved scope even with equal digests", () => {
+    const same = identities();
+    expect(staleReasons(same, same)).toEqual([]);
+    expect(staleReasons(same, same, { contradictingEvidenceIds: [`ev_${"f".repeat(64)}`] })).toEqual([
+      `evidence-contradiction:ev_${"f".repeat(64)}`,
+    ]);
+    expect(staleReasons(same, same, { selectedScopeChanged: true })).toEqual([
+      "selected-scope-changed",
+    ]);
+    expect(
+      staleReasons(same, same, { selectedScopeChanged: false, contradictingEvidenceIds: [] }),
+    ).toEqual([]);
+    expect(
+      staleReasons(identities(), identities({ planDigest: hex("4") }), {
+        selectedScopeChanged: true,
+      }),
+    ).toEqual(["identity-changed:planDigest", "selected-scope-changed"]);
+  });
+
   it("blocks verified-samples export on cleanup even with a current PASS", () => {
     expect(
       deliverability({ result: "PASS", currentness: "current", cleanupState: "pending", reportPublished: true }),

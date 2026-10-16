@@ -115,6 +115,14 @@ function extractSpecifiers(text: string): string[] {
   return [...found];
 }
 
+// The gate must see every TypeScript flavour, otherwise an all-`.tsx` module
+// (planned for apps/web) silently drops out of the scan.
+const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"] as const;
+
+function isSourceFile(name: string): boolean {
+  return SOURCE_EXTENSIONS.some((extension) => name.endsWith(extension));
+}
+
 function sourcesOf(dir: string): string[] {
   const absolute = path.join(ROOT, dir);
   if (!statSync(absolute, { throwIfNoEntry: false })?.isDirectory()) return [];
@@ -122,7 +130,7 @@ function sourcesOf(dir: string): string[] {
   for (const entry of readdirSync(absolute, { withFileTypes: true })) {
     const full = path.join(absolute, entry.name);
     if (entry.isDirectory()) found.push(...sourcesOf(path.join(dir, entry.name)));
-    else if (entry.name.endsWith(".ts")) found.push(full);
+    else if (isSourceFile(entry.name)) found.push(full);
   }
   return found;
 }
@@ -242,6 +250,16 @@ describe("module dependency direction (DESIGN §3)", () => {
     expect(isViolation("packages/domain", "packages/domain", "node:crypto")).toBe(false);
     expect(isViolation("packages/contracts", "packages/contracts", "zod")).toBe(false);
     expect(isViolation("packages/domain", "packages/domain", "../contracts/jobs.ts")).toBe(true);
+  });
+
+  it("scans every TypeScript flavour, not just .ts", () => {
+    expect(SOURCE_EXTENSIONS).toContain(".tsx");
+    for (const name of ["Page.tsx", "main.ts", "entry.mts", "shim.cts"]) {
+      expect(isSourceFile(name)).toBe(true);
+    }
+    for (const name of ["page.js", "notes.md", "legacy.jsx", "data.json"]) {
+      expect(isSourceFile(name)).toBe(false);
+    }
   });
 
   it("only honours allowlist entries at directory boundaries", () => {
