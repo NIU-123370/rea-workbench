@@ -10,6 +10,7 @@ import { createProjectRequestSchema, createdProjectSchema } from "../../packages
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
+import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
@@ -79,6 +80,11 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "GET", template: `${API_PREFIX}/health`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/events`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The graph read the three columns are built from (§6, §8 / issue #18). It is a GET
+  // with no body: the target it names, if any, comes from the query, so a page can ask
+  // for the same view the tested headless renderer gets without inventing a second
+  // place where a claim's status is decided.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/graph`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // Delivery (§8 lines 299-300 / issue #22). The POST creates a *new* package rather than
   // taking an idempotency key: §5's rule is that an old package is never overwritten, and
   // a retried request therefore has to make a second record, not replay the first.
@@ -370,6 +376,29 @@ async function listExports(ctx: Context, deps: ApiDependencies): Promise<ApiResp
   return jsonSuccess(ctx.requestId, 200, listed.value);
 }
 
+async function readGraph(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  // The target is optional and named in the query, because the read's reply already says
+  // which target it chose. A malformed name is refused here rather than reaching the
+  // worker, so the operator sees "that is not an identifier" and not a lookup miss.
+  const targetId = ctx.request.query.targetId;
+  if (targetId !== undefined && !isId(targetId)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "graph-target-id-malformed", "the target identifier in the query is not an id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call(
+    "graph.read",
+    { projectId, request: targetId === undefined ? {} : { targetId } },
+    ctx.actor,
+  );
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const view = parseStrict(graphViewSchema, outcome.value);
+  if (!view.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "graph-view-shape", "the worker did not answer with a graph view", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, view.value);
+}
+
 async function createExport(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
@@ -604,6 +633,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createExport(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/exports")) {
       response = await listExports(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/graph")) {
+      response = await readGraph(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {

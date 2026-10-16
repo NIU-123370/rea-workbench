@@ -120,6 +120,7 @@ describe("summary", () => {
 
 describe("the repository passes its own review bot", () => {
   const root = fileURLToPath(new URL("../..", import.meta.url));
+  const SCAN_SCRIPT = path.join(root, "infra/review/scan.mjs");
 
   it("scans a non-trivial number of files and finds nothing", () => {
     const out = path.join(mkdtempSync(path.join(tmpdir(), "rea-review-")), "findings.json");
@@ -142,15 +143,43 @@ describe("the repository passes its own review bot", () => {
     expect(report.scannedFiles).toBeGreaterThan(0);
   });
 
+  it("does not scan generated build output", () => {
+    // A Next build drops `.next/types/validator.ts` under `apps/web`, and that file is
+    // full of suppressions no rule was written for. Scanning it turns a clean tree red
+    // and teaches everyone to ignore the bot.
+    const scratch = mkdtempSync(path.join(tmpdir(), "rea-review-generated-"));
+    mkdirSync(path.join(scratch, "packages/domain"), { recursive: true });
+    mkdirSync(path.join(scratch, "apps/web/.next/types"), { recursive: true });
+    writeFileSync(path.join(scratch, "packages/domain/ok.ts"), "export const ok = 1;\n", { flag: "w" });
+    writeFileSync(
+      path.join(scratch, "apps/web/.next/types/validator.ts"),
+      "// @ts-ignore\nconst s = z.object({});\nconst v: any = 1;\n",
+      { flag: "w" },
+    );
+    const output = execFileSync(process.execPath, [SCAN_SCRIPT, "--root", scratch], { encoding: "utf8" });
+    const report = JSON.parse(output.trim()) as { scannedFiles: number; summary: { total: number }; findings: { file: string }[] };
+    expect(report.scannedFiles).toBe(1);
+    expect(report.findings.map((finding) => finding.file)).toEqual([]);
+    expect(report.summary.total).toBe(0);
+  });
+
   it("exits non-zero when a P1 is present", () => {
     const scratch = mkdtempSync(path.join(tmpdir(), "rea-review-bad-"));
     mkdirSync(path.join(scratch, "packages/domain"), { recursive: true });
     writeFileSync(path.join(scratch, "packages/domain/bad.ts"), "const s = z.object({ a: 1 });\n", { flag: "w" });
-    expect(() =>
-      execFileSync(process.execPath, ["infra/review/scan.mjs", "--files", "packages/domain/bad.ts"], {
-        cwd: scratch,
-        stdio: "pipe",
-      }),
-    ).toThrow();
+    // The script is addressed absolutely and the tree through `--root`: the previous
+    // form ran `infra/review/scan.mjs` relative to a scratch cwd, so it "threw" because
+    // the file was never found — a green test that had checked nothing.
+    const report = path.join(scratch, "findings.json");
+    let refused = false;
+    try {
+      execFileSync(process.execPath, [SCAN_SCRIPT, "--root", scratch, "--files", "packages/domain/bad.ts", "--json", report], { stdio: "pipe" });
+    } catch {
+      refused = true;
+    }
+    expect(refused).toBe(true);
+    const parsed = JSON.parse(readFileSync(report, "utf8")) as { findings: { rule: string }[]; summary: { P1: number } };
+    expect(parsed.findings.map((finding) => finding.rule)).toContain("R1");
+    expect(parsed.summary.P1).toBe(1);
   });
 });

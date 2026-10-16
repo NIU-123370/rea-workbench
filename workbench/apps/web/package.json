@@ -1,0 +1,17 @@
+{
+  "name": "@rea/workbench-web-shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Next.js project root for the three-column shell. The dependencies are installed once at the workspace root (this repo has no npm workspaces); this file exists because Next identifies a project by its own package.json and refuses to compile a directory that has none. tests/unit/web-shell-project.test.ts keeps the two lists from drifting.",
+  "dependencies": {
+    "@xyflow/react": "12.3.6",
+    "next": "16.4.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

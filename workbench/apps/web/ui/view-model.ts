@@ -136,20 +136,64 @@ export type ListRow = {
   label: string;
   statusLine: string;
   reasonLine: string;
+  // The same tone the canvas cell carries. Colour is an extra channel here, never the
+  // only one: the icon and the word are in `statusLine` beside it (§6).
+  tone: StatusPresentation["tone"];
   sourceCount: number;
+  // The row carries the jump targets rather than only their count: a list that reports
+  // "1 source" with nothing to press cannot satisfy "可跳 Evidence 来源".
+  evidenceJumpTargets: string[];
+  // `null` when the cell has no gap, or when the gap has no named next step (§6 refuses
+  // to invent one).
+  inquiry: DirectedInquiry | null;
 };
 
 // The list is the same data as the canvas, so switching views cannot change what a
 // reviewer is told about a claim.
 export function listView(cells: readonly MiddleCell[]): ListRow[] {
-  return cells.map((cell) => ({
-    id: cell.id,
-    role: cell.role,
-    label: cell.label,
-    statusLine: `${cell.presentation.icon} ${cell.presentation.label}`,
-    reasonLine: cell.presentation.reasons.join(", ") || "—",
-    sourceCount: cell.evidenceJumpTargets.length,
-  }));
+  return cells.map((cell) => {
+    const inquiry = directedInquiry(cell);
+    return {
+      id: cell.id,
+      role: cell.role,
+      label: cell.label,
+      statusLine: `${cell.presentation.icon} ${cell.presentation.label}`,
+      reasonLine: cell.presentation.reasons.join(", ") || "—",
+      tone: cell.presentation.tone,
+      sourceCount: cell.evidenceJumpTargets.length,
+      evidenceJumpTargets: cell.evidenceJumpTargets,
+      inquiry: inquiry.ok ? inquiry.value : null,
+    };
+  });
+}
+
+// The canvas's own topology (issue #18).
+//
+// A React Flow edge names its endpoints by node id, and a cell id for an edge is the
+// database row's id, not `from → to`. Deriving the endpoints from the label is what made a
+// live canvas draw five nodes and no relations, so the endpoints come from the graph rows
+// and an edge that cannot be placed is reported rather than quietly dropped.
+export type CanvasEdge = { id: string; source: string; target: string; label: string };
+
+export type CanvasDrop = { reason: string; missing: string[] };
+
+export function canvasEdges(
+  cells: readonly MiddleCell[],
+  edges: readonly GraphEdgeView[],
+): { drawn: CanvasEdge[]; dropped: CanvasDrop[] } {
+  const nodeIds = new Set(cells.filter((cell) => cell.role === "node").map((cell) => cell.id));
+  const edgeCells = new Set(cells.filter((cell) => cell.role === "edge").map((cell) => cell.id));
+  const drawn: CanvasEdge[] = [];
+  const dropped: CanvasDrop[] = [];
+  for (const edge of edges) {
+    if (!edgeCells.has(edge.id)) continue;
+    if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
+      dropped.push({ reason: "edge-endpoint-not-on-canvas", missing: [edge.id, edge.from, edge.to] });
+      continue;
+    }
+    drawn.push({ id: edge.id, source: edge.from, target: edge.to, label: edge.relation });
+  }
+  return { drawn, dropped };
 }
 
 export type InquiryKind = "read-evidence" | "capture-new" | "inspect-runtime" | "review-claim";
@@ -225,6 +269,10 @@ export type LeftPanel = {
   // operator has to go looking for.
   limitations: string[];
   cleanupState: string | null;
+  // The 画面 slot of the left column. An offline HAR import has no frames to show, and
+  // saying so is the point: a missing preview must not read as "the capture produced
+  // nothing worth looking at" (§6's honesty rule applied to the sandbox panel).
+  frames: { count: number; note: string };
 };
 
 export function buildLeftPanel(input: {
@@ -232,6 +280,7 @@ export function buildLeftPanel(input: {
   target: { id: Id; kind: string; snapshotDigest: Digest | null } | null;
   limitations: readonly string[];
   scopeLabel: string;
+  frameLabels?: readonly string[];
 }): LeftPanel | { reason: string } {
   if (input.job === null && input.target === null) {
     return { reason: "no-task-and-no-target" };
@@ -242,6 +291,10 @@ export function buildLeftPanel(input: {
     viewLabel: input.scopeLabel,
     limitations: [...input.limitations],
     cleanupState: input.job?.cleanupState ?? null,
+    frames: {
+      count: (input.frameLabels ?? []).length,
+      note: (input.frameLabels ?? []).length > 0 ? "见下方画面列表" : "无画面：本次导入只带请求与响应，没有预览帧",
+    },
   };
 }
 

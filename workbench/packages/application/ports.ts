@@ -312,6 +312,9 @@ export type StorageTransaction = {
   getProject(projectId: Id): ProjectRow | null;
   insertTarget(row: TargetRow): void;
   getTarget(projectId: Id, targetId: Id): TargetRow | null;
+  // Which target a project should be looked at through is a bounded listing, newest
+  // first; the row stays the only owner of a target's identity (§5).
+  listTargetsForProject(projectId: Id, limit: number): TargetRow[];
   upsertProjectRevision(projectId: Id, increments: { graph?: number; inventory?: number }): number;
   insertJob(row: JobRow): JobIdempotency;
   updateJob(row: JobRow): void;
@@ -378,6 +381,9 @@ export type StorageTransaction = {
   listClaimEvidence(projectId: Id, claimId: Id): { evidenceId: string; locationJson: JsonValue; role: "support" | "contradict" }[];
   insertClaim(row: ClaimRow): void;
   getClaim(projectId: Id, claimId: Id): ClaimRow | null;
+  // The canvas needs the claim set of one target, bounded: a graph read is a screen
+  // input, so it may not stream an unbounded number of rows (§8).
+  listClaimsForTarget(projectId: Id, targetId: Id, limit: number): ClaimRow[];
   insertClaimEvidence(row: ClaimEvidenceRow): void;
   contradictingEvidenceIds(projectId: Id, claimIds: readonly Id[]): string[];
   appendEvent(draft: EventDraft): number;

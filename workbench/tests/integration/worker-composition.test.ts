@@ -50,6 +50,7 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "export.create",
   "export.download",
   "export.list",
+  "graph.read",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
@@ -408,6 +409,12 @@ describe("named commands and the local RPC (§14)", () => {
     expect((composition.match(/readFileSync\(/g) ?? []).length).toBe(2);
     expect(composition).toContain("readFileSync(path.join(profileDir, name)");
     expect(composition).toContain("readFileSync(target)");
+    // The package root has to be a real path, not a URL's percent-encoded pathname: an
+    // install under a directory with a space or a CJK name would otherwise resolve to a
+    // path that does not exist, `readJson` would return `{}`, and the process would boot
+    // with no installed defaults while still printing a pairing code.
+    expect(main).toContain('fileURLToPath(new URL("../..", import.meta.url))');
+    expect(main).not.toContain("import.meta.url).pathname");
     // The provider child gets an explicit environment, not the ambient one (D21).
     expect(composition).toContain("env: { PATH: ");
   });

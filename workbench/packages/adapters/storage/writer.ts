@@ -72,6 +72,24 @@ function verificationFrom(row: Row): VerificationRow {
   };
 }
 
+function claimFrom(row: Row): ClaimRow {
+  return {
+    id: asId(String(row["id"])),
+    projectId: asId(String(row["project_id"])),
+    targetId: asId(String(row["target_id"])),
+    entityKey: String(row["entity_key"]),
+    claimKey: String(row["claim_key"]),
+    assertion: String(row["assertion"]),
+    scopeJson: parseJson(String(row["scope_json"])),
+    basis: String(row["basis"]) as ClaimRow["basis"],
+    sourceState: row["source_state"] === null ? null : String(row["source_state"]),
+    coverageJson: parseJson(String(row["coverage_json"])),
+    validity: String(row["validity"]) as ClaimRow["validity"],
+    revision: Number(row["revision"]),
+    unknownReasonsJson: parseJson(String(row["unknown_reasons_json"])),
+  };
+}
+
 function exportFrom(row: Row): ExportRow {
   return {
     id: asId(String(row["id"])),
@@ -798,6 +816,30 @@ class SqliteTransaction implements StorageTransaction {
     return rows.map(exportFrom);
   }
 
+  listClaimsForTarget(projectId: Id, targetId: Id, limit: number): ClaimRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM claims WHERE project_id = ? AND target_id = ? ORDER BY entity_key ASC, id ASC LIMIT ?")
+      .all(projectId, targetId, limit) as Row[];
+    return rows.map(claimFrom);
+  }
+
+  listTargetsForProject(projectId: Id, limit: number): TargetRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM targets WHERE project_id = ? ORDER BY created_at DESC, id ASC LIMIT ?")
+      .all(projectId, limit) as Row[];
+    return rows.map((row) => ({
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      kind: String(row["kind"]) as TargetRow["kind"],
+      originalLocator: row["original_locator"] === null ? null : String(row["original_locator"]),
+      sourceSha256: row["source_sha256"] === null ? null : asDigest(String(row["source_sha256"])),
+      sourceArtifactId: row["source_artifact_id"] === null ? null : asId(String(row["source_artifact_id"])),
+      snapshotDigest: row["snapshot_digest"] === null ? null : asDigest(String(row["snapshot_digest"])),
+      identityReason: row["identity_reason"] === null ? null : String(row["identity_reason"]),
+      createdAt: asInstant(String(row["created_at"])),
+    }));
+  }
+
   insertGraphEdge(row: GraphEdgeRow): void {
     this.db
       .prepare(
@@ -861,21 +903,7 @@ class SqliteTransaction implements StorageTransaction {
       .prepare("SELECT * FROM claims WHERE project_id = ? AND id = ?")
       .get(projectId, claimId) as Row | undefined;
     if (!row) return null;
-    return {
-      id: asId(String(row["id"])),
-      projectId: asId(String(row["project_id"])),
-      targetId: asId(String(row["target_id"])),
-      entityKey: String(row["entity_key"]),
-      claimKey: String(row["claim_key"]),
-      assertion: String(row["assertion"]),
-      scopeJson: parseJson(String(row["scope_json"])),
-      basis: String(row["basis"]) as ClaimRow["basis"],
-      sourceState: row["source_state"] === null ? null : String(row["source_state"]),
-      coverageJson: parseJson(String(row["coverage_json"])),
-      validity: String(row["validity"]) as ClaimRow["validity"],
-      revision: Number(row["revision"]),
-      unknownReasonsJson: parseJson(String(row["unknown_reasons_json"])),
-    };
+    return claimFrom(row);
   }
 
   insertClaimEvidence(row: ClaimEvidenceRow): void {

@@ -53,7 +53,17 @@ const built = buildMiddlePanel({
   claimOfEdge: (id) => claims.get(id) ?? null,
 });
 
-function rendered(mode: "canvas" | "list", isBuilder = false): string {
+type RenderOptions = {
+  mode: "canvas" | "list";
+  isBuilder?: boolean;
+  activeTab?: "contract" | "code" | "report";
+  onJumpToEvidence?: (evidenceId: string) => void;
+  onInquiry?: (inquiry: unknown) => void;
+  onSelectTab?: (id: string) => void;
+};
+
+function render(options: RenderOptions): string {
+  const { mode, isBuilder = false, activeTab = "contract", ...rest } = options;
   return renderToStaticMarkup(
     createElement(WorkbenchColumns, {
       left: {
@@ -62,14 +72,22 @@ function rendered(mode: "canvas" | "list", isBuilder = false): string {
         viewLabel: "cart 读取",
         limitations: ["关系覆盖为部分"],
         cleanupState: "pending",
+        frames: { count: 0, note: "无画面：本次导入只带请求与响应，没有预览帧" },
       },
       cells: built.cells,
       canvasFailures: built.failures,
       tabs: buildRightTabs({ isBuilder, hasBlueprint: false }),
-      activeTab: "contract",
+      activeTab,
       mode,
+      ...(rest.onJumpToEvidence === undefined ? {} : { onJumpToEvidence: rest.onJumpToEvidence }),
+      ...(rest.onInquiry === undefined ? {} : { onInquiry: rest.onInquiry }),
+      ...(rest.onSelectTab === undefined ? {} : { onSelectTab: rest.onSelectTab }),
     }),
   );
+}
+
+function rendered(mode: "canvas" | "list", isBuilder = false): string {
+  return render({ mode, isBuilder });
 }
 
 describe("the rendered three columns (PRD F04)", () => {
@@ -100,6 +118,12 @@ describe("the rendered three columns (PRD F04)", () => {
       expect(list).toContain("claim-stale");
     }
     expect(list).toContain("data-view=\"list\"");
+    // The list carries the same tone the canvas cell has, as a class beside the icon and
+    // the word: a view that quietly lost the colour channel would look like a different
+    // answer to the same row.
+    expect(list).toContain('class="status status-negative"');
+    expect(list).toContain('class="status status-positive"');
+    expect(list).toContain('data-tone="negative"');
     // Switching views must not soften anything.
     expect(canvas).toContain("未知");
     expect(list).toContain("未知");
@@ -140,5 +164,49 @@ describe("the rendered three columns (PRD F04)", () => {
     expect(markup).toContain("edge-claim-unreadable");
     expect(markup).toContain("无可用任务");
     expect(markup).toContain("此 scope 暂无主张");
+  });
+});
+
+describe("the list view's own actions (PRD F04, issue #18 acceptance)", () => {
+  // The node's own evidence list, not the claim's source ids: a jump goes to what the
+  // cell carries (DESIGN §5 keeps the two lookups separate).
+  const evidenceId = `ev_${"d".repeat(64)}`;
+
+  it("offers a jump for every source the cell names", () => {
+    const list = render({ mode: "list", onJumpToEvidence: () => undefined });
+    expect(list).toContain(`data-evidence-jump="${evidenceId}"`);
+    expect(list).toContain("来源 1");
+    // The count alone would satisfy a table and fail the requirement, so the button is
+    // what the row has to give.
+    expect(list).not.toContain(">1</td>");
+  });
+
+  it("offers a directed inquiry for a gap and no button for a settled cell", () => {
+    const list = render({ mode: "list", onInquiry: () => undefined });
+    expect(list).toContain("data-inquiry=");
+    expect(list).toContain("创建定向调查");
+    // A stale source makes this an evidence read, not a new capture: the kind comes from
+    // the same reason table the canvas uses.
+    expect(list).toContain("data-inquiry-kind=\"read-evidence\"");
+    const withoutHandlers = render({ mode: "list" });
+    expect(withoutHandlers).not.toContain("创建定向调查");
+    expect(withoutHandlers).not.toContain("data-evidence-jump");
+  });
+
+  it("labels the enabled tabs and keeps the disabled one inert", () => {
+    const reviewer = render({ mode: "list", onSelectTab: () => undefined });
+    expect(reviewer).toContain("data-tab=\"code\"");
+    expect(reviewer).toContain("data-enabled=\"yes\"");
+    const builder = render({ mode: "list", isBuilder: true, onSelectTab: () => undefined });
+    expect(builder).toContain("data-enabled=\"no\"");
+    expect(builder).toContain("builder-may-not-read-source");
+  });
+
+  it("shows the panel body the active tab names", () => {
+    // The body is the island's, so the render here only proves the tab's own state is
+    // readable: `aria-selected` marks exactly one tab as the live one.
+    const markup = render({ mode: "list", activeTab: "report" });
+    expect(markup.match(/aria-selected="true"/g) ?? []).toHaveLength(1);
+    expect(markup).toContain("data-tab=\"report\"");
   });
 });

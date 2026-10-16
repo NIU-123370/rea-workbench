@@ -7,10 +7,9 @@ import { listView } from "./view-model.ts";
 // The three columns (PRD F04 / DESIGN §6, issue #18).
 //
 // These components are mounted by whatever renders them; nothing here imports a
-// framework beyond `react` itself. That is a stated gap rather than a finished
-// integration: §3 names Next.js for `apps/web`, and the page shell, `next dev` and a
-// real browser pass over pan/zoom, tab switching and focus are not done in this
-// repository yet — see issue #18's unverified list.
+// framework beyond `react` itself, which is what lets the headless render test the same
+// tree the browser shows. `apps/web/app/client/workbench.tsx` is the Next.js island that
+// mounts them (issue #18).
 //
 // Every status in this tree is rendered as icon + text + reasons. A cell that only
 // had a background colour would be unusable to a screen reader, to a monochrome
@@ -28,6 +27,10 @@ export type PanelProps = {
   onInquiry?: (inquiry: DirectedInquiry) => void;
   // The canvas is the default view; the list is the same cells in another shape.
   mode?: "canvas" | "list";
+  // A tab is a view choice, not a decoration: the shell owns which panel body is shown.
+  onSelectTab?: (id: RightTab["id"]) => void;
+  // The interactive canvas belongs to the middle column, not underneath the layout.
+  canvasSlot?: ReactNode;
 };
 
 function StatusBadge(props: { cell: MiddleCell }): ReactNode {
@@ -65,6 +68,12 @@ function LeftColumn(props: { panel: LeftPanel | { reason: string } }): ReactNode
       createElement("dd", { "data-task-state": panel.taskState }, panel.taskId),
       createElement("dt", null, "清理"),
       createElement("dd", null, panel.cleanupState ?? "—"),
+      createElement("dt", null, "画面"),
+      createElement(
+        "dd",
+        { "data-frame-count": String(panel.frames.count) },
+        panel.frames.count > 0 ? `${String(panel.frames.count)} 帧` : panel.frames.note,
+      ),
     ),
     createElement("section", { "aria-label": "限制" },
       panel.limitations.length === 0
@@ -76,7 +85,17 @@ function LeftColumn(props: { panel: LeftPanel | { reason: string } }): ReactNode
   );
 }
 
-function ListColumnRows(props: { rows: ListRow[] }): ReactNode {
+// The list view is not a read-only summary: F04 asks for a jump to the evidence behind a
+// claim and for an unknown to be able to start a directed inquiry, and the list is the
+// view the operator can always reach. Both actions come from the cell, never from the row
+// inventing them.
+function ListColumnRows(props: {
+  rows: ListRow[];
+  onJumpToEvidence?: (evidenceId: string) => void;
+  onInquiry?: (inquiry: DirectedInquiry) => void;
+}): ReactNode {
+  const jump = props.onJumpToEvidence;
+  const inquire = props.onInquiry;
   return createElement("table", { "data-view": "list" },
     createElement("thead", null, createElement("tr", null,
       createElement("th", null, "项目"),
@@ -86,23 +105,41 @@ function ListColumnRows(props: { rows: ListRow[] }): ReactNode {
     )),
     createElement("tbody", null, props.rows.map((row) => createElement("tr", { key: row.id, "data-role": row.role },
       createElement("td", null, row.label),
-      createElement("td", null, row.statusLine),
-      createElement("td", { "data-reasons": row.reasonLine }, row.reasonLine),
-      createElement("td", null, String(row.sourceCount)),
+      createElement("td", { className: `status status-${row.tone}`, "data-tone": row.tone }, row.statusLine),
+      createElement("td", { "data-reasons": row.reasonLine },
+        row.reasonLine,
+        row.inquiry === null || inquire === undefined ? null : createElement("button", {
+          type: "button",
+          "data-inquiry": row.id,
+          "data-inquiry-kind": row.inquiry.kind,
+          onClick: () => inquire(row.inquiry as DirectedInquiry),
+        }, "创建定向调查")),
+      createElement("td", null,
+        row.evidenceJumpTargets.length === 0 || jump === undefined
+          ? String(row.sourceCount)
+          : row.evidenceJumpTargets.map((evidenceId, index) => createElement("button", {
+              key: evidenceId,
+              type: "button",
+              "data-evidence-jump": evidenceId,
+              onClick: () => jump(evidenceId),
+            }, `来源 ${String(index + 1)}`))),
     ))),
   );
 }
 
-function RightColumn(props: { tabs: RightTab[]; active: RightTab["id"] }): ReactNode {
+function RightColumn(props: { tabs: RightTab[]; active: RightTab["id"]; onSelectTab?: (id: RightTab["id"]) => void }): ReactNode {
+  const select = props.onSelectTab;
   return createElement("aside", { "data-panel": "right" },
     createElement("nav", { role: "tablist" }, props.tabs.map((tab) => createElement("button", {
       key: tab.id,
       role: "tab",
+      type: "button",
       "aria-selected": tab.id === props.active ? "true" : "false",
       "data-tab": tab.id,
       "data-enabled": tab.enabled ? "yes" : "no",
       disabled: !tab.enabled,
       title: tab.disabledReason ?? "",
+      ...(select === undefined || !tab.enabled ? {} : { onClick: () => select(tab.id) }),
     }, tab.label))),
   );
 }
@@ -113,6 +150,7 @@ export function WorkbenchColumns(props: PanelProps): ReactNode {
   return createElement("main", { "data-layout": "three-column" },
     LeftColumn({ panel: props.left }),
     createElement("section", { "data-panel": "middle" },
+      props.canvasSlot ?? null,
       mode === "canvas"
         ? GraphView({
             cells,
@@ -120,14 +158,22 @@ export function WorkbenchColumns(props: PanelProps): ReactNode {
             ...(props.onJumpToEvidence === undefined ? {} : { onJumpToEvidence: props.onJumpToEvidence }),
             ...(props.onInquiry === undefined ? {} : { onInquiry: props.onInquiry }),
           })
-        : ListColumnRows({ rows: listView(cells) }),
+        : ListColumnRows({
+            rows: listView(cells),
+            ...(props.onJumpToEvidence === undefined ? {} : { onJumpToEvidence: props.onJumpToEvidence }),
+            ...(props.onInquiry === undefined ? {} : { onInquiry: props.onInquiry }),
+          }),
       cells.length === 0 ? createElement("p", null, "此 scope 暂无主张") : null,
       props.canvasFailures.map((failure) => createElement("p", {
         key: `${failure.reason}:${failure.missing.join(",")}`,
         "data-refusal": failure.reason,
       }, `画布不完整：${failure.reason}（${failure.missing.join(", ")}）`)),
     ),
-    RightColumn({ tabs: props.tabs, active: props.activeTab }),
+    RightColumn({
+      tabs: props.tabs,
+      active: props.activeTab,
+      ...(props.onSelectTab === undefined ? {} : { onSelectTab: props.onSelectTab }),
+    }),
   );
 }
 

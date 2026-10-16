@@ -1,21 +1,27 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { request as rawRequest } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bootWorker, type WorkerHandle } from "../../apps/worker/composition.ts";
 import { startWorkerRpc, type RpcServer } from "../../apps/worker/rpc-server.ts";
 import { createWorkerClient } from "../../apps/web/worker-client.ts";
 import { createApiHandler, API_PREFIX } from "../../apps/web/api.ts";
+import { runWebProcess } from "../../apps/web/main.ts";
 import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
+import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { IdempotencyJournal } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
 import { SESSION_COOKIE_NAME } from "../../packages/application/session.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
+import type { Id } from "../../packages/domain/identity.ts";
+import { asDigest } from "../../packages/domain/canonical-json.ts";
+import { hex } from "../support/blueprint-seed.ts";
 
 // The session, CSRF/idempotency and SSE contracts of the local HTTP API, over a real
 // loopback server, a real worker process object and a real Unix socket to a real
@@ -27,6 +33,8 @@ import { newId, nowInstant } from "../../packages/domain/identity.ts";
 // browser actually crosses.
 
 const LIMITS = { maxDepth: 24, maxCodeUnits: 200_000 };
+
+const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 let dataDir: string;
 let packageRoot: string;
@@ -543,6 +551,273 @@ describe("the export routes (§8 lines 299-300 / issue #22)", () => {
     });
     expect(badId.status).toBe(404);
     expect(badId.text).toContain("export-unknown");
+  });
+});
+
+describe("the graph read the three columns are built from (DESIGN §6, §8 / issue #18)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: body.data?.csrfToken ?? body.csrfToken ?? "",
+    };
+  }
+
+  async function createProject(session: { cookie: string; csrf: string }, key: string): Promise<string> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name: "graph-view" }),
+      headers: {
+        host: `127.0.0.1:${String(address.port)}`,
+        origin: `http://127.0.0.1:${String(address.port)}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": key,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const project = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    const projectId = (project.data?.id ?? project.id) as string | undefined;
+    if (typeof projectId !== "string") throw new Error("no project id came back");
+    return projectId;
+  }
+
+  it("holds the route behind a session and inside the closed command surface", async () => {
+    const anonymous = await call("GET", `${API_PREFIX}/projects/${newId()}/graph`);
+    expect(anonymous.status).toBe(401);
+    // A near-miss path is not a route: §8's surface is named, and the graph read does
+    // not open a "read anything under projects/" door on the way in.
+    const neighbour = await call("GET", `${API_PREFIX}/projects/${newId()}/graph/all`);
+    expect(neighbour.status, neighbour.text).toBe(404);
+    expect(neighbour.text).toContain("route-unknown");
+  });
+
+  it("answers a fresh project with the stored view, and an empty project is a note rather than an error", async () => {
+    const session = await pairSession();
+    const projectId = await createProject(session, "key-graph-empty");
+    const read = await call("GET", `${API_PREFIX}/projects/${projectId}/graph`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(read.status, read.text).toBe(200);
+    const parsed = graphViewSchema.safeParse(JSON.parse(read.text) as unknown);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues ?? [])).toBe(true);
+    if (!parsed.success) return;
+    // The read names the project it answered, says no target was imported, and brings
+    // back nothing that has been decided for the screen.
+    expect(parsed.data.projectId).toBe(projectId);
+    expect(parsed.data.targetId).toBeNull();
+    expect(parsed.data.note).toBe("no-target-imported-yet");
+    expect(parsed.data.nodes).toEqual([]);
+    expect(parsed.data.edges).toEqual([]);
+    expect(parsed.data.claims).toEqual([]);
+    expect(parsed.data.truncated).toBe(false);
+  });
+
+  it("refuses a query target that is not an opaque id before any command runs", async () => {
+    const session = await pairSession();
+    const projectId = await createProject(session, "key-graph-badtarget");
+    const bad = await call("GET", `${API_PREFIX}/projects/${projectId}/graph?targetId=../../etc/passwd`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(bad.status, bad.text).toBe(400);
+    expect(bad.text).toContain("graph-target-id-malformed");
+    // The refused value is a path, and a refusal that repeats it would put a host path
+    // into a log line and into the page (§12.1).
+    expect(bad.text).not.toContain("etc/passwd");
+
+    const unknown = await call("GET", `${API_PREFIX}/projects/${projectId}/graph?targetId=${newId()}`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    // A well-formed id that names nothing is the read's own answer, not a shape refusal.
+    expect(unknown.status, unknown.text).toBe(200);
+    expect(unknown.text).toContain("target-unknown");
+  });
+
+  it("carries the claim's stored fields and no status string, so the colour stays owned by the domain", async () => {
+    const session = await pairSession();
+    const projectId = await createProject(session, "key-graph-shape");
+    // One target and one claim through the worker's own writer, because the claim rows
+    // have exactly one owner (§5) and a second writer would be a second truth.
+    const targetId = newId();
+    const claimId = newId();
+    const entityKey = "GET /api/cart";
+    const created = nowInstant();
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertTarget({
+        id: targetId,
+        projectId: projectId as Id,
+        kind: "har",
+        originalLocator: null,
+        sourceSha256: null,
+        sourceArtifactId: null,
+        snapshotDigest: asDigest(hex("web-graph-target")),
+        identityReason: null,
+        createdAt: created,
+      });
+      tx.insertClaim({
+        id: claimId,
+        projectId: projectId as Id,
+        targetId,
+        entityKey,
+        claimKey: "route-exists",
+        assertion: "the cart route answers with the requested include set",
+        scopeJson: { sourceEvidenceIds: [] },
+        basis: "observed",
+        sourceState: "retained",
+        coverageJson: { state: "unknown", examined: null, total: null, reasons: [] },
+        validity: "current",
+        revision: 1,
+        unknownReasonsJson: [],
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+    const read = await call("GET", `${API_PREFIX}/projects/${projectId}/graph`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(read.status, read.text).toBe(200);
+    const view = graphViewSchema.parse(JSON.parse(read.text) as unknown);
+    expect(view.nodes.map((node) => node.entityKey)).toContain(entityKey);
+    expect(view.claims).toHaveLength(1);
+    const claim = view.claims[0];
+    if (claim === undefined) throw new Error("the seeded claim did not come back");
+    // What the screen judges on: the four stored deciders plus the evidence ids, and no
+    // derived colour, severity or status word anywhere in the body.
+    expect(Object.keys(claim.state).sort()).toEqual([
+      "authorityApplies",
+      "basis",
+      "coverage",
+      "sourceEvidenceIds",
+      "validity",
+    ]);
+    expect(claim.state.basis).toBe("observed");
+    expect(claim.state.validity).toBe("current");
+    expect(read.text).not.toMatch(/"(colour|color|triColour|status)"/);
+    expect(view.targetId).toBe(targetId);
+  });
+});
+
+describe("the web process entrypoint (DESIGN §3, §14 / issue #18)", () => {
+  async function freePort(): Promise<number> {
+    const net = await import("node:net");
+    const probe = net.createServer();
+    await new Promise<void>((resolve) => probe.listen({ host: "127.0.0.1", port: 0, exclusive: true }, resolve));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    return port;
+  }
+
+  function webEnv(port: number): Record<string, string | undefined> {
+    return { WB_HOST: "127.0.0.1", WB_PORT: String(port), WB_DATA_DIR: dataDir };
+  }
+
+  it("refuses a toolchain it was not built for, and a config that names nothing usable", async () => {
+    const wrongNode = await runWebProcess({
+      env: webEnv(4399),
+      nodeVersion: "22.12.0",
+      log: () => undefined,
+    });
+    expect(wrongNode).toEqual({ ok: false, exitCode: 73, reasons: ["node-24.18.0-required"] });
+
+    // A missing data directory is a named field failure, and a field this process has no
+    // business reading never rides along into the reason list with a host path in it.
+    const lines: string[] = [];
+    const missing = await runWebProcess({
+      env: { WB_HOST: "127.0.0.1", WB_PORT: "4399", WB_REA_ENTRYPOINT: "/host/private/rea.mjs", HOME: "/host/private" },
+      nodeVersion: "24.18.0",
+      log: (line) => lines.push(line),
+    });
+    expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.exitCode).toBe(78);
+    expect(missing.reasons).toContain("WB_DATA_DIR:required-and-no-installed-default");
+    expect(JSON.stringify(missing.reasons)).not.toContain("host/private");
+    expect(JSON.stringify(lines)).not.toContain("host/private");
+  });
+
+  it("serves the browser's own request sequence over a real bind and the worker's socket", async () => {
+    const port = await freePort();
+    const run = await runWebProcess({ env: webEnv(port), nodeVersion: "24.18.0", log: () => undefined, pollMs: 5 });
+    expect(run.ok).toBe(true);
+    if (!run.ok) return;
+    expect(run.port).toBe(port);
+    const origin = `http://127.0.0.1:${String(port)}`;
+    try {
+      // Exactly what the UI relay sends after `decideProxy` stamped the API's own origin:
+      // the page lives on another port, so the API's §14 same-source rule is satisfied by
+      // the proxy's assertion rather than by the browser's value.
+      const code = worker.mintPairingCode();
+      const paired = await fetch(`${origin}${API_PREFIX}/session`, {
+        method: "POST",
+        headers: { host: `127.0.0.1:${String(port)}`, origin, "content-type": "application/json" },
+        body: JSON.stringify({ bootstrapToken: code.token }),
+        redirect: "manual",
+      });
+      const pairedText = await paired.text();
+      expect(paired.status, pairedText).toBe(201);
+      const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+      expect(cookie).toContain(`${SESSION_COOKIE_NAME}=`);
+      const pairedBody = JSON.parse(pairedText) as Record<string, JsonValue>;
+      const csrf = ((pairedBody["data"] ?? pairedBody) as Record<string, string>)["csrfToken"] ?? "";
+      expect(csrf.length).toBeGreaterThan(16);
+
+      const created = await fetch(`${origin}${API_PREFIX}/projects`, {
+        method: "POST",
+        headers: { host: `127.0.0.1:${String(port)}`, origin, cookie, "x-csrf-token": csrf, "idempotency-key": "entrypoint-create", "content-type": "application/json" },
+        body: JSON.stringify({ name: "via-entrypoint" }),
+      });
+      const createdText = await created.text();
+      expect(created.status, createdText).toBe(201);
+      const createdBody = JSON.parse(createdText) as { id?: string; data?: { id: string } };
+      const projectId = createdBody.data?.id ?? createdBody.id ?? "";
+
+      const graph = await fetch(`${origin}${API_PREFIX}/projects/${projectId}/graph`, {
+        headers: { host: `127.0.0.1:${String(port)}`, cookie },
+      });
+      const graphText = await graph.text();
+      expect(graph.status, graphText).toBe(200);
+      expect(graphViewSchema.safeParse(JSON.parse(graphText) as unknown).success).toBe(true);
+
+      // The page's own origin is not the API's, and the entrypoint's server says so: this
+      // is the refusal the relay exists to prevent rather than a door it opens.
+      const pageOrigin = await fetch(`${origin}${API_PREFIX}/projects`, {
+        method: "POST",
+        headers: { host: `127.0.0.1:${String(port)}`, origin: "http://localhost:3000", cookie, "x-csrf-token": csrf, "idempotency-key": "entrypoint-page", "content-type": "application/json" },
+        body: JSON.stringify({ name: "should-not-exist" }),
+      });
+      const pageOriginText = await pageOrigin.text();
+      expect(pageOrigin.status, pageOriginText).toBe(403);
+      expect(pageOriginText).toContain("origin-not-same-source");
+
+      // An SSE route through this process still streams: the entrypoint's poll is not a
+      // buffer, and a browser tab that asked for events would otherwise hang.
+      const events = await fetch(`${origin}${API_PREFIX}/projects/${projectId}/events`, {
+        headers: { host: `127.0.0.1:${String(port)}`, cookie, accept: "text/event-stream" },
+      });
+      expect(events.status).toBe(200);
+      expect(events.headers.get("content-type")).toContain("text/event-stream");
+      await events.body?.cancel();
+    } finally {
+      await run.close();
+    }
+  });
+
+  it("reads only the three §14 names this process is given, from one declared list", () => {
+    const source = readFileSync(path.join(ROOT, "apps/web/main.ts"), "utf8");
+    const named = [...source.matchAll(/WB_[A-Z_]+/g)].map((match) => match[0]);
+    expect([...new Set(named)].sort()).toEqual(["WB_DATA_DIR", "WB_HOST", "WB_PORT"]);
+    // No filesystem, no child process, no database: the worker owns all three (§3).
+    // Anchored to the import form rather than the words, because this file's own prose
+    // names those modules to explain why it must not use them.
+    expect(source).not.toMatch(/from\s*["']node:(fs|sqlite|child_process|net|process)["']/);
+    expect(source).not.toContain('from "node:fs"');
+    expect(source).toContain('const WEB_CONFIG_FIELDS: readonly BootConfigField[] = ["WB_HOST", "WB_PORT", "WB_DATA_DIR"]');
   });
 });
 

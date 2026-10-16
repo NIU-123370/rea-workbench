@@ -16,7 +16,7 @@ Local software archaeology. Evidence first.
 
 REA Workbench 是一个基于 [REA](https://github.com/morluto/rea) 的**本地、单人、证据驱动的软件考古工作台**。它面向接手遗留系统、理解 Electron 应用、梳理 HTTP 接口的工程师，目标是把采集、分析、契约审阅和 SDK 验证放进同一个可追溯流程。
 
-> **当前阶段：V0.1 早期开发。** 已有领域模型、数据契约、存储与 REA 适配基础代码；三栏 Web 界面及完整 SDK 交付流程仍在开发计划中。本文两张宣传图均为产品概念图。现在可以参与基础模块开发与测试，暂不能启动完整工作台。
+> **当前阶段：V0.1 早期开发。** 已有领域模型、数据契约、存储、REA 适配、本机 API 与三栏 Web 外壳——三个进程（worker、API、Next）能在本机跑起来并在浏览器里配对读图。仍然没有的是真实 REA provider 端到端、隔离构建（broker/沙箱，本机无 Docker）与完整 SDK 交付验收。本文两张宣传图均为产品概念图。
 
 <a id="highlights"></a>
 
@@ -113,7 +113,7 @@ npm run test:integration
 | `npm run lint` | 执行 oxlint 静态检查。 |
 | `npm run review` | 执行仓库内的设计规则扫描，输出本地评审结果。 |
 
-`dev`、`build`、`start`、`doctor`、`db:migrate` 等工作台脚本尚未提供。基础模块测试无需 Docker、本地模型或真实 REA provider；fixture MCP 测试不代表真实 provider 工作流已经验证。更多开发约定见 [workbench/README.md](workbench/README.md)。
+`workbench/` 下已提供 `worker`（装配 worker 并打印配对码）、`web`（本机 API 进程）、`ui:dev`（Next 页面外壳）、`doctor`、`typecheck`、`test`、`lint`、`review`、`docs:check`、`perf:t17`。`db:migrate` 与 `dev` 仍未提供：迁移由 worker 启动时执行。基础模块测试无需 Docker、本地模型或真实 REA provider；fixture MCP 测试不代表真实 provider 工作流已经验证。更多开发约定见 [workbench/README.md](workbench/README.md)。
 
 <details>
 <summary><strong>想先独立体验底层 REA？</strong></summary>
@@ -144,15 +144,15 @@ V0.1 正在从基础模块走向第一条完整工作流。下表描述仓库当
 | 领域模型与数据契约 | 已有基础实现 | 目标身份、证据状态、样本库存、报告规则与 Zod 边界校验。 |
 | 存储与应用规则 | 已有基础实现 | SQLite、artifact store、迁移与备份、审计、脱敏和任务生命周期。 |
 | REA 适配层 | 已有基础实现 | MCP stdio、身份探测、Evidence 响应解析与会话账本；目前以 fixture 测试覆盖。 |
-| worker 与本地 API | 计划中 | 运行期装配、本机 RPC、浏览器会话与事件恢复。 |
-| 三栏界面与目标导入 | 计划中 | 证据白板、HAR 导入、ASAR 静态支路与受控 Web 采集。 |
-| 隔离构建与交付 | 计划中 | broker、沙箱、蓝图审阅、SDK/OpenAPI 生成、差分与导出。 |
+| worker 与本地 API | 已有基础实现 | 运行期装配、本机 RPC、浏览器会话、事件恢复与 API 进程本体（`npm run worker` / `npm run web`）。 |
+| 三栏界面与目标导入 | 已有基础实现 | 证据白板（Next.js 外壳 + React Flow 画布，已在真浏览器配对并读出图）、HAR 导入闭环；ASAR 静态支路与受控 Web 采集未接。 |
+| 隔离构建与交付 | 部分实现 | 蓝图冻结与放行、SDK/OpenAPI 3.1.1 生成、差分与导出、发布门禁已有代码；broker 与沙箱进程本体未实现，隔离类门禁在本机不可声明为已通过。 |
 
 第一条纵向开发路径是 **固定 HAR → 持久 Evidence → 白板 → 蓝图 → SDK → 离线差分**。V0.1 发布还需完成受控 Web 采集、ASAR 静态支路、隔离与恢复门禁。进展和任务见 [Issues](https://github.com/NIU-123370/rea-workbench/issues) 与 [Pull requests](https://github.com/NIU-123370/rea-workbench/pulls)。
 
 ## 技术与架构
 
-现有实现使用 **TypeScript、Zod、Node.js 内置 SQLite、Vitest 与 oxlint**，依赖由锁文件固定。Web 层规划采用 Next.js、React Flow 与 Monaco；采集和隔离层规划使用 Playwright、Docker 及本地模型服务。
+现有实现使用 **TypeScript、Zod、Node.js 内置 SQLite、Vitest 与 oxlint**，依赖由锁文件固定。Web 层用 **Next.js App Router + React Flow**（源码编辑器要等 §8 的候选文件读取命令落地才回来，现在没有能喂给它的真数据）；采集和隔离层规划使用 Playwright、Docker 及本地模型服务。
 
 ```text
 rea-workbench/

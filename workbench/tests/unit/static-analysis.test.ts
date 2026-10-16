@@ -183,6 +183,8 @@ function fakeWriter(state: FakeState): StorageWriterPort {
     findArtifactByDigest: refused("findArtifactByDigest", state),
     insertExport: refused("insertExport", state),
     getExport: refused("getExport", state),
+    listClaimsForTarget: refused("listClaimsForTarget", state),
+    listTargetsForProject: refused("listTargetsForProject", state),
     listExportsForProject: refused("listExportsForProject", state),
     getEvidence: (projectId: Id, evidenceId: string) => state.evidence.get(`${projectId}|${evidenceId}`) ?? null,
     insertAudit: (row: AuditRow) => {
