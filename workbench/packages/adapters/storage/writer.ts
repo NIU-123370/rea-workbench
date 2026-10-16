@@ -20,8 +20,10 @@ import type {
   StoragePortError,
   StorageTransaction,
   StorageWriterPort,
+  BlueprintRow,
   ClaimEvidenceRow,
   ClaimRow,
+  GraphEdgeRow,
   ContractRow,
   PlanRow,
   TargetRow,
@@ -529,6 +531,80 @@ class SqliteTransaction implements StorageTransaction {
       reviewRecordJson: parseJson(row["review_record_json"] === null ? null : String(row["review_record_json"])),
       createdAt: asInstant(String(row["created_at"])),
     };
+  }
+
+  insertBlueprint(row: BlueprintRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO blueprints (id, project_id, target_id, graph_revision, snapshot_digest, verification_plan_id, artifact_id, digest, source_manifest_artifact_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.targetId,
+        row.graphRevision,
+        row.snapshotDigest,
+        row.verificationPlanId,
+        row.artifactId,
+        row.digest,
+        row.sourceManifestArtifactId,
+        row.createdAt,
+      );
+  }
+
+  getBlueprint(projectId: Id, blueprintId: Id): BlueprintRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM blueprints WHERE project_id = ? AND id = ?")
+      .get(projectId, blueprintId) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      targetId: asId(String(row["target_id"])),
+      graphRevision: Number(row["graph_revision"]),
+      snapshotDigest: asDigest(String(row["snapshot_digest"])),
+      verificationPlanId: asId(String(row["verification_plan_id"])),
+      artifactId: asId(String(row["artifact_id"])),
+      digest: asDigest(String(row["digest"])),
+      sourceManifestArtifactId: asId(String(row["source_manifest_artifact_id"])),
+      createdAt: asInstant(String(row["created_at"])),
+    };
+  }
+
+  insertGraphEdge(row: GraphEdgeRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO graph_edges (id, project_id, target_id, from_key, to_key, relation, claim_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.projectId, row.targetId, row.fromKey, row.toKey, row.relation, row.claimId);
+  }
+
+  listEdges(projectId: Id, targetId: Id): GraphEdgeRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM graph_edges WHERE project_id = ? AND target_id = ? ORDER BY id ASC")
+      .all(projectId, targetId) as Row[];
+    return rows.map((row) => ({
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      targetId: asId(String(row["target_id"])),
+      fromKey: String(row["from_key"]),
+      toKey: String(row["to_key"]),
+      relation: String(row["relation"]),
+      claimId: asId(String(row["claim_id"])),
+    }));
+  }
+
+  listClaimEvidence(projectId: Id, claimId: Id): { evidenceId: string; locationJson: JsonValue; role: "support" | "contradict" }[] {
+    const rows = this.db
+      .prepare("SELECT * FROM claim_evidence WHERE project_id = ? AND claim_id = ? ORDER BY evidence_id ASC, role ASC")
+      .all(projectId, claimId) as Row[];
+    return rows.map((row) => ({
+      evidenceId: String(row["evidence_id"]),
+      locationJson: parseJson(String(row["location_json"])),
+      role: String(row["role"]) as "support" | "contradict",
+    }));
   }
 
   insertClaim(row: ClaimRow): void {

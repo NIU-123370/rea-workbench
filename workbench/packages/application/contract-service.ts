@@ -80,7 +80,7 @@ function coverageOf(row: ClaimRow): Coverage {
   };
 }
 
-function claimFactOf(row: ClaimRow): ContractClaimFact {
+export function claimFactOf(row: ClaimRow): ContractClaimFact {
   const sources = row.scopeJson;
   const sourceEvidenceIds: string[] =
     sources !== null && typeof sources === "object" && !Array.isArray(sources)
