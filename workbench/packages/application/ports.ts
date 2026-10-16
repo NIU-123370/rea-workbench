@@ -1,7 +1,9 @@
+import type { Coverage, Redaction } from "../domain/evidence.ts";
 import type { Digest } from "../domain/canonical-json.ts";
 import type { Id, Instant } from "../domain/identity.ts";
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
+import type { RequestSide, ResponseSide, VectorSource } from "../domain/vector.ts";
 import type { CleanupState, JobKind, JobState } from "../contracts/jobs.ts";
 
 // Ports that `packages/adapters/storage` implements (DESIGN §3). They exist so
@@ -99,6 +101,24 @@ export type LeaseRow = {
   retryCount: number;
 };
 
+export type VectorRow = {
+  id: Id;
+  projectId: Id;
+  targetId: Id;
+  evidenceId: string;
+  sourceLocatorJson: JsonValue;
+  snapshotDigest: Digest;
+  payloadArtifactId: Id;
+  digest: Digest;
+  replacesId: Id | null;
+  caseKey: string;
+  visibility: "public" | "holdout";
+  eligibility: "usable" | "blocked";
+  reasonsJson: JsonValue;
+  reviewStatus: "draft" | "approved" | "rejected";
+  reviewRecordJson: JsonValue | null;
+};
+
 export type StoragePortError = {
   code:
     | "SQLITE_FAILURE"
@@ -124,6 +144,7 @@ export type StorageTransaction = {
   insertProject(row: ProjectRow): void;
   getProject(projectId: Id): ProjectRow | null;
   insertTarget(row: TargetRow): void;
+  getTarget(projectId: Id, targetId: Id): TargetRow | null;
   upsertProjectRevision(projectId: Id, increments: { graph?: number; inventory?: number }): number;
   insertJob(row: JobRow): JobIdempotency;
   updateJob(row: JobRow): void;
@@ -131,6 +152,14 @@ export type StorageTransaction = {
   insertArtifact(row: ArtifactRow): void;
   getArtifact(projectId: Id, artifactId: Id): ArtifactRow | null;
   insertEvidence(row: EvidenceRow): void;
+  getEvidence(projectId: Id, evidenceId: string): EvidenceRow | null;
+  insertVector(row: VectorRow): void;
+  updateVectorReview(row: VectorRow): void;
+  getVector(projectId: Id, vectorId: Id): VectorRow | null;
+  listVectors(
+    projectId: Id,
+    filter: { targetId: Id | null; evidenceId: string | null; limit: number },
+  ): VectorRow[];
   appendEvent(draft: EventDraft): number;
   eventsAfter(projectId: Id, afterSeq: number, limit: number): CommittedEvent[];
   insertLease(row: LeaseRow): void;
@@ -157,4 +186,67 @@ export type CommittedAudit = AuditRow & { seq: number };
 
 export type StorageWriterPort = {
   transact<T>(work: (tx: StorageTransaction) => T): Result<T, StoragePortError>;
+};
+
+// Artifact store as the application layer sees it (DESIGN §5 line 126, §12).
+// The shapes mirror `packages/adapters/storage/artifacts.ts` structurally so a
+// service can hold the port without importing the filesystem adapter.
+export type PublishedFile = {
+  storageKey: string;
+  byteLength: number;
+  sha256: Digest;
+};
+
+export type ArtifactPortError = {
+  code: "STAGING_UNVERIFIED" | "ARTIFACT_MISMATCH" | "ARTIFACT_WRITE_FAILED";
+  message: string;
+};
+
+export type ArtifactPort = {
+  publish(
+    projectId: Id,
+    // Named `class_` because `class` is reserved in a parameter position; the
+    // adapter's own parameter is positional, so the spelling stays local here.
+    class_: ArtifactClass,
+    bytes: Uint8Array,
+    declaredSha256?: Digest,
+  ): Promise<Result<PublishedFile, ArtifactPortError>>;
+  read(projectId: Id, storageKey: string): Promise<Result<Uint8Array, ArtifactPortError>>;
+};
+
+// The parsed facts of one recorded request/response pair, as the producer
+// actually reported them (DESIGN §7.1: VectorService extracts, callers submit
+// nothing). A field the producer could not keep arrives as null plus a reason —
+// never as an empty string, a zero status or a guessed method.
+export type EvidenceRecordFacts = {
+  evidenceId: string;
+  projectId: Id;
+  targetId: Id;
+  snapshotDigest: Digest;
+  operation: string;
+  authority: string;
+  confidence: "observed" | "derived" | "inferred";
+  source: VectorSource;
+  request: RequestSide;
+  response: ResponseSide;
+  coverage: Coverage;
+  limitations: string[];
+  redactions: Redaction[];
+  // The capture declared sensitive values for this record, so no projection of
+  // it may be persisted at all (issue #15, #24).
+  sensitiveDeclared: boolean;
+};
+
+export type EvidenceFactsFailure = {
+  code: "REA_CONTRACT_MISMATCH" | "NOT_FOUND" | "INVALID_INPUT" | "UNSUPPORTED_FORMAT";
+  reason: string;
+  message: string;
+};
+
+export type EvidenceFactsPort = {
+  readRecord(input: {
+    projectId: Id;
+    evidenceId: string;
+    coordinate: VectorSource;
+  }): Promise<Result<EvidenceRecordFacts, EvidenceFactsFailure>>;
 };

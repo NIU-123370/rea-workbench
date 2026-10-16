@@ -21,6 +21,7 @@ import type {
   StorageTransaction,
   StorageWriterPort,
   TargetRow,
+  VectorRow,
 } from "../../application/ports.ts";
 
 // The worker's only SQLite writer (DESIGN §2, §5, D06). Everything runs inside
@@ -103,6 +104,27 @@ class SqliteTransaction implements StorageTransaction {
         row.identityReason,
         row.createdAt,
       );
+  }
+
+  getTarget(projectId: Id, targetId: Id): TargetRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM targets WHERE project_id = ? AND id = ?")
+      .get(projectId, targetId) as Row | undefined;
+    if (!row) return null;
+    const sha = row["source_sha256"] === null ? null : String(row["source_sha256"]);
+    const snapshot = row["snapshot_digest"] === null ? null : String(row["snapshot_digest"]);
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      kind: String(row["kind"]) as TargetRow["kind"],
+      originalLocator: row["original_locator"] === null ? null : String(row["original_locator"]),
+      sourceSha256: sha === null ? null : asDigest(sha),
+      sourceArtifactId:
+        row["source_artifact_id"] === null ? null : asId(String(row["source_artifact_id"])),
+      snapshotDigest: snapshot === null ? null : asDigest(snapshot),
+      identityReason: row["identity_reason"] === null ? null : String(row["identity_reason"]),
+      createdAt: asInstant(String(row["created_at"])),
+    };
   }
 
   upsertProjectRevision(
@@ -266,6 +288,112 @@ class SqliteTransaction implements StorageTransaction {
         row.authority,
         row.createdAt,
       );
+  }
+
+  getEvidence(projectId: Id, evidenceId: string): EvidenceRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM evidence_records WHERE project_id = ? AND id = ?")
+      .get(projectId, evidenceId) as Row | undefined;
+    if (!row) return null;
+    return {
+      projectId: asId(String(row["project_id"])),
+      id: String(row["id"]),
+      targetId: asId(String(row["target_id"])),
+      jobId: asId(String(row["job_id"])),
+      artifactId: asId(String(row["artifact_id"])),
+      providerJson: parseJson(String(row["provider_json"])),
+      operation: String(row["operation"]),
+      confidence: String(row["confidence"]) as EvidenceRow["confidence"],
+      authority: String(row["authority"]),
+      createdAt: asInstant(String(row["created_at"])),
+    };
+  }
+
+  insertVector(row: VectorRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO test_vectors (id, project_id, target_id, evidence_id, source_locator_json,
+                                   snapshot_digest, payload_artifact_id, digest, replaces_id, case_key,
+                                   visibility, eligibility, reasons_json, review_status, review_record_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.projectId,
+        row.targetId,
+        row.evidenceId,
+        jsonOf(row.sourceLocatorJson),
+        row.snapshotDigest,
+        row.payloadArtifactId,
+        row.digest,
+        row.replacesId,
+        row.caseKey,
+        row.visibility,
+        row.eligibility,
+        jsonOf(row.reasonsJson),
+        row.reviewStatus,
+        row.reviewRecordJson === null ? null : jsonOf(row.reviewRecordJson),
+      );
+  }
+
+  // Only the review columns change: the content and its digest stay byte-for-byte
+  // the approved artefact, which is what lets a plan bind a digest (§7.1).
+  updateVectorReview(row: VectorRow): void {
+    this.db
+      .prepare(
+        `UPDATE test_vectors
+         SET review_status = ?, review_record_json = ?
+         WHERE project_id = ? AND id = ?`,
+      )
+      .run(row.reviewStatus, row.reviewRecordJson === null ? null : jsonOf(row.reviewRecordJson), row.projectId, row.id);
+  }
+
+  getVector(projectId: Id, vectorId: Id): VectorRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM test_vectors WHERE project_id = ? AND id = ?")
+      .get(projectId, vectorId) as Row | undefined;
+    return row ? this.rowToVector(row) : null;
+  }
+
+  listVectors(
+    projectId: Id,
+    filter: { targetId: Id | null; evidenceId: string | null; limit: number },
+  ): VectorRow[] {
+    const clauses: string[] = ["project_id = ?"];
+    const params: (string | number)[] = [projectId];
+    if (filter.targetId !== null) {
+      clauses.push("target_id = ?");
+      params.push(filter.targetId);
+    }
+    if (filter.evidenceId !== null) {
+      clauses.push("evidence_id = ?");
+      params.push(filter.evidenceId);
+    }
+    params.push(filter.limit);
+    const rows = this.db
+      .prepare(`SELECT * FROM test_vectors WHERE ${clauses.join(" AND ")} ORDER BY id ASC LIMIT ?`)
+      .all(...params) as Row[];
+    return rows.map((row) => this.rowToVector(row));
+  }
+
+  private rowToVector(row: Row): VectorRow {
+    return {
+      id: asId(String(row["id"])),
+      projectId: asId(String(row["project_id"])),
+      targetId: asId(String(row["target_id"])),
+      evidenceId: String(row["evidence_id"]),
+      sourceLocatorJson: parseJson(String(row["source_locator_json"])),
+      snapshotDigest: asDigest(String(row["snapshot_digest"])),
+      payloadArtifactId: asId(String(row["payload_artifact_id"])),
+      digest: asDigest(String(row["digest"])),
+      replacesId: row["replaces_id"] === null ? null : asId(String(row["replaces_id"])),
+      caseKey: String(row["case_key"]),
+      visibility: String(row["visibility"]) as VectorRow["visibility"],
+      eligibility: String(row["eligibility"]) as VectorRow["eligibility"],
+      reasonsJson: parseJson(String(row["reasons_json"])),
+      reviewStatus: String(row["review_status"]) as VectorRow["reviewStatus"],
+      reviewRecordJson: parseJson(row["review_record_json"] === null ? null : String(row["review_record_json"])),
+    };
   }
 
   appendEvent(draft: EventDraft): number {

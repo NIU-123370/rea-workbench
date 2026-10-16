@@ -10,6 +10,7 @@ import * as inventory from "../../packages/domain/inventory.ts";
 import * as jsonValue from "../../packages/domain/json-value.ts";
 import * as report from "../../packages/domain/report.ts";
 import * as result from "../../packages/domain/result.ts";
+import * as vector from "../../packages/domain/vector.ts";
 
 // DESIGN §3 keeps `packages/domain` free of UI, database, REA SDK and container
 // dependencies; §6, §7.4 and §10 name the rules that must exist there. This
@@ -27,6 +28,7 @@ const MODULES: Record<string, unknown> = {
   "json-value.ts": jsonValue,
   "report.ts": report,
   "result.ts": result,
+  "vector.ts": vector,
 };
 
 const SPEC_NAMED_EXPORTS: [string, string][] = [
@@ -57,6 +59,14 @@ const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["report.ts", "passRate"],
   ["report.ts", "staleReasons"],
   ["report.ts", "deliverability"],
+  ["vector.ts", "deriveEligibility"],
+  ["vector.ts", "vectorDigest"],
+  ["vector.ts", "vectorDigestInput"],
+  ["vector.ts", "vectorIntegrityDefects"],
+  ["vector.ts", "bodyIntegrityDefects"],
+  ["vector.ts", "isCanonicalBase64"],
+  ["vector.ts", "sameSourceCoordinates"],
+  ["vector.ts", "draftReview"],
 ];
 
 function domainFiles(): string[] {

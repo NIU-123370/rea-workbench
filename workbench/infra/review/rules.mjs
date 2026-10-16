@@ -17,7 +17,7 @@ export const RULES = [
     // extra fields; only the strict object builders satisfy that.
     anchor: "DESIGN §4 §8",
     title: "zod 对象必须拒绝额外字段",
-    pattern: /\bz\.(object|loosedObject)\s*[<(]/,
+    pattern: /\bz\.(object|looseObject|loosedObject)\s*[<(]/,
     hint: "用 z.strictObject(...)；上游 payload 用 z.loosedObject 会把没建模的字段静默收下",
   },
   {
