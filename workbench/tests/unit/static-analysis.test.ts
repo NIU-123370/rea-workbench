@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { z } from "zod";
 import { describe, expect, it } from "vitest";
 
 import { asDigest, digestBytes } from "../../packages/domain/canonical-json.ts";
@@ -73,6 +74,14 @@ const FIXTURE_TEXT = readFileSync(
   "utf8",
 );
 const FIXTURE = JSON.parse(FIXTURE_TEXT) as JsonValue;
+
+// The recorded `tools/list` reply of the real provider at 98d8470d. Unit tests
+// read the advertised side from here instead of restating it, so "the mirror
+// matches the provider" stays one assertion about two documents rather than two
+// hand-copied lists that can agree with each other and disagree with REA.
+const RECORDED_LIVE = JSON.parse(
+  readFileSync(new URL("../fixtures/rea-live-tools-shapes.json", import.meta.url), "utf8"),
+) as { namedToolOrder: string[]; tools: { name: string; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> | null }[] };
 
 const projectRow: ProjectRow = {
   id: newId(),
@@ -382,11 +391,15 @@ describe("mirrored static analysis shapes (DESIGN §1, §4)", () => {
     });
     expect(accepted.success).toBe(true);
     if (!accepted.success) return;
+    // `detail` appears because upstream advertises it on this very tool and it
+    // carries a producer default, so a parse fills it — see the regression below.
     expect(Object.keys(accepted.data).sort()).toEqual([
+      "detail",
       "format",
       "input_path",
       "integrity_policy",
     ]);
+    expect(accepted.data.detail).toBe("complete");
 
     const declared = analyzeJavaScriptApplicationInputSchema.safeParse({
       input_path: "/operator/fixtures/demo-app.asar",
@@ -397,6 +410,43 @@ describe("mirrored static analysis shapes (DESIGN §1, §4)", () => {
     expect(declared.success).toBe(false);
     if (declared.success) return;
     expect(declared.error.issues.map((issue) => issue.code)).toContain("unrecognized_keys");
+  });
+
+  it("accepts the `detail` delivery choice the provider advertises (issue #14)", () => {
+    // Regression. Before issue #14 read `tools/list` of the built provider at
+    // 98d8470d, `detail` lived only on a derived request schema, so this
+    // strictObject refused a field the pinned provider names as legal input —
+    // and `{"detail":"summary"}` is how a caller asks for the retained-reference
+    // delivery that DESIGN §9 item 5 depends on. The advertised key set is
+    // asserted from the recorded capture, not restated here, so the mirror and
+    // the check cannot both drift.
+    const summary = analyzeJavaScriptApplicationInputSchema.safeParse({
+      input_path: "/operator/fixtures/demo-app.asar",
+      format: "asar",
+      integrity_policy: "fail",
+      detail: "summary",
+    });
+    expect(summary.success).toBe(true);
+    if (!summary.success) return;
+    expect(summary.data.detail).toBe("summary");
+
+    expect(
+      analyzeJavaScriptApplicationInputSchema.safeParse({
+        input_path: "/operator/fixtures/demo-app.asar",
+        detail: "streaming",
+      }).success,
+    ).toBe(false);
+
+    const advertised = RECORDED_LIVE.tools.find((tool) => tool.name === "analyze_javascript_application");
+    if (advertised === undefined) throw new Error("the recorded catalog lost the ASAR tool");
+    const advertisedProperties = (advertised.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(Object.keys(advertisedProperties).sort().join(",")).toEqual(
+      "analysis_timeout_ms,detail,format,input_path,integrity_policy,max_heap_mb,max_semantic_nodes,max_semantic_nodes_per_file,source_paths",
+    );;
+    expect(
+      (z.toJSONSchema(analyzeJavaScriptApplicationInputSchema, { io: "input" }).properties as Record<string, unknown>)
+        .detail,
+    ).toMatchObject({ type: "string", enum: ["complete", "summary"], default: "complete" });
   });
 });
 

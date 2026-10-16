@@ -78,8 +78,17 @@ describe("identity probe against a fixture MCP server (DESIGN §1, §9)", () => 
     const result = await probe("no_required", null);
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.reasons).toContain("schema_drift:inspect_web_network_capture:capture_path+format");
-    expect(result.error.reasons).toContain("schema_drift:export_evidence_bundle:path");
+    // One reason per offending field, each naming the tool and the schema path
+    // (issue #14): a refusal that only said "drift" would not be actionable.
+    expect(result.error.reasons).toContain(
+      "schema_drift:required_unadvertised:inspect_web_network_capture:input.capture_path",
+    );
+    expect(result.error.reasons).toContain(
+      "schema_drift:required_unadvertised:inspect_web_network_capture:input.format",
+    );
+    expect(result.error.reasons).toContain(
+      "schema_drift:required_unadvertised:export_evidence_bundle:input.path",
+    );
   });
 
   it("does not carry provider reason text out without a declaration context", async () => {

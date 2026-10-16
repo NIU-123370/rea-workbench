@@ -6,16 +6,40 @@ import { z } from "zod";
 // the projection layer, never here. Nothing in this file may add, rename or
 // reinterpret a field (DESIGN §1, §4).
 //
-// One deliberate divergence, recorded on issue #14: upstream fills producer
-// defaults when a construction call omits `predicate_type`, `confidence`,
-// `authority`, `raw_result`, `environment`, `analysis_profile` or
-// `relationship_coverage` (evidence.ts:401-407), which for `confidence` means
-// an omitted value becomes `observed`. This mirror is the *consumer* contract
-// used before persisting an envelope, so those fields stay required: accepting
-// a missing confidence as "observed" would be an evidence upgrade, which §4 and
-// §6 forbid. The authoritative check at runtime is the schema REA advertises
-// through `tools/list` (DESIGN §1, §9), and S14 must reconcile this strictness
-// against that advertised shape instead of against this file.
+// One deliberate divergence, recorded on issue #14 and CLOSED on issue #14:
+// upstream fills producer defaults when a construction call omits
+// `predicate_type`, `confidence`, `authority`, `raw_result`, `environment`,
+// `analysis_profile` or `relationship_coverage` (evidence.ts:401-407), which for
+// `confidence` means an omitted value becomes `observed`. This mirror is the
+// *consumer* contract used before persisting an envelope, so those fields stay
+// required: accepting a missing confidence as "observed" would be an evidence
+// upgrade, which §4 and §6 forbid.
+//
+// That strictness was checked against the provider instead of argued, and the
+// reading confirms it. Read on 2026-10-16 from `tools/list` of the built
+// provider at 98d8470d (REA 6.4.0, driver: this repository's own
+// `adapters/rea/protocol.ts`): in the advertised `outputSchema` of every
+// Evidence-producing tool — 162 occurrences, including
+// `inspect_web_network_capture`, `analyze_javascript_application` and
+// `inspect_analysis_view` — the envelope's `properties` and `required` are the
+// SAME 16 fields in the same order, with `additionalProperties: false`,
+// `confidence` enum ["observed","derived","inferred"] and `authority` enum
+// ["shipped-artifact","controlled-replay","historical-reference",
+// "external-service","analyst-inference"]. So this file is not stricter than
+// what REA says it emits; it is the advertised shape.
+//
+// The one asymmetry, found by the same reading and kept on purpose: where the
+// envelope appears as an *inline input* (`{kind:"inline", evidence: ...}`, 22
+// occurrences), upstream requires 15 fields and leaves `relationship_coverage`
+// optional with `default: null`. This workbench does not loosen the consumer
+// contract for that second dialect, because a workbench-supplied envelope is the
+// one place an unobserved coverage claim could enter the ledger.
+//
+// The authoritative runtime check is the `tools/list`-advertised `required` list
+// (DESIGN §1, §9 item 2) — that is what the provider publishes and what the
+// gate compares, and `adapters/rea/schema-reconciliation.ts` is the single owner
+// of that comparison. A `tools/list` advertised `required` array is the observed
+// side; this file is the expected side. Neither is derived from the other.
 
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const evidenceId = z.string().regex(/^ev_[0-9a-f]{64}$/);
@@ -192,6 +216,22 @@ export const reaToolErrorSchema = z.strictObject({
 
 export type ReaToolError = z.infer<typeof reaToolErrorSchema>["error"];
 
+// `get_evidence_bundle` with the default `detail: "complete"` answers with the
+// session's Evidence bundle. Field names and order follow
+// src/domain/evidenceBundle.ts:36-44 as advertised by `tools/list` at 98d8470d:
+// the residual-unknown list is called `unknowns`, not `unknown` — the name this
+// mirror carried until issue #14 read the advertised shape and found it, which
+// would have refused a real bundle on the one field that is always present.
+//
+// Upstream builds this root with `z.object` (which strips); the advertised JSON
+// Schema says `additionalProperties: false`, so the mirror follows the
+// advertisement, as `reaToolErrorSchema` already does (DESIGN §4: an unmodelled
+// field is refused, never silently dropped).
+//
+// NOT mirrored: the `detail: "summary"` member of the same union
+// ({kind, filters, total_retained_records, matching_records, unknown_revisions,
+// records}) and the manifest entry shapes inside it. No workbench path reads a
+// summary bundle, so no assertion here covers them (issue #14 open list).
 export const reaEvidenceBundleResultSchema = z.strictObject({
   result: z.strictObject({
     artifacts: z.array(z.unknown()),
@@ -199,7 +239,9 @@ export const reaEvidenceBundleResultSchema = z.strictObject({
     environments: z.array(z.unknown()),
     scenarios: z.array(z.unknown()),
     captures: z.array(z.unknown()),
-    unknown: z.array(z.unknown()),
+    unknowns: z.array(z.unknown()),
     records: z.array(reaEvidenceSchema),
   }),
 });
+
+export type ReaEvidenceBundleResult = z.infer<typeof reaEvidenceBundleResultSchema>;

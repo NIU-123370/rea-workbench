@@ -4,17 +4,45 @@
 // a real provider; results from it are never evidence about REA itself (DESIGN
 // §1, and the "fixture vs real provider" split issue #14 asks for).
 //
+// The catalog it advertises is READ FROM the recorded live capture
+// `tests/fixtures/rea-live-tools-shapes.json` — the shapes `tools/list` really
+// returned from the built provider at 98d8470d. Hand-writing an approximation
+// here would have made issue #14's reconciliation gate pass by construction and
+// prove nothing; drift cases below mutate the recorded document instead, so every
+// refusal in the suite traces to a field a real provider named.
+//
 // Behaviour is selected with FIXTURE_CASE:
-//   ok              aligned, catalog in the documented order
-//   shuffle         same tools, deliberately reordered (name lookup must not care)
+//   ok                aligned, catalog in the documented order
+//   shuffle           same tools, deliberately reordered (name lookup must not care)
 //   version_drift   reports a different package version
 //   missing_tool    omits import_evidence_bundle
 //   no_required     advertises capture tools without their required input fields
+//   open_content    drops additionalProperties:false from the capture input
+//   extra_field     adds an input field no mirror declares
+//   dropped_envelope_field  removes `relationship_coverage` from an advertised
+//                     Evidence output `required` list (the §9 item 2 envelope rule)
+//   detail_missing  removes `detail` from the advertised analyze input, i.e. the
+//                     mirror is now the side that is wrong
+//   har_records     capture answers with a contract-shaped records envelope
+//   resource_constraint / retained_view
+//                   capture answers `resource_constraint` with a retained
+//                   reference; the reference then resolves by view / export
+//
+// FIXTURE_CALL_LOG, when set to a file path, gets one JSON line per `tools/call`:
+// {name, arguments}. Tests use it to prove a producer is never re-run and that a
+// cancelled caller issues nothing at all.
 
 import process from "node:process";
+import { appendFileSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const RECORDED = JSON.parse(readFileSync(path.join(HERE, "rea-live-tools-shapes.json"), "utf8"));
 
 const HEX = "a".repeat(64);
 const CASE = process.env.FIXTURE_CASE ?? "ok";
+const CALL_LOG = process.env.FIXTURE_CALL_LOG ?? null;
 
 function envelope(id) {
   return {
@@ -148,36 +176,111 @@ function harRecordsEnvelope(id) {
   return base;
 }
 
-function tool(name, required) {
+function recordedTool(name) {
+  const tool = RECORDED.tools.find((entry) => entry.name === name);
+  if (tool === undefined) throw new Error(`recorded capture has no ${name}`);
   return {
     name,
-    description: `fixture ${name}`,
-    inputSchema: { type: "object", properties: {}, required: [...required] },
-    outputSchema: { type: "object" },
+    description: `fixture ${name} (shapes recorded from the live provider)`,
+    inputSchema: structuredClone(tool.inputSchema),
+    outputSchema: structuredClone(tool.outputSchema ?? { type: "object" }),
   };
 }
 
-function catalog() {
-  const tools = [
-    tool("binary_session", []),
-    tool("inspect_web_network_capture", ["capture_path", "format"]),
-    tool("analyze_javascript_application", []),
-    tool("get_evidence_bundle", []),
-    tool("export_evidence_bundle", ["path"]),
-    tool("import_evidence_bundle", ["path"]),
-    tool("close_binary", []),
-  ];
-  if (CASE === "missing_tool") {
-    return tools.filter((entry) => entry.name !== "import_evidence_bundle");
-  }
+function mutate(tool) {
   if (CASE === "no_required") {
-    return tools.map((entry) => ({ ...entry, inputSchema: { type: "object", properties: {}, required: [] } }));
+    // The provider stops naming any required input: every field the mirrors demand
+    // becomes `required_unadvertised`.
+    return { ...tool, inputSchema: { ...tool.inputSchema, required: [] } };
   }
-  if (CASE === "shuffle") {
-    return [...tools].reverse();
+  if (CASE === "open_content" && tool.name === "inspect_web_network_capture") {
+    const { additionalProperties, ...rest } = tool.inputSchema;
+    void additionalProperties;
+    return { ...tool, inputSchema: rest };
   }
+  if (CASE === "extra_field" && tool.name === "export_evidence_bundle") {
+    return {
+      ...tool,
+      inputSchema: {
+        ...tool.inputSchema,
+        properties: { ...tool.inputSchema.properties, compression: { type: "string" } },
+      },
+    };
+  }
+  if (CASE === "dropped_envelope_field" && tool.name === "inspect_web_network_capture") {
+    // §9 item 2's envelope half: the provider no longer names
+    // `relationship_coverage` as required, while the consumer mirror must keep
+    // requiring it.
+    return {
+      ...tool,
+      outputSchema: {
+        ...tool.outputSchema,
+        required: tool.outputSchema.required.filter((field) => field !== "relationship_coverage"),
+      },
+    };
+  }
+  if (CASE === "detail_missing" && tool.name === "analyze_javascript_application") {
+    const { detail, ...properties } = tool.inputSchema.properties;
+    void detail;
+    return { ...tool, inputSchema: { ...tool.inputSchema, properties } };
+  }
+  return tool;
+}
+
+function catalog() {
+  const names = CASE === "missing_tool"
+    ? RECORDED.namedToolOrder.filter((name) => name !== "import_evidence_bundle")
+    : RECORDED.namedToolOrder;
+  const tools = names.map((name) => mutate(recordedTool(name)));
+  // Retention is only reachable if the reference resolves, and the provider says
+  // which operations may be parents: a stale catalog that lost
+  // `inspect_analysis_view` must fail the gate rather than degrade quietly.
+  if (CASE === "shuffle") return [...tools].reverse();
   return tools;
 }
+
+// A HAR capture parent can only be projected through the `api-surface` view:
+// upstream's `summary`/`item`/`page`/`native` members admit
+// inspect_binary_layout | analyze_javascript_application | analyze_function as
+// `parent_operation`, and the live provider confirmed the other direction on
+// 2026-10-16 (`inspect_analysis_view` of a non-admitted parent answers
+// `unsupported_target`). This reply is shaped by that rule, not by preference.
+function viewEnvelope(parentEvidenceId) {
+  const base = envelope(HEX);
+  base.provider = { id: "rea-analysis-view", name: "REA analysis view projection", version: "1" };
+  base.predicate_type = "rea.analysis-view";
+  base.operation = "inspect_analysis_view";
+  base.parameters = { parent_evidence_id: parentEvidenceId, view: { kind: "api-surface" } };
+  base.normalized_result = {
+    kind: "api-surface",
+    parent_evidence_id: parentEvidenceId,
+    parent_operation: "inspect_web_network_capture",
+    parent_digest: HEX,
+    view_digest: HEX,
+    artifact: { path: "/fixture/session.har", sha256: null },
+    coverage: { status: "complete-within-view", examined: 1, total: 1, next_offset: null, exhausted: true },
+    limitations: [],
+    unknowns: [],
+    view: { kind: "api-surface", offset: 0, limit: 50 },
+    records: { examined: 1, total: 1, excluded: 0 },
+    templated_groups: 0,
+    groups: [
+      {
+        method: "GET",
+        origin: "http://127.0.0.1:9",
+        path_template: "/card",
+        templated_segments: [],
+        record_ordinals: [0],
+        statuses: [200],
+        content_types: ["application/json"],
+        flags: ["single-sample"],
+      },
+    ],
+    excluded_records: [],
+  };
+  return base;
+}
+
 
 let inFlight = 0;
 let peak = 0;
@@ -207,7 +310,7 @@ async function callTool(name, args) {
   }
   if (name === "inspect_web_network_capture") {
     if (CASE === "har_records") return harRecordsEnvelope(HEX);
-    if (CASE === "resource_constraint") {
+    if (CASE === "resource_constraint" || CASE === "retained_view") {
       return {
         errorReply: {
           code: "resource_constraint",
@@ -236,6 +339,41 @@ async function callTool(name, args) {
         retryable: true,
         remediation: { action: "read the retained record" },
         details: { partial_observation: { kind: "retained-evidence", evidence_id: `ev_${"b".repeat(64)}` } },
+      },
+    };
+  }
+  if (name === "inspect_analysis_view") {
+    if (args?.source?.kind !== "retained-evidence" || typeof args.source.evidence_id !== "string") {
+      // The provider refuses a reference it cannot resolve, naming the field.
+      return {
+        errorReply: {
+          code: "invalid_request",
+          category: "invalid_input",
+          message: "source.evidence_id must name a retained record of this session",
+          retryable: false,
+          remediation: { action: "pass an exact same-session evidence_id" },
+          details: { field: "source.evidence_id" },
+        },
+      };
+    }
+    return viewEnvelope(args.source.evidence_id);
+  }
+  if (name === "export_evidence_bundle") {
+    return { result: { path: args?.path ?? "/fixture/bundle.json", bytes: 4096, records: 2, unknowns: 0 } };
+  }
+  if (name === "import_evidence_bundle") {
+    return { result: { imported: 2, unknowns_added: 0, total: 2 } };
+  }
+  if (name === "get_evidence_bundle") {
+    return {
+      result: {
+        artifacts: [],
+        providers: [],
+        environments: [],
+        scenarios: [],
+        captures: [],
+        unknowns: [],
+        records: [],
       },
     };
   }
@@ -279,6 +417,9 @@ async function handle(line) {
     return;
   }
   if (method === "tools/call") {
+    if (CALL_LOG !== null) {
+      appendFileSync(CALL_LOG, `${JSON.stringify({ name: params?.name ?? null, arguments: params?.arguments ?? null })}\n`);
+    }
     const outcome = await callTool(params?.name, params?.arguments);
     if (outcome.errorReply) {
       send({
