@@ -233,11 +233,13 @@ writeFileSync(out + "/report.json", JSON.stringify({
         argv: string[];
       };
       const plannedKeys = Object.keys(planned.plan.env).sort();
-      // Everything the child sees is either something the plan wrote or something the OS
-      // `exec` added itself. Nothing from the inherited environment is in that residue:
-      // `WB_DATA_DIR`, `HTTPS_PROXY` and the host `HOME` were all set for the parent.
-      expect(report.env.filter((key) => !plannedKeys.includes(key))).toEqual(["__CF_USER_TEXT_ENCODING"]);
-      for (const forbidden of ["WB_DATA_DIR", "HTTPS_PROXY", "NODE_OPTIONS", "AWS_SECRET_ACCESS_KEY"]) {
+      // The property is "nothing inherited survived", and it has to be stated in a way that
+      // holds on every host: Linux `exec` adds nothing here, macOS adds one encoding variable
+      // of its own. Asserting the exact residue would pin the test to this machine's OS, so
+      // the residue is checked against the names this test actually seeded.
+      const residue = report.env.filter((key) => !plannedKeys.includes(key));
+      for (const key of residue) expect(["__CF_USER_TEXT_ENCODING"]).toContain(key);
+      for (const forbidden of ["WB_DATA_DIR", "WB_REA_ENTRYPOINT", "HTTPS_PROXY", "NODE_OPTIONS"]) {
         expect(report.env).not.toContain(forbidden);
       }
       expect(JSON.stringify(report)).not.toContain("/Users/operator");
