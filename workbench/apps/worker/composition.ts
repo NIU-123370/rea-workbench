@@ -40,6 +40,7 @@ import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
 import { ExportService } from "../../packages/application/export-service.ts";
+import { GraphReadService } from "../../packages/application/graph-read.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
 
@@ -53,6 +54,7 @@ import { WebCaptureEvidenceFacts } from "../../packages/adapters/rea/web-capture
 import { createProjectRequestSchema } from "../../packages/contracts/resources.ts";
 import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
 import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
+import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
 //
@@ -107,6 +109,9 @@ export const COMMAND_NAMES = [
   "export.create",
   "export.download",
   "export.list",
+  // The canvas read (§6 / F04 / issue #18): claims, edges and their stored evidence ids, with no
+  // status computed here.
+  "graph.read",
   "health.effectiveProfiles",
   "doctor.run",
   "jobs.recover",
@@ -403,6 +408,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
   const builder = new BuilderService({ storage: writer, artifacts: store, limits: LIMITS });
   const verifications = new VerificationService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
+  const graph = new GraphReadService({ storage: writer });
   const exports_ = new ExportService({
     storage: writer,
     artifacts: store,
@@ -647,6 +653,16 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     },
     "export.list": async (payload, actor) =>
       relay(await exports_.list(projectIdOr(payload), actor, limitOf(payload))),
+    "graph.read": (payload, actor) => {
+      const parsed = graphReadRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "graph-read", "the graph read request was rejected");
+      const target = parsed.data.targetId;
+      return relay(
+        target === undefined
+          ? graph.read(projectIdOr(payload), actor)
+          : graph.read(projectIdOr(payload), actor, asId(target)),
+      );
+    },
     "health.effectiveProfiles": () => relay({ ok: true, value: profiles.healthView() }),
     "doctor.run": async () => relay({ ok: true, value: (await doctorReport()) as unknown as JsonValue }),
     "jobs.recover": () => relay(recovery()),

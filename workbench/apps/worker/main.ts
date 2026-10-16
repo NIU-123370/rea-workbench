@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { BOOT_CONFIG_FIELDS } from "../../packages/contracts/boot.ts";
@@ -15,7 +16,12 @@ import { Terminal, stdoutSink } from "./terminal.ts";
 // variable is ever captured, and the only file this process reads for
 // configuration is the installed package's own — never a target directory's `.env`.
 
-const PACKAGE_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+// `fileURLToPath` rather than `new URL(...).pathname`: the pathname keeps its percent
+// encoding, so an install under a directory with a space or a CJK name would resolve to a
+// path that does not exist, and `readJson` would report "no installed defaults" instead of
+// the real problem - a silently empty configuration is the worst failure this process can
+// have, because it still boots and still prints a pairing code.
+const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const REQUIRED_NODE_VERSION = "24.18.0";
 
 function declaredEnv(env: Readonly<Record<string, string | undefined>>): Record<string, string | undefined> {
