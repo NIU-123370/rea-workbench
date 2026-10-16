@@ -17,6 +17,7 @@ import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
+import { vectorPageSchema } from "../../packages/contracts/vectors.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
@@ -1584,5 +1585,114 @@ describe("the audit routes (§8 lines 302-303)", () => {
     const all = auditPageSchema.safeParse(JSON.parse(whole.text) as JsonValue);
     if (!all.success) throw new Error(whole.text);
     expect(seen.sort((left, right) => left - right)).toEqual(all.data.entries.map((entry) => entry.seq).sort((left, right) => left - right));
+  });
+});
+
+// The inventory page route (§8 line 283 / issue #58).
+//
+// The HTTP half is what is tested here - the query's three slots, the session gate, and the
+// worker's refusals arriving as the statuses §8 names them. The page's *body* and the stale
+// cursor are proven where the rows exist: tests/integration/vector-service.test.ts walks a real
+// inventory, and duplicating that seeding behind this socket would test the relay twice and
+// the inventory once.
+
+describe("the inventory page route (§8 line 283)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: body.data?.csrfToken ?? body.csrfToken ?? "",
+    };
+  }
+
+  async function freshProject(session: { cookie: string; csrf: string }, name: string): Promise<string> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: `127.0.0.1:${String(address.port)}`,
+        origin: `http://127.0.0.1:${String(address.port)}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `vectors-route-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return (body.data?.id ?? body.id) as string;
+  }
+
+  function get(pathname: string, cookie: string) {
+    return call("GET", pathname, { headers: { host: `127.0.0.1:${String(address.port)}`, cookie } });
+  }
+
+  it("holds the page behind a session", async () => {
+    const anonymous = await call("GET", `${API_PREFIX}/projects/${newId()}/vectors?targetId=${newId()}`);
+    expect(anonymous.status).toBe(401);
+  });
+
+  it("requires a target before asking the worker, and never echoes the rejected segment", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "vectors-need-target");
+    for (const url of [`${API_PREFIX}/projects/${projectId}/vectors`, `${API_PREFIX}/projects/${projectId}/vectors?targetId=not-a-uuid`]) {
+      const missing = await get(url, session.cookie);
+      expect(missing.status, missing.text).toBe(400);
+      expect(missing.text).toContain("vectors-target-required");
+      expect(missing.text).not.toContain("not-a-uuid");
+    }
+  });
+
+  it("answers a target with no samples as an empty page at the live revision", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "vectors-empty");
+    const page = await get(`${API_PREFIX}/projects/${projectId}/vectors?targetId=${newId()}`, session.cookie);
+    expect(page.status, page.text).toBe(200);
+    const parsed = vectorPageSchema.safeParse(JSON.parse(page.text) as JsonValue);
+    if (!parsed.success) throw new Error(page.text);
+    expect(parsed.data.items).toEqual([]);
+    expect(parsed.data.nextCursor).toBeNull();
+    // The revision is reported even when nothing is shown: it is what a later cursor will be
+    // compared against, and a page that omitted it could not be invalidated.
+    expect(parsed.data.inventoryRevision).toBe(0);
+  });
+
+  it("refuses a page past the bound and a cursor that was never issued", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "vectors-bounds");
+    const target = newId();
+    const over = await get(`${API_PREFIX}/projects/${projectId}/vectors?targetId=${target}&limit=201`, session.cookie);
+    expect(over.status, over.text).toBe(413);
+    expect(over.text).toContain("vector-limit");
+    const badLimit = await get(`${API_PREFIX}/projects/${projectId}/vectors?targetId=${target}&limit=1.5`, session.cookie);
+    expect(badLimit.status, badLimit.text).toBe(400);
+    expect(badLimit.text).toContain("vectors-limit-malformed");
+    const badCursor = await get(`${API_PREFIX}/projects/${projectId}/vectors?targetId=${target}&cursor=${encodeURIComponent("!!!!")}`, session.cookie);
+    expect(badCursor.status, badCursor.text).toBe(400);
+    expect(badCursor.text).toContain("vector-cursor");
+  });
+
+  it("answers a well-formed target that is not this project's as nothing, not as a difference", async () => {
+    const session = await pairSession();
+    const mine = await freshProject(session, "vectors-mine");
+    const other = await freshProject(session, "vectors-other");
+    // A target id belonging to another project is a *shape* the route cannot tell apart from
+    // one that simply has no samples. Both read as an empty page at this project's revision:
+    // 404-for-foreign / 200-for-mine would turn the route into an oracle for "does that id
+    // exist somewhere else", which is what §5's (project, target) composite key is for.
+    const foreign = await get(`${API_PREFIX}/projects/${mine}/vectors?targetId=${other}`, session.cookie);
+    const unknown = await get(`${API_PREFIX}/projects/${mine}/vectors?targetId=${newId()}`, session.cookie);
+    expect(foreign.status, foreign.text).toBe(200);
+    expect(unknown.status, unknown.text).toBe(200);
+    expect(foreign.text).toBe(unknown.text);
+    const parsed = vectorPageSchema.safeParse(JSON.parse(foreign.text) as JsonValue);
+    if (!parsed.success) throw new Error(foreign.text);
+    expect(parsed.data.items).toEqual([]);
+    expect(parsed.data.inventoryRevision).toBe(0);
   });
 });

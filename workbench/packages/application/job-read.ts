@@ -5,6 +5,7 @@ import type { Actor } from "./actor.ts";
 import { isControlPlane } from "./actor.ts";
 import { gateFail, type GateFailure } from "./gate-failure.ts";
 import { projectJobRecord } from "./job-queue.ts";
+import { decodePageCursor, encodePageCursor } from "./page-cursor.ts";
 import type { JobRow, LeaseRow, StorageWriterPort } from "./ports.ts";
 
 // The job read surface (DESIGN §8 line 277, §11 / PRD F05, issue #55).
@@ -16,28 +17,23 @@ import type { JobRow, LeaseRow, StorageWriterPort } from "./ports.ts";
 // GET job, GET jobs and job.updated report the same named time fields, and two hand-built
 // objects are exactly how that drifts apart.
 
-// A cursor is a row key this server handed out, encoded so a client cannot compose one for a
-// row it has never seen. The separator is a character neither an RFC 3339 instant nor a UUID
-// can contain, so a decoded cursor splits into exactly two parts.
-const CURSOR_SEPARATOR = "|";
-
+// A cursor is a row key this server handed out, encoded by the shared page-cursor codec so a
+// client cannot compose one for a row it has never seen. The separator is a character neither
+// an RFC 3339 instant nor a UUID can contain, so a decoded cursor splits into two parts.
 export type JobCursor = { createdAt: Instant; id: Id };
 
 export function encodeJobCursor(row: { createdAt: Instant; id: Id }): string {
-  return Buffer.from(`${row.createdAt}${CURSOR_SEPARATOR}${row.id}`, "utf8").toString("base64url");
+  return encodePageCursor([row.createdAt, row.id]);
 }
 
 export function decodeJobCursor(raw: string): Result<JobCursor, GateFailure> {
-  const notOurs = gateFail("INVALID_INPUT", "jobs-cursor", "the page cursor is not one this server issued");
-  const decoded = Buffer.from(raw, "base64url").toString("utf8");
-  const parts = decoded.split(CURSOR_SEPARATOR);
-  if (parts.length !== 2) return notOurs;
-  const [createdAt, id] = parts as [string, string];
-  if (!isInstant(createdAt) || !isId(id)) return notOurs;
-  // base64url decoding is lenient: several different strings decode to the same bytes. The
-  // only proof that this is the cursor we sent is that it re-encodes to itself, so a cursor
-  // that decodes but does not round-trip is refused rather than read as some other row.
-  if (encodeJobCursor({ createdAt, id: id as Id }) !== raw) return notOurs;
+  const decoded = decodePageCursor(raw, 2, "jobs-cursor");
+  if (!decoded.ok) return decoded;
+  const [createdAt, id] = decoded.value as [string, string];
+  // The codec proves the string is ours; this proves the two fields still name a row key.
+  if (!isInstant(createdAt) || !isId(id)) {
+    return gateFail("INVALID_INPUT", "jobs-cursor", "the page cursor is not one this server issued");
+  }
   return { ok: true, value: { createdAt, id: id as Id } };
 }
 

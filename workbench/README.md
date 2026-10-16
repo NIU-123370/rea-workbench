@@ -259,10 +259,20 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 页宽越界是具名 413，不是悄悄少给。回包字段就是 §12.2 那份清单，`safeMetadata` 是消毒器出来
 的原文**逐字带过**，读侧不重述也不删字段——一本操作者不能确信「就是当时记下的那条」的日志不是日志。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **19 条**，仍缺 **21 条**。
+§8 的库存分页（line 283）接通了：`GET /projects/:p/vectors` 收 `targetId`＋可选 `cursor`＋
+可选 `limit`，回 `{inventoryRevision, items, nextCursor}`。三件事是这个路由的合同而不是优化：
+报出**切这一页时的库存版本**，游标pin 了版本而库存又动了就是 **409**（不是把两个库存混进同一页）；
+切在行自己的 `id` 上，所以翻页中途来了新捕获既不跳行也不重行；回的是那六个摘要字段、
+**不带正文**——列表本身是披露面，正文只能走那条具名的单向量读。holdout 行**在查询里**就被排除
+而不是读完再删：读完再删会让页比游标短、下一个游标指向一行调用者从没见过的行。
+游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
+是宽容的，所以唯一证明是「能原样回编」）。
+
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **20 条**，仍缺 **20 条**。
 缺的这 23 条里，`GET /projects/:p`、`GET .../jobs/:j`、`GET .../evidence/:e`、`GET .../vectors/:v`、
 `GET .../verification-plans/:v` 这五条已经补上——它们的命令一直都在，只是没有 HTTP 的门。
-其余多数是**写动作**（`POST /imports`、`POST /vectors*`、`/contracts*`、`/verification-plans*`、
+缺的 20 条里只有一条是读（`GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v`
+三条连命令都还没有，其余全是写动作）：`POST /imports`、`POST /vectors*`、`/contracts*`、`/verification-plans*`、
 `/blueprints`、`/jobs/:j/cancel`、`/jobs/:j/cleanup-retry`、`POST /jobs`、`POST /verifications`）：
 命令侧有实现，页面上点不到，所以「审阅样本 → 批契约 → 批计划 → 冻蓝图」这条真正改变项目状态的链
 仍然只能由测试或脚本走完。注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
@@ -313,6 +323,16 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   且不会被 `…/projects/:p/audit` 的后缀分支抢走（那条分支的顺序在实现里是显式写在后面的，
   调换两个分支的变异被打红）。
 - 这一轮仍**没有**给审计做任何界面：三栏看不到日志本。那是一个单独的界面活，不在 §8 路由表里。
+
+浏览器实测·第五轮（2026-10-17 05:21，同一套三个真进程）：库存分页在页面里由 `fetch` 直接走
+Next 中继，读数逐条对过——无 `targetId` 与 `targetId=not-a-uuid` **都是 400
+`vectors-target-required` 且不回显那串文本**；一个形状合法、无人拥有的 target 回 **200
+`{inventoryRevision:1, items:[], nextCursor:null}`**（既不是 404 也不是 403：拿别人的 target
+试探存在性需要「读不到」和「不存在」长得不一样，这一跳故意不给）；`limit=201` 是 413
+`vector-limit`，`limit=1.5` 是 400 `vectors-limit-malformed`；伪造游标 `!!!!` 是 400
+`vector-cursor`——**这一条是 worker 的编解码给的，边缘不预判**；`/vectors/<id>` 那条单读路由
+仍然分得开（404 `vector-unknown`）。库存正文与 409 那条**不在这个 socket 上重测**：它需要真的
+样本行，证明在 `vector-service.test.ts` 里（27 条，其中这个路由 8 条），那里有行。
 
 浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
 把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：

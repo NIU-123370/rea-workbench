@@ -18,6 +18,7 @@ import { readAudit } from "../../packages/application/audit.ts";
 import { VectorService } from "../../packages/application/vector-service.ts";
 import type { VectorActor, VectorCommit, VectorFailure } from "../../packages/application/vector-service.ts";
 import type { EvidenceRow, JobRow, TargetRow, VectorRow } from "../../packages/application/ports.ts";
+import { VECTOR_PAGE_MAX_LIMIT, vectorPageSchema, type VectorPage } from "../../packages/contracts/vectors.ts";
 
 // VectorService against a real SQLite file, a real artifact store and a persisted
 // REA capture envelope (DESIGN §7.1, §7.4, D26/D27). The envelope is the shape
@@ -768,3 +769,132 @@ function liveRevision(): number {
   if (!project.ok || project.value === null) throw new Error("project missing");
   return project.value.inventoryRevision;
 }
+
+// The inventory page (§8 line 283 / issue #58).
+//
+// This is the route a reviewer browses before opening one sample, so the properties that
+// matter are the ones the listing itself must keep: the page reports the inventory it was cut
+// at, its cursor cannot be re-used across a moved inventory, a summary carries the six named
+// fields and no body, and a row the caller may not see is absent from the query rather than
+// removed from the answer afterwards.
+
+describe("the inventory page (§8 line 283)", () => {
+  function pageOf(
+    input: { cursor: string | null; limit: number | null },
+    actor: VectorActor = inspector,
+  ): { ok: true; value: VectorPage } | { ok: false; error: VectorFailure } {
+    return service.page(projectId, actor, { targetId, cursor: input.cursor, limit: input.limit });
+  }
+
+  function pageIds(count: number): Id[] {
+    // The rows this file has already written, in the order the page must produce them.
+    const rows = writer.transact((tx) => tx.listVectorsAfter(projectId, { targetId, afterId: null, publicOnly: false, limit: 500 }));
+    if (!rows.ok) throw new Error(JSON.stringify(rows.error));
+    return rows.value.slice(0, count).map((row) => row.id);
+  }
+
+  it("answers with the six summary fields and none of the body", () => {
+    const page = unwrap(pageOf({ cursor: null, limit: 3 }));
+    expect(vectorPageSchema.safeParse(page).success).toBe(true);
+    expect(page.items.length).toBeGreaterThan(0);
+    expect(page.inventoryRevision).toBe(liveRevision());
+    const first = page.items[0] as Record<string, unknown>;
+    expect(Object.keys(first).sort()).toEqual(["caseKey", "digest", "eligibility", "id", "review", "visibility"]);
+    // A listing that leaked `request`/`response` would put the retained bytes in front of
+    // every role that has a page open, before anyone asked for one sample.
+    for (const leaked of ["request", "response", "source", "coverage", "redactions", "reasons"]) {
+      expect(first[leaked]).toBeUndefined();
+    }
+  });
+
+  it("walks the whole inventory by cursor without repeating or dropping a row", () => {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 200; guard += 1) {
+      const page: VectorPage = unwrap(pageOf({ cursor, limit: 2 }));
+      // Two, not "two plus the probe row": the extra read exists to decide whether to hand
+      // back a cursor, and it must never reach the answer.
+      expect(page.items.length).toBeLessThanOrEqual(2);
+      seen.push(...page.items.map((item) => item.id));
+      if (page.nextCursor === null) break;
+      cursor = page.nextCursor;
+    }
+    const everything = pageIds(500).map((id) => String(id));
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toEqual(everything);
+  });
+
+  it("does not promise a cursor for a page that happens to come out exactly full", () => {
+    // Same trap the audit page test caught: every loop above stops on a null cursor, so a
+    // last page that lies would still pass them.
+    const size = pageIds(500).length;
+    const exact = unwrap(pageOf({ cursor: null, limit: size }));
+    expect(exact.items.length).toBe(size);
+    expect(exact.nextCursor).toBeNull();
+    const short = unwrap(pageOf({ cursor: null, limit: size - 1 }));
+    expect(short.nextCursor).not.toBeNull();
+  });
+
+  it("refuses a cursor from before the inventory moved, and says which two revisions disagree", async () => {
+    const first = unwrap(pageOf({ cursor: null, limit: 1 }));
+    expect(first.nextCursor).not.toBeNull();
+    const pinned = first.inventoryRevision;
+    await service.create(projectId, inspector, createRequest(0, { caseKey: "page-move-case" }), context);
+    const refusal = await service.page(projectId, inspector, { targetId, cursor: first.nextCursor, limit: 2 });
+    if (refusal.ok) throw new Error("a moved inventory must refuse the stale page cursor");
+    expect(refusal.error.code).toBe("REVISION_CONFLICT");
+    expect(refusal.error.reason).toBe("vector-inventory-moved");
+    expect(refusal.error.details["pinnedRevision"]).toBe(pinned);
+    expect(refusal.error.details["currentRevision"]).toBe(liveRevision());
+  });
+
+  it("keeps a holdout row inside the query, so the page and its cursor describe the same set", async () => {
+    const held = unwrap(await service.create(projectId, inspector, createRequest(0, { caseKey: "page-holdout", visibility: "holdout" }), context));
+    const controlPlane: VectorPage = unwrap(pageOf({ cursor: null, limit: null }));
+    const systemView: VectorPage = unwrap(pageOf({ cursor: null, limit: null }, generator));
+    expect(controlPlane.items.some((item) => item.id === held.vectorId)).toBe(true);
+    expect(systemView.items.some((item) => item.id === held.vectorId)).toBe(false);
+    expect(systemView.inventoryRevision).toBe(controlPlane.inventoryRevision);
+    // And not merely shorter: the last row of the visible page is the last row of the set, so
+    // a cursor taken from it cannot skip an invisible row on the next page.
+    const lastVisible = systemView.items[systemView.items.length - 1] as { id: string };
+    const next = writer.transact((tx) =>
+      tx.listVectorsAfter(projectId, { targetId, afterId: lastVisible.id as Id, publicOnly: true, limit: 500 }),
+    );
+    if (!next.ok) throw new Error(JSON.stringify(next.error));
+    expect(next.value).toEqual([]);
+  });
+
+  it("cuts the page on (project, target) together, so a foreign project sees nothing", () => {
+    // The rows above belong to this project. Asking for the *same target id* under another
+    // project must read as empty rather than as a borrow: the composite key is what §5 makes
+    // the isolation boundary, and a query that dropped `project_id` would still be correct
+    // looking while it leaked.
+    const otherProject = newId();
+    const seeded = writer.transact((tx) => {
+      tx.insertProject({ id: otherProject, name: "other-vectors", createdAt: nowInstant(), graphRevision: 1, inventoryRevision: 1, schemaVersion: 1 });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+    const rows = writer.transact((tx) => tx.listVectorsAfter(otherProject, { targetId, afterId: null, publicOnly: false, limit: 500 }));
+    if (!rows.ok) throw new Error(JSON.stringify(rows.error));
+    expect(rows.value).toEqual([]);
+    const mine = writer.transact((tx) => tx.listVectorsAfter(projectId, { targetId, afterId: null, publicOnly: false, limit: 500 }));
+    if (!mine.ok) throw new Error(JSON.stringify(mine.error));
+    expect(mine.value.length).toBeGreaterThan(0);
+  });
+
+  it("refuses the Builder, an over-large page and a cursor that was never ours", async () => {
+    expect(reason(await service.page(projectId, builder, { targetId, cursor: null, limit: null }))).toBe(
+      "builder-has-no-vector-permission",
+    );
+    const over = await service.page(projectId, inspector, { targetId, cursor: null, limit: VECTOR_PAGE_MAX_LIMIT + 1 });
+    if (over.ok) throw new Error("expected a bound refusal");
+    expect(over.error.reason).toBe("vector-limit");
+    // A well-formed cursor with no round trip is a different cursor; the codec proves it, and
+    // the shape check here proves it still names a revision and an id.
+    const forged = Buffer.from(`0|not-a-uuid`, "utf8").toString("base64url");
+    expect(reason(await service.page(projectId, inspector, { targetId, cursor: forged, limit: 2 }))).toBe("vector-cursor");
+    expect(reason(await service.page(projectId, inspector, { targetId, cursor: "%%%%", limit: 2 }))).toBe("vector-cursor");
+  });
+});

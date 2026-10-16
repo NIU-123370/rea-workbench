@@ -233,6 +233,7 @@ function fakeWriter(state: FakeState): StorageWriterPort {
     findJobByKey: refused("findJobByKey", state),
     listJobsByStates: refused("listJobsByStates", state),
     listJobsAfter: refused("listJobsAfter", state),
+    listVectorsAfter: refused("listVectorsAfter", state),
     listLeasesForJobs: refused("listLeasesForJobs", state),
     listOpenLeases: refused("listOpenLeases", state),
     getLeaseByJob: refused("getLeaseByJob", state),

@@ -1,7 +1,7 @@
 import { CanonicalizationError } from "../domain/canonical-json.ts";
 import type { CanonicalLimits, Digest } from "../domain/canonical-json.ts";
 import { asDigest, canonicalJson } from "../domain/canonical-json.ts";
-import { asId, newId, nowInstant } from "../domain/identity.ts";
+import { asId, isId, newId, nowInstant } from "../domain/identity.ts";
 import type { Id, Instant } from "../domain/identity.ts";
 import type { JsonValue, JsonObject } from "../domain/json-value.ts";
 import { isJsonObject } from "../domain/json-value.ts";
@@ -11,7 +11,10 @@ import {
   vectorCreateRequestSchema,
   vectorReviewRequestSchema,
   vectorSourceSchema,
+  VECTOR_PAGE_DEFAULT_LIMIT,
+  VECTOR_PAGE_MAX_LIMIT,
   type TestVectorWireContent,
+  type VectorPage,
 } from "../contracts/vectors.ts";
 import {
   deriveEligibility,
@@ -32,6 +35,7 @@ import type {
   VectorSource,
 } from "../domain/vector.ts";
 import { enforceDeny } from "./audit.ts";
+import { decodePageCursor, encodePageCursor } from "./page-cursor.ts";
 import { assertPayloadClean, redactText } from "./sanitizer.ts";
 import type { SensitiveDeclaration } from "./sanitizer.ts";
 import type {
@@ -796,6 +800,92 @@ export class VectorService {
     return {
       ok: true,
       value: controlPlane ? listed.value : listed.value.filter((row) => row.visibility === "public"),
+    };
+  }
+
+  // The inventory page (§8 line 283). Three things the unpaged `list` above does not do, and
+  // each of them is the route's contract rather than an optimisation:
+  //
+  //  * it reports the `inventoryRevision` the page was cut at, and a cursor that names a
+  //    different one is a conflict (409) rather than a page that mixes two inventories;
+  //  * it cuts on the row's own id, so a capture landing mid-pagination neither skips a row
+  //    nor repeats one;
+  //  * it answers with the six summary fields and no body - a listing is a disclosure
+  //    surface, and the bytes only ever come back through the named single-vector read.
+  page(
+    projectId: Id,
+    actor: VectorActor,
+    input: { targetId: Id; cursor: string | null; limit: number | null | undefined },
+  ): Result<VectorPage, VectorFailure> {
+    if (actor.actorKind === "builder") return this.denyBuilder(projectId, actor, "vector.list", null);
+    const limit = input.limit ?? VECTOR_PAGE_DEFAULT_LIMIT;
+    if (limit > VECTOR_PAGE_MAX_LIMIT) {
+      return fail("RESOURCE_LIMIT", "vector-limit", `an inventory page is at most ${String(VECTOR_PAGE_MAX_LIMIT)} rows`, {
+        limit,
+        maxLimit: VECTOR_PAGE_MAX_LIMIT,
+      });
+    }
+    let afterId: Id | null = null;
+    let pinnedRevision: number | null = null;
+    if (input.cursor !== null) {
+      const decoded = decodePageCursor(input.cursor, 2, "vector-cursor");
+      if (!decoded.ok) return decoded;
+      const [revision, id] = decoded.value as [string, string];
+      if (!/^(0|[1-9]\d*)$/.test(revision) || !isId(id)) {
+        return fail("INVALID_INPUT", "vector-cursor", "the page cursor is not one this server issued");
+      }
+      pinnedRevision = Number(revision);
+      afterId = id as Id;
+    }
+    // The disclosure rule is decided before the read, not after it: `system` and the web
+    // session roles see public rows, and only inspector/reviewer see holdout rows at all.
+    const controlPlane = actor.actorKind === "inspector" || actor.actorKind === "reviewer";
+    const read = this.storage.transact((tx) => {
+      const project = tx.getProject(projectId);
+      if (project === null) return { missing: true as const };
+      // One transaction for the revision and the rows: reading the revision first would let a
+      // write land in between and have the page claim a state it is not showing.
+      return {
+        missing: false as const,
+        revision: project.inventoryRevision,
+        rows: tx.listVectorsAfter(projectId, {
+          targetId: input.targetId,
+          afterId,
+          publicOnly: !controlPlane,
+          limit: limit + 1,
+        }),
+      };
+    });
+    if (!read.ok) return fail("INVALID_INPUT", read.error.code, read.error.message);
+    if (read.value.missing) return fail("NOT_FOUND", "project-unknown", "project not found");
+    if (pinnedRevision !== null && pinnedRevision !== read.value.revision) {
+      return fail(
+        "REVISION_CONFLICT",
+        "vector-inventory-moved",
+        "the inventory changed since this page was cut; re-read from the start",
+        { pinnedRevision, currentRevision: read.value.revision },
+      );
+    }
+    const rows = read.value.rows as VectorRow[];
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return {
+      ok: true,
+      value: {
+        inventoryRevision: read.value.revision,
+        items: page.map((row) => ({
+          id: row.id,
+          digest: row.digest,
+          caseKey: row.caseKey,
+          visibility: row.visibility,
+          eligibility: row.eligibility,
+          review: reviewOf(row),
+        })),
+        nextCursor:
+          rows.length > limit && last !== undefined
+            ? encodePageCursor([String(read.value.revision), last.id])
+            : null,
+      },
     };
   }
 

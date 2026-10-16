@@ -154,6 +154,43 @@ export const vectorReviewRequestSchema = z.strictObject({
   }
 });
 
+// --- The inventory page (§8 line 283 / issue #58) ------------------------------------
+//
+// §8 gives this route three query slots - `targetId`, an optional `cursor` and an optional
+// `limit` - and one reply: the project's current `inventoryRevision`, a page of summaries, and
+// a cursor or null. A summary is the six fields it names, and no body: the listing is a
+// disclosure surface (holdout rows are a control-plane-only matter, and a row's request/response
+// bytes only ever come back through the named single-vector read).
+
+export const vectorSummarySchema = z.strictObject({
+  id: idSchema,
+  digest: digestSchema,
+  caseKey: nonEmptyString,
+  visibility: z.enum(["public", "holdout"]),
+  eligibility: z.enum(["usable", "blocked"]),
+  review: vectorReviewSchema,
+});
+
+export const vectorPageSchema = z.strictObject({
+  inventoryRevision: z.int().nonnegative(),
+  items: z.array(vectorSummarySchema),
+  // Opaque here even though the audit journal's cursor is a plain integer, because §8 calls
+  // this one a "稳定快照游标": it pins the inventory revision the page was cut at, and a
+  // client re-sending it after the inventory moved is a conflict, not a reinterpretation.
+  nextCursor: nonEmptyString.nullable(),
+});
+
+export const vectorPageQuerySchema = z.strictObject({
+  targetId: idSchema,
+  cursor: nonEmptyString.nullable().optional(),
+  // The page bound is enforced by the read service, which is the only place that can name the
+  // refusal. Null and absent both mean "the default page", as elsewhere in §8.
+  limit: z.int().min(1).nullable().optional(),
+});
+
+export const VECTOR_PAGE_DEFAULT_LIMIT = 50;
+export const VECTOR_PAGE_MAX_LIMIT = 200;
+
 export const vectorListQuerySchema = z.strictObject({
   targetId: idSchema.optional(),
   snapshotDigest: digestSchema.optional(),
@@ -166,6 +203,9 @@ export const vectorListQuerySchema = z.strictObject({
 export type VectorCreateRequest = z.infer<typeof vectorCreateRequestSchema>;
 export type VectorReviewRequest = z.infer<typeof vectorReviewRequestSchema>;
 export type VectorListQuery = z.infer<typeof vectorListQuerySchema>;
+export type VectorSummary = z.infer<typeof vectorSummarySchema>;
+export type VectorPage = z.infer<typeof vectorPageSchema>;
+export type VectorPageQuery = z.infer<typeof vectorPageQuerySchema>;
 export type TestVectorRecord = z.infer<typeof testVectorSchema>;
 export type TestVectorWireContent = z.infer<typeof testVectorContentSchema>;
 

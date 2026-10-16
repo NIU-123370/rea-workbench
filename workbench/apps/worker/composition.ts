@@ -62,6 +62,7 @@ import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packag
 import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
 import { jobListRequestSchema } from "../../packages/contracts/jobs.ts";
 import { auditListRequestSchema } from "../../packages/contracts/audit.ts";
+import { vectorPageQuerySchema } from "../../packages/contracts/vectors.ts";
 import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../packages/contracts/candidate.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
@@ -645,7 +646,20 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       if (refused !== null) return refused;
       return relay(await vectors.read(projectId as Id, actor, vectorId as Id));
     },
-    "vector.list": (payload, actor) => relay(vectors.list(projectIdOr(payload), actor, pickId(payload, "targetId"))),
+    "vector.list": (payload, actor) => {
+      // The inventory page (§8 line 283). A target is required: an inventory is per capture
+      // snapshot, and a page across all of a project's targets would mix two denominators.
+      const parsed = vectorPageQuerySchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "vector-list", "the inventory page request was rejected");
+      const targetId = parsed.data.targetId;
+      return relay(
+        vectors.page(projectIdOr(payload), actor, {
+          targetId: asId(targetId),
+          cursor: parsed.data.cursor ?? null,
+          limit: parsed.data.limit,
+        }),
+      );
+    },
     "vector.review": async (payload, actor) => {
       const projectId = pickId(payload, "projectId");
       const vectorId = pickId(payload, "vectorId");

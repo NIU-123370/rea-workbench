@@ -388,6 +388,15 @@ ALTER TABLE artifacts_new RENAME TO artifacts;
 CREATE INDEX IF NOT EXISTS idx_jobs_project_created ON jobs (project_id, created_at DESC, id DESC);
 `,
   },
+  {
+    id: "0007-vectors-target-keyset",
+    // The inventory page (§8 line 283) is cut on `(project_id, target_id, id)`, so the index
+    // the plan-side snapshot query uses cannot serve it. Additive and index-only: an
+    // interrupted run leaves a table the previous build still reads.
+    sql: `
+CREATE INDEX IF NOT EXISTS idx_vectors_project_target_id ON test_vectors (project_id, target_id, id);
+`,
+  },
 ] as const;
 
 export const KNOWN_MIGRATION_IDS: readonly string[] = MIGRATIONS.map((migration) => migration.id);
