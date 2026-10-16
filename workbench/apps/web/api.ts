@@ -7,8 +7,8 @@ import {
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
-import { verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
-import { testVectorSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
+import { contractReviewHttpRequestSchema, contractReviewReceiptSchema, planReviewHttpRequestSchema, planReviewReceiptSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { testVectorSchema, vectorPageSchema, vectorReviewHttpRequestSchema, vectorReviewReceiptSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
@@ -111,6 +111,13 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The three review writes (§8 lines 285, 287, 291). Session-bound and mutating, and - unlike
+  // the creations §8 line 261 lists - they take no Idempotency-Key: a review carries its own
+  // conflict token (the digest it looked at, and for the inventory-bound two the revision they
+  // were cut from), so a replay is a 409 rather than something to deduplicate.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/contracts/:contractId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId/review`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
   // selected by manifest file id. Neither takes a path.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
@@ -613,6 +620,107 @@ async function readEvidence(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   return jsonSuccess(ctx.requestId, 200, view.value);
 }
 
+// --- The review routes (§8 lines 285, 287, 291 / issue #58) ---------------------------
+//
+// One rule these three share that is not written in §8's table: **the reviewer is the session,
+// never the body.** Each service stores the reviewer id inside the durable review record - the
+// same record a blueprint freeze later cites - so a route that relayed a caller-named reviewer
+// would let one session write another reviewer's approval into the artifact the freeze depends
+// on. The request schemas are `strictObject` without that field, which turns a caller who sends
+// `reviewerId` (or §8's `note`, which has no storage owner anywhere) into a 400 naming the field,
+// rather than a suggestion the route quietly honours or drops.
+type ReviewInput = { decision: "approved" | "rejected"; expectedDigest: JsonValue; expectedInventoryRevision?: number };
+
+type ReviewBody = { ok: true; request: ReviewInput } | { ok: false; response: ApiResponse };
+
+function reviewBody(ctx: Context, schema: Parameters<typeof parseStrict>[0]): ReviewBody {
+  const body = readJsonBody(ctx);
+  if (!body.ok) return { ok: false, response: body.response };
+  const parsed = parseStrict(schema, body.value);
+  if (!parsed.ok) {
+    // Paths, never values (§12.1): an extra field must not be echoed back.
+    return {
+      ok: false,
+      response: errorResponse(ctx.requestId, {
+        code: "INVALID_INPUT",
+        message: "the review request does not match the named schema",
+        // The names to take out, never the values that came with them (§12.1).
+        details: { fields: parsed.error.issues.map((issue) => issue.path), rejectedKeys: parsed.error.issues.flatMap((issue) => issue.keys ?? []) },
+      }, ctx.declaration),
+    };
+  }
+  // Which of the three schemas was handed in is what decides whether the inventory revision is
+  // required, so a missing one is a schema refusal here rather than a second check that could
+  // disagree with it.
+  return { ok: true, request: parsed.value as ReviewInput };
+}
+
+// The service's own field names, with the reviewer written from the session rather than read
+// from the caller: `expectedDigest` is §8's spelling for what the services call `digest`.
+function reviewRequest(ctx: Context, request: ReviewInput): JsonObject {
+  const stored: Record<string, JsonValue> = {
+    decision: request.decision,
+    reviewerId: String((ctx.session as CurrentSession).reviewerId),
+    digest: request.expectedDigest,
+  };
+  if (request.expectedInventoryRevision !== undefined) stored.expectedInventoryRevision = request.expectedInventoryRevision;
+  return stored;
+}
+
+async function reviewVector(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const vectorId = pathId(ctx, "vectorId");
+  if (vectorId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "vector-id-malformed", "the vector segment of the path is not an opaque id", ctx.declaration);
+  }
+  const body = reviewBody(ctx, vectorReviewHttpRequestSchema);
+  if (!body.ok) return body.response;
+  const outcome = await deps.worker.call("vector.review", { projectId, vectorId, request: reviewRequest(ctx, body.request) }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const receipt = parseStrict(vectorReviewReceiptSchema, pickFields(outcome.value, ["vectorId", "digest", "eligibility", "reasons", "inventoryRevision", "auditSeq", "eventSeq"]));
+  if (!receipt.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "vector-review-shape", "the worker did not answer with a vector review receipt", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, receipt.value);
+}
+
+async function reviewContract(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const contractId = pathId(ctx, "contractId");
+  if (contractId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "contract-id-malformed", "the contract segment of the path is not an opaque id", ctx.declaration);
+  }
+  const body = reviewBody(ctx, contractReviewHttpRequestSchema);
+  if (!body.ok) return body.response;
+  const outcome = await deps.worker.call("contract.review", { projectId, contractId, request: reviewRequest(ctx, body.request) }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const receipt = parseStrict(contractReviewReceiptSchema, pickFields(outcome.value, ["contractId", "contractKey", "revision", "digest", "reviewStatus", "auditSeq", "eventSeq"]));
+  if (!receipt.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "contract-review-shape", "the worker did not answer with a contract review receipt", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, receipt.value);
+}
+
+async function reviewPlan(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const planId = pathId(ctx, "planId");
+  if (planId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "plan-id-malformed", "the plan segment of the path is not an opaque id", ctx.declaration);
+  }
+  const body = reviewBody(ctx, planReviewHttpRequestSchema);
+  if (!body.ok) return body.response;
+  const outcome = await deps.worker.call("plan.review", { projectId, planId, request: reviewRequest(ctx, body.request) }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const receipt = parseStrict(planReviewReceiptSchema, pickFields(outcome.value, ["planId", "digest", "inventoryDigest", "selectedCount", "excludedCount", "graphRevision", "inventoryRevision", "reviewStatus", "auditSeq", "eventSeq"]));
+  if (!receipt.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "plan-review-shape", "the worker did not answer with a plan review receipt", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, receipt.value);
+}
+
 async function readVector(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   const vectorId = pathId(ctx, "vectorId");
@@ -900,6 +1008,14 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await downloadExport(ctx, deps);
     } else if (route.method === "POST" && route.template.endsWith("/exports")) {
       response = await createExport(ctx, deps);
+    } else if (route.method === "POST" && route.template.endsWith("/review")) {
+      // One branch for three routes, chosen by the resource the path names: the commands take
+      // different ids, and two of the three are inventory-bound while the contract one is not.
+      response = route.template.includes("/vectors/")
+        ? await reviewVector(ctx, deps)
+        : route.template.includes("/contracts/")
+          ? await reviewContract(ctx, deps)
+          : await reviewPlan(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/exports")) {
       response = await listExports(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/files/:fileId")) {

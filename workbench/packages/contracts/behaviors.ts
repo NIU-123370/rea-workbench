@@ -97,6 +97,66 @@ export const contractReviewRequestSchema = z.strictObject({
   }
 });
 
+// --- The review routes' own surface (§8 lines 287 and 291 / issue #58) -----------------
+//
+// Two deliberate differences from the service request schemas above, and both are the point.
+//
+// `expectedDigest` is §8's spelling; the service calls the same value `digest`. The boundary
+// speaks the documented name and the handler maps it, so the document stays the contract a
+// page can code against.
+//
+// There is no `reviewerId` field here, and `strictObject` is what makes a caller that sends
+// one a refusal rather than a suggestion. The service stores the reviewer *in the review record
+// the blueprint freeze later cites*, so a route that relayed a caller-named reviewer would let
+// any session write someone else's approval into the durable record. The handler writes the
+// session's own reviewer id and nothing else can.
+//
+// §8 also names a `note:string`. Nothing in the storage model or §12.2's journal field list has
+// an owner for it, so this schema does not accept one: a page must not be able to believe it
+// recorded a reason that no row kept. Recorded as a deviation on issue #58 rather than dropped in
+// silence.
+
+export const REVIEW_DECISIONS = ["approved", "rejected"] as const;
+
+export const contractReviewHttpRequestSchema = z.strictObject({
+  decision: z.enum(REVIEW_DECISIONS),
+  expectedDigest: digestSchema.nullable(),
+});
+
+export const planReviewHttpRequestSchema = z.strictObject({
+  decision: z.enum(REVIEW_DECISIONS),
+  expectedDigest: digestSchema.nullable(),
+  expectedInventoryRevision: z.int().nonnegative(),
+});
+
+// The receipt is what the review command actually answers: the decision's outcome on that
+// record, not the record itself. §8's third column says "200 ContractRevision" and
+// "200 VerificationPlan", and no command on the closed surface returns those bodies -
+// `contract.*` and `plan.*` have no read. Saying so from a named schema is the honest version
+// of a reply that would otherwise be a dump of whatever the service happened to build.
+export const contractReviewReceiptSchema = z.strictObject({
+  contractId: idSchema,
+  contractKey: nonEmptyString,
+  revision: z.int().nonnegative(),
+  digest: digestSchema,
+  reviewStatus: z.enum(REVIEW_DECISIONS),
+  auditSeq: z.int().nonnegative(),
+  eventSeq: z.int().nonnegative().nullable(),
+});
+
+export const planReviewReceiptSchema = z.strictObject({
+  planId: idSchema,
+  digest: digestSchema,
+  inventoryDigest: digestSchema,
+  selectedCount: z.int().nonnegative(),
+  excludedCount: z.int().nonnegative(),
+  graphRevision: z.int().nonnegative(),
+  inventoryRevision: z.int().nonnegative(),
+  reviewStatus: z.enum(REVIEW_DECISIONS),
+  auditSeq: z.int().nonnegative(),
+  eventSeq: z.int().nonnegative().nullable(),
+});
+
 export const excludedVectorSchema = z.discriminatedUnion("reasonCode", [
   z.strictObject({
     vectorId: idSchema,
