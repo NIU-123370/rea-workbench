@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { Digest } from "../../domain/canonical-json.ts";
 import { asDigest } from "../../domain/canonical-json.ts";
-import type { Id, Instant } from "../../domain/identity.ts";
+import type { Id } from "../../domain/identity.ts";
 import { asId, asInstant } from "../../domain/identity.ts";
 import type { JsonValue } from "../../domain/json-value.ts";
 import type { Result } from "../../domain/result.ts";

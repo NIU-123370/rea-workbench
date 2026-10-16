@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   acquireWorkerLock,
@@ -16,7 +16,7 @@ import { MIGRATIONS } from "../../packages/adapters/storage/migrations.ts";
 import { ArtifactStore, OWNERSHIP_MARKER } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
-import type { Id, Instant } from "../../packages/domain/identity.ts";
+import type { Id } from "../../packages/domain/identity.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
 import type { ArtifactRow, EventDraft, EvidenceRow, JobRow, TargetRow } from "../../packages/application/ports.ts";
 
@@ -29,7 +29,6 @@ const HEX_A = ("a" as const).repeat(64) as Digest;
 const EV_A = `ev_${HEX_A}`;
 
 let root: string;
-let dataDir: string;
 let db: DatabaseSync;
 let writer: SqliteStorageWriter;
 let store: ArtifactStore;
@@ -37,7 +36,6 @@ const heldLocks: { release: () => Promise<void> }[] = [];
 
 beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "rea-wb-it-"));
-  dataDir = path.join(root, "data");
   await writeFile(path.join(root, "note.txt"), "x");
   const lock = await acquireWorkerLock(root);
   if (!lock.ok) throw new Error(JSON.stringify(lock.error));
