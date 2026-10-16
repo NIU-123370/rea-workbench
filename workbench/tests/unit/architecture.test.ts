@@ -101,6 +101,10 @@ const RULES: Record<string, Rule> = {
       "node:sqlite",
       "node:child_process",
       "node:readline",
+      // The offline restore stages a file and swaps it in, and it must wait for the bytes to
+      // be on disk before it says so. That is the promise-based `fs`, not the sync form the
+      // entrypoint has no reason to reach for.
+      "node:fs/promises",
       // The entrypoint has to turn its own `file:` URL into a path to find the installed
       // package beside it. `new URL(...).pathname` is not that conversion - it hands back
       // the percent-encoded form, and a project under a path with a space or a CJK
