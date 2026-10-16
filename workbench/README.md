@@ -43,6 +43,7 @@ npm ci
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
+| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
 | `tests/{unit,integration,fixtures,support}` | 纯逻辑门禁、真 SQLite / 真文件门禁、固定 envelope fixture，以及跨套件共用的交接数据播种（`support/blueprint-seed.ts`）                                       |
 
 Builder 生成支路（F08 / A07 / issue #19）的边界：
@@ -92,6 +93,27 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   报告行与 artifact 由测试按 schema 一致地写入），不是从抓包到 PASS 的端到端；HTTP 层三条导出
   路由只测了路由、会话、CSRF、严格体与拒绝映射，**201 与 ZIP 字节的 happy path 还没在 HTTP 上
   走过**；UI 也还没有导出入口。
+
+发布门禁：对账、测量与备份回滚（A12 / A13 / issue #23）：
+
+- `npm run docs:check` 直接读 `docs/TESTPLAN.md` 的 §3 与 `docs/PRD.md` 的验收表，缺号、重号、
+  越界、指向不存在的 A 编号、以及任何一条 A 没有任何 T 覆盖，都是命令失败而不是提示。当前读数
+  17 条用例 / 13 条验收，0 条不一致；`infra/release/docs-check.mjs` 不复制文档内容，两份文档仍是
+  唯一来源。
+- 迁移运行器新增 `deferForeignKeys`：只有声明了它的迁移才在事务外临时关掉外键强制（pragma 在事务
+  内被 SQLite 忽略），并且每种迁移提交前都跑 `PRAGMA foreign_key_check`——检查不干净就整笔回滚、
+  不写 `schema_migrations`。未声明的迁移若试图删掉还有子行的父表，仍会被拒。
+- 备份是两半：SQLite 一致性快照 + 逐 artifact 的 manifest（class / sha256 / 字节数 / storage_key，
+  摘要被扣住时带 reason）。备份前先按清单核对文件存在且大小一致；核验时重新打开快照、比对行与
+  manifest、并把磁盘文件再哈希一遍。缺文件、改内容、manifest 多写一条没跑过的迁移，都是具体原因
+  而不是「成功」。旧构建读到不认识的迁移 id 就拒开库（`MIGRATION_UNKNOWN`），`planRestore` 同样
+  拒恢复。
+- **T17 只是本地测量，不是 A13 达标**：`npm run perf:t17` 用固定 fixture（1000 条记录 → 200 可见
+  节点 + 400 边）量 `buildMiddlePanel` + `listView`，暖态 ≥30 次、nearest-rank p95；本机
+  10-16 那轮 p50 0.16 ms / p95 0.27 ms / max 0.48 ms（40 个样本）。但记录里
+  `gateHostSatisfied=false`，并且写明三件没量：浏览器渲染（这里没有真浏览器 lane）、HAR 导入耗时
+  （需要 REA provider）、采集/模型等待。A13 要求 Linux x64 + 真浏览器，本仓未在真宿主上跑过，
+  CI 也只把这条记录当 advisory 上传。
 
 ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
 
