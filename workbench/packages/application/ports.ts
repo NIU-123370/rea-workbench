@@ -322,6 +322,14 @@ export type StorageTransaction = {
   // Worker-wide recovery scans: a restart does not know which project it lost a
   // job in, so these are deliberately not project-filtered (§11).
   listJobsByStates(states: readonly JobState[], limit: number): JobRow[];
+  // The project's own job page (§8 line 277): newest first, cut strictly after the
+  // cursor row on the same key the ORDER BY uses, at most `limit` rows. A caller that
+  // asks for one more than the page size can tell "there is more" from "this was last".
+  listJobsAfter(projectId: Id, input: { cursor: { createdAt: Instant; id: Id } | null; limit: number }): JobRow[];
+  // cleanupRetryAt is the earliest retry among a job's not-yet-complete leases (§8
+  // JobRecord), and a page of jobs has a page of leases: one bounded query here rather
+  // than one per row. `getLeaseByJob` returns a single lease and is not enough for it.
+  listLeasesForJobs(projectId: Id, jobIds: readonly Id[]): LeaseRow[];
   listOpenLeases(states: readonly CleanupState[], limit: number): LeaseRow[];
   findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null;
   insertArtifact(row: ArtifactRow): void;

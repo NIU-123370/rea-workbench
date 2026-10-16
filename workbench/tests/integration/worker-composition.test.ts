@@ -33,6 +33,7 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "project.get",
   "capture.importHar",
   "job.get",
+  "jobs.list",
   "evidence.get",
   "vector.create",
   "vector.read",
@@ -192,7 +193,9 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
     expect(report.ready).toBe(true);
     expect(report.degraded).toBe(true);
     const names = report.checks.map((check) => check.name);
-    expect(names).toEqual([...names].sort().slice().length === names.length ? names : names);
+    // Two different checks must not answer to the same name: the lookup below finds the
+    // first of them and the second would be unreadable from the terminal.
+    expect(new Set(names).size).toBe(names.length);
     expect(names).toContain("storage-layout");
     const storage = report.checks.find((check) => check.name === "storage-layout");
     const sandbox = report.checks.find((check) => check.name === "sandbox-profile");
@@ -200,7 +203,7 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
     // Exact, not a subset: the layout check is where the boot-time reclaim of an orphaned
     // Builder role run is reported, and a fact that silently disappears from a doctor report
     // is how a leftover staging directory stops being anybody's business.
-    expect(storage.facts).toEqual({ migrationsApplied: 5, sweptRoleRuns: 0 });
+    expect(storage.facts).toEqual({ migrationsApplied: 6, sweptRoleRuns: 0 });
     expect(sandbox.state).toBe("degraded");
     expect(JSON.stringify(report)).not.toContain(dataDir);
   });

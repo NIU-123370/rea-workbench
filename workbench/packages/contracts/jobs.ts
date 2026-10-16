@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { apiErrorSchema } from "./errors.ts";
-import { idSchema, instantSchema } from "./primitives.ts";
+import { idSchema, instantSchema, nonEmptyString } from "./primitives.ts";
 
 export const JOB_KINDS = ["capture", "inspect", "build", "verify"] as const;
 
@@ -62,3 +62,31 @@ export const jobRecordSchema = z.strictObject({
 });
 
 export type JobRecord = z.infer<typeof jobRecordSchema>;
+
+// --- The project's job page (DESIGN §8 line 277 / issue #55) -------------------------
+//
+// §8 names this route as the way a client recovers a build or verification resource ID:
+// the page carries each job's persisted `resultRef`, and a successful generation's
+// resultRef is the candidate ID (line 294). Without it the code tab has a candidate read
+// and nothing to address. The cursor is opaque because it is a row key this server issued,
+// not a value the page composes; the bound is here so no caller turns the left column into
+// a full table scan.
+
+export const JOB_LIST_DEFAULT_LIMIT = 50;
+export const JOB_LIST_MAX_LIMIT = 200;
+
+export const jobListRequestSchema = z.strictObject({
+  cursor: nonEmptyString.nullable().optional(),
+  // The bound lives in the read service, which is the only place that can name the
+  // refusal; the wire shape says what a limit is, not what the largest one is. An
+  // omitted field and an explicit null are the same statement here, as elsewhere (§8).
+  limit: z.int().min(1).nullable().optional(),
+});
+
+export const jobPageSchema = z.strictObject({
+  items: z.array(jobRecordSchema),
+  nextCursor: nonEmptyString.nullable(),
+});
+
+export type JobListRequest = z.infer<typeof jobListRequestSchema>;
+export type JobPage = z.infer<typeof jobPageSchema>;
