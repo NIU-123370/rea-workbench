@@ -205,7 +205,7 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
     // Exact, not a subset: the layout check is where the boot-time reclaim of an orphaned
     // Builder role run is reported, and a fact that silently disappears from a doctor report
     // is how a leftover staging directory stops being anybody's business.
-    expect(storage.facts).toEqual({ migrationsApplied: 6, sweptRoleRuns: 0 });
+    expect(storage.facts).toEqual({ migrationsApplied: 7, sweptRoleRuns: 0 });
     expect(sandbox.state).toBe("degraded");
     expect(JSON.stringify(report)).not.toContain(dataDir);
   });
@@ -258,7 +258,7 @@ describe("named commands and the local RPC (§14)", () => {
   it("keeps a builder away from the control-plane commands it has no right to", async () => {
     const created = unwrap(await request("project.create", { name: "cart-2" }, inspector)) as { id: string };
     const projectId = asId(created.id);
-    const listed = await request("vector.list", { projectId }, builder);
+    const listed = await request("vector.list", { projectId, request: { targetId: newId() } }, builder);
     expect(listed.ok).toBe(false);
     if (listed.ok) return;
     expect(listed.error.code).toBe("ACCESS_DENIED");

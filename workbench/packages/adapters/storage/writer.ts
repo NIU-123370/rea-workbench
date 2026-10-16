@@ -514,6 +514,29 @@ class SqliteTransaction implements StorageTransaction {
     return rows.map((row) => this.rowToVector(row));
   }
 
+  listVectorsAfter(
+    projectId: Id,
+    input: { targetId: Id; afterId: Id | null; publicOnly: boolean; limit: number },
+  ): VectorRow[] {
+    // The page is cut on `id`, which is the table's own order and does not move when a later
+    // row is written: an offset page would silently skip or repeat rows for anyone who paged
+    // while a capture landed. `publicOnly` is part of the query rather than a post-filter for
+    // the same reason the cut is: a holdout row removed after the fact would make the page
+    // shorter than the cursor claims and the next cursor point at a row the caller never saw.
+    const clauses = ["project_id = ?", "target_id = ?"];
+    const params: (string | number)[] = [projectId, input.targetId];
+    if (input.afterId !== null) {
+      clauses.push("id > ?");
+      params.push(input.afterId);
+    }
+    if (input.publicOnly) clauses.push("visibility = 'public'");
+    params.push(input.limit);
+    const rows = this.db
+      .prepare(`SELECT * FROM test_vectors WHERE ${clauses.join(" AND ")} ORDER BY id ASC LIMIT ?`)
+      .all(...params) as Row[];
+    return rows.map((row) => this.rowToVector(row));
+  }
+
   private rowToVector(row: Row): VectorRow {
     return {
       id: asId(String(row["id"])),

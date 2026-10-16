@@ -8,7 +8,7 @@ import {
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
-import { testVectorSchema } from "../../packages/contracts/vectors.ts";
+import { testVectorSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
@@ -105,6 +105,10 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "GET", template: `${API_PREFIX}/projects/:projectId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/jobs/:jobId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/evidence/:evidenceId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The inventory page (§8 line 283): the list a reviewer browses before opening one
+  // vector. It is the only route in this adapter whose cursor can go stale on purpose -
+  // §8 says a moved inventory is a 409, not a page that mixes two states.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
@@ -544,6 +548,45 @@ async function readJob(ctx: Context, deps: ApiDependencies): Promise<ApiResponse
   return jsonSuccess(ctx.requestId, 200, record.value);
 }
 
+async function readVectorPage(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const query = ctx.request.query;
+  // Three slots, each refused at the edge on its own terms. `targetId` must be an opaque id
+  // (a non-id here is a typo in a link, not a lookup miss); `limit` must be whole digits,
+  // because `Number("1.5")` would otherwise arrive as 1 and read as a satisfied request.
+  const targetId = query.targetId;
+  if (targetId === undefined || !isId(targetId)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "vectors-target-required", "this page needs a targetId that is an opaque id", ctx.declaration);
+  }
+  // `limit` is checked here because turning query text into a number is lossy: `1.5` would
+  // otherwise arrive as 1 and read as a satisfied request. `cursor` is *not* pre-checked —
+  // whether a cursor is ours has exactly one owner, the worker's codec, and a second guess
+  // at the edge would be a check with no observable difference behind it.
+  const rawLimit = query.limit;
+  if (rawLimit !== undefined && !/^\d+$/.test(rawLimit)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "vectors-limit-malformed", "the limit in the query is not a whole number", ctx.declaration);
+  }
+  const outcome = await deps.worker.call(
+    "vector.list",
+    {
+      projectId,
+      request: {
+        targetId,
+        cursor: query.cursor ?? null,
+        limit: query.limit === undefined ? null : Number(query.limit),
+      },
+    },
+    ctx.actor,
+  );
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const page = parseStrict(vectorPageSchema, outcome.value);
+  if (!page.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "vector-page-shape", "the worker did not answer with a page of vectors", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, page.value);
+}
+
 async function readEvidence(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   // Upstream evidence ids keep their own shape (`ev_` plus 64 hex); they are not workbench
@@ -872,6 +915,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readJob(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/evidence/:evidenceId")) {
       response = await readEvidence(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/vectors")) {
+      response = await readVectorPage(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/vectors/:vectorId")) {
       response = await readVector(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/verification-plans/:planId")) {

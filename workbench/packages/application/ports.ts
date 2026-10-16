@@ -348,6 +348,13 @@ export type StorageTransaction = {
   insertVector(row: VectorRow): void;
   updateVectorReview(row: VectorRow): void;
   getVector(projectId: Id, vectorId: Id): VectorRow | null;
+  // The inventory page (§8 line 283): cut on the row's own id so a write that lands
+  // mid-pagination neither skips nor repeats, and with the disclosure rule inside the query
+  // so a page and its cursor describe the same set.
+  listVectorsAfter(
+    projectId: Id,
+    input: { targetId: Id; afterId: Id | null; publicOnly: boolean; limit: number },
+  ): VectorRow[];
   listVectors(
     projectId: Id,
     filter: { targetId: Id | null; evidenceId: string | null; limit: number },
