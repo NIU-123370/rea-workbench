@@ -232,6 +232,8 @@ function fakeWriter(state: FakeState): StorageWriterPort {
     listVerificationsForCandidate: refused("listVerificationsForCandidate", state),
     findJobByKey: refused("findJobByKey", state),
     listJobsByStates: refused("listJobsByStates", state),
+    listJobsAfter: refused("listJobsAfter", state),
+    listLeasesForJobs: refused("listLeasesForJobs", state),
     listOpenLeases: refused("listOpenLeases", state),
     getLeaseByJob: refused("getLeaseByJob", state),
     updateLeaseCleanup: refused("updateLeaseCleanup", state),

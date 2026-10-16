@@ -52,7 +52,7 @@ REA Workbench 围绕这三个问题组织产品：
 
 ![REA Workbench 三栏工作台概念图：左侧采集、中间证据图谱、右侧契约与代码](docs/assets/rea-workbench-concept.png)
 
-*界面概念图，由 AI 辅助生成，用于展示计划中的信息布局；当前仓库尚无可运行的 Web UI。*
+*界面概念图，由 AI 辅助生成，用于展示计划中的信息布局；仓库里已有一个能在本机跑起来的三栏外壳，但它不是这张图的复刻——概念图里的采集面板、画面预览与代码编辑器尚无对应实现。*
 
 | Sandbox & Probes | Evidence Canvas | Clean-Room Studio |
 | --- | --- | --- |
@@ -145,7 +145,7 @@ V0.1 正在从基础模块走向第一条完整工作流。下表描述仓库当
 | 存储与应用规则 | 已有基础实现 | SQLite、artifact store、迁移与备份、审计、脱敏和任务生命周期。 |
 | REA 适配层 | 已有基础实现 | MCP stdio、身份探测、Evidence 响应解析与会话账本；目前以 fixture 测试覆盖。 |
 | worker 与本地 API | 已有基础实现 | 运行期装配、本机 RPC、浏览器会话、事件恢复与 API 进程本体（`npm run worker` / `npm run web`）。 |
-| 三栏界面与目标导入 | 已有基础实现 | 证据白板（Next.js 外壳 + React Flow 画布，已在真浏览器配对并读出图）、HAR 导入闭环；ASAR 静态支路与受控 Web 采集未接。 |
+| 三栏界面与目标导入 | 已有基础实现 | 证据白板（Next.js 外壳 + React Flow 画布，已在真浏览器配对并读出图）、右栏「代码」Tab 从作业页发现并读取候选文件（真浏览器取回 1036 字节正文、摘要与磁盘上的 artifact 对上）、HAR 导入闭环；ASAR 静态支路与受控 Web 采集未接。 |
 | 隔离构建与交付 | 部分实现 | 蓝图冻结与放行、SDK/OpenAPI 3.1.1 生成、差分与导出、发布门禁已有代码；broker 与沙箱进程本体未实现，隔离类门禁在本机不可声明为已通过。 |
 
 第一条纵向开发路径是 **固定 HAR → 持久 Evidence → 白板 → 蓝图 → SDK → 离线差分**。V0.1 发布还需完成受控 Web 采集、ASAR 静态支路、隔离与恢复门禁。进展和任务见 [Issues](https://github.com/NIU-123370/rea-workbench/issues) 与 [Pull requests](https://github.com/NIU-123370/rea-workbench/pulls)。

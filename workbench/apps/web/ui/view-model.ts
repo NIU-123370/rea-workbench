@@ -1,6 +1,9 @@
 import type { ClaimEvidenceState, Coverage, DisplayStatus, ProjectedStatus } from "../../../packages/domain/evidence.ts";
 import { projectClaim, projectRequiredClaims } from "../../../packages/domain/evidence.ts";
 import type { Id } from "../../../packages/domain/identity.ts";
+// `id.ts` rather than `identity.ts`: this module is reached from the browser bundle, and the
+// identity module owns `newId()`, which imports `node:crypto`.
+import { isId } from "../../../packages/domain/id.ts";
 import type { Digest } from "../../../packages/domain/canonical-json.ts";
 import type { JsonValue } from "../../../packages/domain/json-value.ts";
 
@@ -313,4 +316,28 @@ export function buildRightTabs(actor: { isBuilder: boolean; hasBlueprint: boolea
       ? { id: "report", label: "报告", enabled: false, disabledReason: "builder-needs-a-frozen-blueprint" }
       : { id: "report", label: "报告", enabled: true, disabledReason: null },
   ];
+}
+
+// Which candidate the 代码 tab reads (DESIGN §8 lines 277 and 294, issue #55).
+//
+// §8 gives the page one way to name a candidate: the job list carries each row's persisted
+// resultRef, and a successful generation's resultRef is the candidate id. So this is a scan
+// of the page the server already ordered newest-first, not a guess from a blueprint or a
+// digest. The resultRef still has to pass the id shape test before it can go into a path:
+// `result_ref` is a TEXT column, and a value that is not an id is a broken row, not a route.
+export type JobRowView = { id: string; kind: string; state: string; resultRef: string | null };
+
+export type CandidateDiscovery =
+  | { found: true; jobId: string; candidateId: string }
+  | { found: false; reason: "job-page-empty" | "no-successful-build" | "result-ref-is-not-an-id" };
+
+export function pickCandidateSource(jobs: readonly JobRowView[]): CandidateDiscovery {
+  const builds = jobs.filter((job) => job.kind === "build" && job.state === "succeeded");
+  if (jobs.length === 0) return { found: false, reason: "job-page-empty" };
+  if (builds.length === 0) return { found: false, reason: "no-successful-build" };
+  const latest = builds[0] as JobRowView;
+  if (latest.resultRef === null || !isId(latest.resultRef)) {
+    return { found: false, reason: "result-ref-is-not-an-id" };
+  }
+  return { found: true, jobId: latest.id, candidateId: latest.resultRef };
 }

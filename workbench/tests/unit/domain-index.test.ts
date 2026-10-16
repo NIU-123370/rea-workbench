@@ -8,6 +8,7 @@ import * as blueprint from "../../packages/domain/blueprint.ts";
 import * as contract from "../../packages/domain/contract.ts";
 import * as evidence from "../../packages/domain/evidence.ts";
 import * as exportDomain from "../../packages/domain/export.ts";
+import * as id from "../../packages/domain/id.ts";
 import * as identity from "../../packages/domain/identity.ts";
 import * as openApi from "../../packages/domain/openapi.ts";
 import * as plan from "../../packages/domain/plan.ts";
@@ -32,6 +33,7 @@ const MODULES: Record<string, unknown> = {
   "contract.ts": contract,
   "evidence.ts": evidence,
   "export.ts": exportDomain,
+  "id.ts": id,
   "identity.ts": identity,
   "openapi.ts": openApi,
   "plan.ts": plan,
@@ -150,6 +152,18 @@ describe("domain module inventory (DESIGN §3)", () => {
     // A domain file that no test imports is untested by construction.
     expect(onDisk.filter((file) => !imported.includes(file))).toEqual([]);
     expect(imported.filter((file) => !onDisk.includes(file))).toEqual([]);
+  });
+
+  it("keeps the id shape importable from a browser bundle", () => {
+    // `id.ts` exists because a screen has to recognise an identifier without pulling
+    // `node:crypto` into the bundle: `identity.ts` owns `newId()`, and importing the
+    // identity module is how a client component ends up asking for a Node builtin.
+    const source = readFileSync(path.join(DOMAIN_DIR, "id.ts"), "utf8");
+    expect(source).not.toMatch(/from\s*["']node:/);
+    // One owner of the pattern: the identity module re-exports this one rather than
+    // keeping a second copy that can drift.
+    expect(identity.isId).toBe(id.isId);
+    expect(identity.ID_PATTERN).toBe(id.ID_PATTERN);
   });
 
   it("exposes each spec-named rule as a function", () => {

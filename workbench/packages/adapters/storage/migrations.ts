@@ -378,6 +378,16 @@ DROP TABLE artifacts;
 ALTER TABLE artifacts_new RENAME TO artifacts;
 `,
   },
+  {
+    id: "0006-jobs-project-created",
+    // The left column's job page (§8 line 277) reads a project's jobs newest-first with a
+    // keyset cursor, and `idx_jobs_project_state` cannot serve it: the page is not filtered
+    // by state, and its cut is on (created_at, id). Additive and index-only, so an
+    // interrupted run leaves a table that is still readable by the previous build.
+    sql: `
+CREATE INDEX IF NOT EXISTS idx_jobs_project_created ON jobs (project_id, created_at DESC, id DESC);
+`,
+  },
 ] as const;
 
 export const KNOWN_MIGRATION_IDS: readonly string[] = MIGRATIONS.map((migration) => migration.id);

@@ -9,8 +9,8 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, listView } from "../../ui/view-model.ts";
-import type { DirectedInquiry, GraphEdgeView, GraphNodeView, LeftPanel, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, listView, pickCandidateSource } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, LeftPanel, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -38,6 +38,20 @@ export type GraphViewPayload = {
 
 export type SessionState = "unknown" | "paired" | "unpaired";
 
+// The two reads the 代码 tab needs (§8 lines 277, 294-296). Cast rather than re-validated:
+// the API replied through `jobPageSchema` and `candidateViewSchema` on its way out, and a
+// second parser in the browser bundle would be a second owner of the same wire contract.
+// `error` is the safe projection the worker already sanitised (§12.1), never a raw message.
+export type JobsPagePayload = {
+  items: { id: string; kind: string; state: string; cleanupState: string; resultRef: string | null; error: { code: string; message: string } | null }[];
+  nextCursor: string | null;
+};
+
+export type CandidatePayload = {
+  id: string;
+  files: { id: string; path: string; byteLength: number; language: string }[];
+};
+
 async function getJson(path: string): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string }> {
   const response = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
   const payload: unknown = await response.json().catch(() => null);
@@ -54,6 +68,15 @@ async function getJson(path: string): Promise<{ ok: true; value: unknown } | { o
 function readEvidenceInquiry(evidenceId: string): DirectedInquiry {
   return { kind: "read-evidence", subjectId: evidenceId, gaps: ["operator-jumped-to-evidence"], request: { evidenceId } };
 }
+
+// What the 代码 tab says when there is nothing to show, named by the step that came up
+// empty. "No candidate" and "no build job" are different operator problems, and one generic
+// empty state would hide which of them this is.
+const NO_CANDIDATE_LINE: Record<Extract<CandidateDiscovery, { found: false }>["reason"], string> = {
+  "job-page-empty": "本项目还没有任何作业记录：生成候选前先有一次成功的构建。",
+  "no-successful-build": "作业清单里没有成功的构建作业，所以还没有可读的候选。",
+  "result-ref-is-not-an-id": "最近的构建作业没有把候选 id 写在 resultRef 上（§8 line 294）。",
+};
 
 // The report column repeats what the colour was made of rather than restating a colour:
 // the coverage state, the examined/total pair when the row has one, and the reasons the
@@ -148,6 +171,10 @@ export function PairingForm(props: { onPaired: () => void }): React.ReactElement
 
 export function Workbench(props: { projectId: string }): React.ReactElement {
   const [graph, setGraph] = useState<GraphViewPayload | null>(null);
+  const [jobs, setJobs] = useState<JobsPagePayload | null>(null);
+  const [candidate, setCandidate] = useState<CandidatePayload | null>(null);
+  const [source, setSource] = useState<{ fileId: string; content: string; sha256: string } | null>(null);
+  const [codeNotice, setCodeNotice] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState>("unknown");
   const [mode, setMode] = useState<"canvas" | "list">("canvas");
   const [activeTab, setActiveTab] = useState<RightTab["id"]>("contract");
@@ -164,11 +191,47 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       return;
     }
     setGraph(view.value as GraphViewPayload);
+    // The candidate is discovered, not typed (§8 lines 277 + 294): the job page names the
+    // build job whose resultRef is the candidate, and only then does the file list have an
+    // address. A refusal here says which of those two steps did not happen.
+    const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+    if (!page.ok) {
+      setCodeNotice(`作业清单读取被拒：${page.reason}`);
+      return;
+    }
+    const loaded = page.value as JobsPagePayload;
+    setJobs(loaded);
+    const picked = pickCandidateSource(loaded.items);
+    if (!picked.found) {
+      setCodeNotice(NO_CANDIDATE_LINE[picked.reason]);
+      return;
+    }
+    const files = await getJson(`/api/v1/projects/${props.projectId}/candidates/${picked.candidateId}`);
+    if (!files.ok) {
+      setCodeNotice(`候选文件清单读取被拒：${files.reason}`);
+      return;
+    }
+    setCandidate(files.value as CandidatePayload);
   }, [props.projectId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const openFile = useCallback(
+    async (fileId: string) => {
+      if (candidate === null) return;
+      const got = await getJson(`/api/v1/projects/${props.projectId}/candidates/${candidate.id}/files/${fileId}`);
+      if (!got.ok) {
+        setCodeNotice(`文件正文读取被拒：${got.reason}`);
+        return;
+      }
+      const body = got.value as { content: string; sha256: string };
+      setCodeNotice(null);
+      setSource({ fileId, content: body.content, sha256: body.sha256 });
+    },
+    [candidate, props.projectId],
+  );
 
   // The wire names the endpoints `fromKey`/`toKey`; the view model names them `from`/`to`.
   // One mapping, shared by the judgement and the canvas, so the two cannot disagree about
@@ -206,11 +269,19 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     });
   }, [graph]);
 
+  // The left column names the state and the cleanup state it read (§8: 左栏不从日志推断重试
+  // 时间), so the page's newest job is passed to the same builder the headless render uses.
+  const newestJob = useMemo(() => {
+    const first = jobs?.items[0];
+    if (first === undefined) return null;
+    return { id: first.id as Id, state: first.state, cleanupState: first.cleanupState, errorJson: first.error };
+  }, [jobs]);
+
   const left: LeftPanel | { reason: string } =
     graph === null
       ? { reason: "graph-unreadable" }
       : buildLeftPanel({
-          job: null,
+          job: newestJob,
           target: graph.targetId === null ? null : { id: graph.targetId as Id, kind: "har", snapshotDigest: null as Digest | null },
           limitations: graph.truncated ? ["视图已截断：只读到前 500 条"] : [],
           scopeLabel: graph.note ?? "本项目的图",
@@ -281,7 +352,29 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           </ul>
         ) : null}
         {activeTab === "code" ? (
-          <p data-code-empty>尚无候选代码可读：读取候选文件的命令尚未挂载（issue #19 的余下部分）。</p>
+          candidate === null ? (
+            <p data-code-empty>{codeNotice ?? "正在读取作业清单…"}</p>
+          ) : (
+            <div data-code-candidate={candidate.id}>
+              <ul>
+                {candidate.files.map((file) => (
+                  <li key={file.id}>
+                    <button type="button" data-code-file={file.id} onClick={() => void openFile(file.id)}>
+                      {`${file.path}（${file.language}，${String(file.byteLength)} 字节）`}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {codeNotice === null ? null : <p data-code-notice>{codeNotice}</p>}
+              {source === null ? (
+                <p data-code-note>选择一个文件读取正文。</p>
+              ) : (
+                <pre data-code-content data-code-file-id={source.fileId} data-code-sha256={source.sha256}>
+                  {source.content}
+                </pre>
+              )}
+            </div>
+          )
         ) : null}
       </section>
       {mode === "list" ? (

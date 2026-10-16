@@ -44,6 +44,7 @@ import { BUILDER_STAGING_DIRNAME, makeBuilderProcessProducer, sweepRoleStaging }
 import { ExportService } from "../../packages/application/export-service.ts";
 import { GraphReadService } from "../../packages/application/graph-read.ts";
 import { CandidateReadService } from "../../packages/application/candidate-read.ts";
+import { JobReadService } from "../../packages/application/job-read.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
 
@@ -58,6 +59,7 @@ import { createProjectRequestSchema } from "../../packages/contracts/resources.t
 import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
 import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
 import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
+import { jobListRequestSchema } from "../../packages/contracts/jobs.ts";
 import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../packages/contracts/candidate.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
@@ -91,6 +93,9 @@ export const COMMAND_NAMES = [
   "project.get",
   "capture.importHar",
   "job.get",
+  // The project's job page (§8 line 277): the documented way to recover a build or
+  // verification resource id, because each row carries its persisted resultRef.
+  "jobs.list",
   "evidence.get",
   "vector.create",
   "vector.read",
@@ -434,6 +439,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const verifications = new VerificationService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
   const graph = new GraphReadService({ storage: writer });
   const candidateRead = new CandidateReadService({ storage: writer, artifacts: store });
+  const jobRead = new JobReadService({ storage: writer });
   const exports_ = new ExportService({
     storage: writer,
     artifacts: store,
@@ -520,27 +526,22 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
         }),
       );
     },
-    "job.get": (payload) => {
+    "job.get": (payload, actor) => {
       const projectId = pickId(payload, "projectId");
       const jobId = pickId(payload, "jobId");
       const refused = missing(projectId, jobId);
       if (refused !== null) return refused;
-      const read = writer.transact((tx) => tx.getJob(projectId as Id, jobId as Id));
-      if (!read.ok) return relayPort(read);
-      const job = read.value;
-      if (job === null) return gateFail("NOT_FOUND", "job-unknown", "job not found");
-      return relay({
-        ok: true,
-        value: {
-          id: job.id,
-          kind: job.kind,
-          state: job.state,
-          cleanupState: job.cleanupState,
-          deadlineAt: job.deadlineAt,
-          retryAt: job.retryAt,
-          resultRef: job.resultRef,
-        },
-      });
+      return relay(jobRead.get(projectId as Id, actor, jobId as Id));
+    },
+    "jobs.list": (payload, actor) => {
+      const parsed = jobListRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "jobs-list", "the job page request was rejected");
+      return relay(
+        jobRead.list(projectIdOr(payload), actor, {
+          cursor: parsed.data.cursor ?? null,
+          limit: parsed.data.limit,
+        }),
+      );
     },
     "evidence.get": async (payload) => {
       const projectId = pickId(payload, "projectId");

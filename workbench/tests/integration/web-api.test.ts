@@ -14,6 +14,7 @@ import { runWebProcess } from "../../apps/web/main.ts";
 import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
+import { JOB_LIST_MAX_LIMIT, jobPageSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
 import { SESSION_COOKIE_NAME } from "../../packages/application/session.ts";
@@ -886,5 +887,96 @@ describe("the candidate file routes (§8 lines 295-296 / issue #19)", () => {
     });
     expect(missingFile.status, missingFile.text).toBe(404);
     expect(missingFile.text).toContain("candidate-unknown");
+  });
+});
+
+// GET /projects/:p/jobs over the real socket (§8 line 277 / issue #55).
+//
+// The page itself is exercised against real rows in tests/integration/job-read.test.ts; what
+// this route has to prove is the HTTP half: it is a named route behind a session, its query
+// parameters are refused at the edge rather than coerced, and the worker's bound refusal
+// arrives as a status rather than as a silently smaller page.
+
+describe("the job page route (§8 line 277 / issue #55)", () => {
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const body = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: body.data?.csrfToken ?? body.csrfToken ?? "",
+    };
+  }
+
+  it("holds the route behind a session and does not open the projects namespace", async () => {
+    const anonymous = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs`);
+    expect(anonymous.status).toBe(401);
+    const session = await pairSession();
+    const neighbour = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs/all`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(neighbour.status, neighbour.text).toBe(404);
+    expect(neighbour.text).toContain("route-unknown");
+  });
+
+  it("answers a project with no jobs as an empty page, not as an error", async () => {
+    const session = await pairSession();
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name: "jobs-route" }),
+      headers: {
+        host: `127.0.0.1:${String(address.port)}`,
+        origin: `http://127.0.0.1:${String(address.port)}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `jobs-route-${String(newId())}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const project = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    const projectId = (project.data?.id ?? project.id) as string;
+    const listed = await call("GET", `${API_PREFIX}/projects/${projectId}/jobs`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(listed.status, listed.text).toBe(200);
+    const page = jobPageSchema.safeParse(JSON.parse(listed.text) as JsonValue);
+    if (!page.success) throw new Error(`the page reply did not match the contract: ${listed.text}`);
+    expect(page.data.items).toEqual([]);
+    expect(page.data.nextCursor).toBeNull();
+  });
+
+  it("refuses a query it cannot read as a number at the edge, before any command runs", async () => {
+    const session = await pairSession();
+    for (const limit of ["abc", "1.5", "-3", ""]) {
+      const bad = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs?limit=${limit}`, {
+        headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+      });
+      expect(bad.status, `${limit}: ${bad.text}`).toBe(400);
+      expect(bad.text).toContain("jobs-limit-malformed");
+    }
+  });
+
+  it("relays the page bound as a refusal rather than serving a quietly smaller page", async () => {
+    const session = await pairSession();
+    const over = await call("GET", `${API_PREFIX}/projects/${newId()}/jobs?limit=${String(JOB_LIST_MAX_LIMIT + 1)}`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(over.status, over.text).toBe(413);
+    expect(over.text).toContain("jobs-limit");
+  });
+
+  it("relays a cursor this server never issued as a named refusal", async () => {
+    const session = await pairSession();
+    const forged = await call(
+      "GET",
+      `${API_PREFIX}/projects/${newId()}/jobs?cursor=${encodeURIComponent("not-a-cursor")}`,
+      { headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie } },
+    );
+    expect(forged.status, forged.text).toBe(400);
+    expect(forged.text).toContain("jobs-cursor");
   });
 });

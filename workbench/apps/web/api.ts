@@ -8,6 +8,7 @@ import {
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema } from "../../packages/contracts/resources.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
+import { jobPageSchema } from "../../packages/contracts/jobs.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
@@ -86,8 +87,11 @@ const ROUTES: readonly RouteSpec[] = [
   // for the same view the tested headless renderer gets without inventing a second
   // place where a claim's status is decided.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/graph`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
-  // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:
-  // the first lists the files a candidate published, the second returns one file's content
+  // The project's job page (§8 line 277 / issue #55). Cursor and limit ride the query
+  // because the read is a page, not a resource: §8 names this route as where a client
+  // recovers a build or verification resource id from the persisted resultRef.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/jobs`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
   // selected by manifest file id. Neither takes a path.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId/files/:fileId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
@@ -387,6 +391,29 @@ function pathId(ctx: Context, name: string): Id | null {
   return isId(raw) ? asId(raw) : null;
 }
 
+// GET /projects/:p/jobs (§8 line 277). The limit is checked here rather than coerced:
+// `Number("abc")` is NaN, and a NaN that reaches the worker as JSON null would read as
+// "the caller did not state a limit" instead of "the caller stated a broken one".
+async function listJobs(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const rawLimit = ctx.request.query.limit;
+  if (rawLimit !== undefined && !/^\d+$/.test(rawLimit)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "jobs-limit-malformed", "the limit in the query is not a whole number", ctx.declaration);
+  }
+  const outcome = await deps.worker.call(
+    "jobs.list",
+    { projectId, request: { cursor: ctx.request.query.cursor ?? null, limit: rawLimit === undefined ? null : Number(rawLimit) } },
+    ctx.actor,
+  );
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const page = parseStrict(jobPageSchema, outcome.value);
+  if (!page.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "job-page-shape", "the worker did not answer with a page of jobs", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, page.value);
+}
+
 async function readCandidate(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   const candidateId = pathId(ctx, "candidateId");
@@ -681,6 +708,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readCandidate(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/graph")) {
       response = await readGraph(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/jobs")) {
+      response = await listJobs(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {

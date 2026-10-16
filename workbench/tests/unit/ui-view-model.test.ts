@@ -13,6 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
+  pickCandidateSource,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
 
@@ -290,5 +291,42 @@ describe("the canvas topology and the list's own actions (issue #18)", () => {
     expect(gapRow.inquiry.kind).toBe("read-evidence");
     expect(gapRow.reasonLine).toContain("claim-stale");
     claims.set(ac, seen);
+  });
+});
+
+// Which candidate the 代码 tab reads (§8 lines 277 + 294 / issue #55).
+//
+// The screen is not given a candidate id; it recovers one from the job page. So the rule
+// that picks the row is a product rule, not a fetch detail: only a successful build counts,
+// the first such row on a newest-first page is the one, and a resultRef that is not an
+// opaque id never goes into a URL path.
+
+describe("candidate discovery from the job page (§8 line 277)", () => {
+  const CANDIDATE = "2b1f6d4a-0ce7-4a3d-9a1a-6f0d9d5f1234";
+  const OTHER = "7c2a5e3b-1d8f-4b2c-8e6d-3f0a9c1b5246";
+  const job = (id: string, kind: string, state: string, resultRef: string | null = null) => ({ id, kind, state, resultRef });
+
+  it("names the candidate the newest successful build delivered", () => {
+    const picked = pickCandidateSource([
+      job("j2", "verify", "succeeded", "report-42"),
+      job("j1", "build", "succeeded", CANDIDATE),
+      job("j0", "build", "succeeded", OTHER),
+    ]);
+    expect(picked).toEqual({ found: true, jobId: "j1", candidateId: CANDIDATE });
+  });
+
+  it("says which step came up empty rather than showing a blank panel", () => {
+    expect(pickCandidateSource([])).toEqual({ found: false, reason: "job-page-empty" });
+    expect(pickCandidateSource([job("j1", "capture", "succeeded", null), job("j2", "build", "failed", null)])).toEqual({
+      found: false,
+      reason: "no-successful-build",
+    });
+  });
+
+  it("refuses to put a non-identifier into a route path", () => {
+    for (const ref of [null, "", "artifacts/candidate.ts", `../../etc/passwd`, CANDIDATE.slice(0, -1) + "z"]) {
+      const result = pickCandidateSource([job("j1", "build", "succeeded", ref)]);
+      expect(result).toEqual({ found: false, reason: "result-ref-is-not-an-id" });
+    }
   });
 });

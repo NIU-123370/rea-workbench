@@ -21,7 +21,8 @@ import type { Actor } from "./actor.ts";
 import { isBuilder } from "./actor.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, issueNames, type GateFailure } from "./gate-failure.ts";
-import type { ArtifactPort, CandidateRow, StorageWriterPort } from "./ports.ts";
+import { transition } from "./job-queue.ts";
+import type { ArtifactPort, CandidateRow, JobRow, StorageWriterPort } from "./ports.ts";
 import type { Err } from "./gate-failure.ts";
 
 // The Builder generation seam (DESIGN §7.3, §10 / PRD F08 A07, issue #19).
@@ -361,6 +362,29 @@ export class BuilderService {
             ),
           };
         }
+        // §11 decides who may hold a result: a queued job passes through running first, and
+        // a failed, cancelled or interrupted job never takes one. A repair attempt on a job
+        // that already succeeded keeps it succeeded and re-points its result at the newest
+        // candidate, which is what §5 means by 每次修复生成新 candidate.
+        let finishedJob: JobRow;
+        if (job.state === "succeeded") {
+          finishedJob = { ...job, updatedAt: createdAt };
+        } else {
+          const started = job.state === "queued" ? transition(job, "running", createdAt) : job;
+          const moved = started === null ? null : transition(started, "succeeded", createdAt);
+          if (moved === null) {
+            return {
+              kind: "failure",
+              failure: gateFail(
+                "REVISION_CONFLICT",
+                "generation-job-terminal",
+                `a job in state ${job.state} does not take a result`,
+                { jobState: job.state },
+              ),
+            };
+          }
+          finishedJob = moved;
+        }
         let primaryArtifactId: Id = artifactIds[0] as Id;
         const artifactRefs: Id[] = [];
         published.forEach((entry, index) => {
@@ -403,6 +427,18 @@ export class BuilderService {
           },
         };
         tx.insertCandidate(row);
+        // §8 line 294: a successful generation's job carries the candidate id as its
+        // resultRef, and line 277's job page is the only documented way a client recovers
+        // that id. Without this write the candidate exists, is addressable in the store, and
+        // cannot be named by anything the UI is allowed to call.
+        tx.updateJob({ ...finishedJob, resultRef: candidateId, updatedAt: createdAt });
+        tx.appendEvent({
+          projectId,
+          type: "job.updated",
+          aggregateId: job.id,
+          payloadJson: { resourceIds: [job.id, candidateId], state: finishedJob.state },
+          createdAt,
+        });
         return {
           kind: "committed",
           value: {

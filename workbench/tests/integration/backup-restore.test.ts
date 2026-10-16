@@ -263,6 +263,7 @@ describe("an interrupted upgrade (D23 / T16)", () => {
       "0002-evidence-graph",
       "0003-delivery",
       "0004-events-audit",
+      "0006-jobs-project-created",
     ]);
     handle.exec("CREATE TABLE artifacts_new (id TEXT PRIMARY KEY)");
 

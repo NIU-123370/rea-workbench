@@ -18,6 +18,7 @@ import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
 import { CANDIDATE_BODY_LIMIT_BYTES, CandidateReadService } from "../../packages/application/candidate-read.ts";
+import { JobReadService } from "../../packages/application/job-read.ts";
 import { digestBytes } from "../../packages/domain/canonical-json.ts";
 import { readAudit } from "../../packages/application/audit.ts";
 import type { Actor } from "../../packages/application/actor.ts";
@@ -466,5 +467,108 @@ describe("reading a committed candidate back (§8 lines 295-296, issue #19)", ()
       // refusal branch itself is pinned with a fake port in tests/unit/candidate-read.ts.
       expect(file.byteLength).toBeLessThanOrEqual(CANDIDATE_BODY_LIMIT_BYTES);
     }
+  });
+});
+
+// The generation job's result (§8 line 294, read back through line 277 / issue #55).
+//
+// §8 spells the write into the job row as part of a successful generation: the job's
+// resultRef *is* the candidate id, and the job page is the only documented way for a client
+// to recover it. A candidate that exists but cannot be named by anything the UI may call is
+// the failure this block pins.
+
+describe("the generation job carries the candidate it produced (§8 line 294)", () => {
+  function jobWith(state: JobRow["state"]): Id {
+    const id = newId();
+    const created = nowInstant();
+    const written = writer.transact((tx) => {
+      const outcome = tx.insertJob({
+        id,
+        projectId,
+        targetId,
+        kind: "build",
+        state,
+        cleanupState: "pending",
+        inputJson: {},
+        resultRef: null,
+        errorJson: null,
+        idempotencyKey: `gen-${String(id)}`,
+        requestDigest: asDigest(hex(`gen-${String(id)}`)),
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: created,
+        updatedAt: created,
+      });
+      if (outcome.outcome !== "inserted") throw new Error("job not inserted");
+      return true;
+    });
+    if (!written.ok) throw new Error(JSON.stringify(written.error));
+    return id;
+  }
+
+  const readJobs = () => new JobReadService({ storage: writer });
+
+  it("writes the candidate id onto the job and reports it from the same read the page uses", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "result-ref" });
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, budget()));
+    const reads = readJobs();
+    const single = unwrap(reads.get(projectId, inspector, jobId));
+    expect(single.resultRef).toBe(committed.candidateId);
+    expect(single.state).toBe("succeeded");
+    // The page is what the code tab actually reads, so the same row has to answer there too.
+    const listed = unwrap(reads.list(projectId, inspector, { cursor: null, limit: null })).items.find(
+      (item) => item.id === jobId,
+    );
+    expect(listed?.resultRef).toBe(committed.candidateId);
+  });
+
+  it("moves the result to the newest candidate when a repair re-runs the same job", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "result-repair" });
+    const first = unwrap(await service.generate(projectId, builder, blueprintId, budget(2)));
+    const second = unwrap(await service.generate(projectId, builder, blueprintId, budget(2)));
+    expect(second.candidateId).not.toBe(first.candidateId);
+    // §5: 每次修复生成新 candidate. The job is the one that was run, so its result is the
+    // candidate it last delivered — not the first one, which the page would otherwise freeze.
+    expect(unwrap(readJobs().get(projectId, inspector, jobId)).resultRef).toBe(second.candidateId);
+    expect(unwrap(readJobs().get(projectId, inspector, jobId)).state).toBe("succeeded");
+  });
+
+  it("takes a queued job through running before it lets the row hold a result", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "result-queued" });
+    const id = jobWith("queued");
+    unwrap(await service.generate(projectId, builder, blueprintId, { ...budget(), jobId: id }));
+    // §11's state machine is not a suggestion here: queued goes to running, and only
+    // running may report success.
+    const states = writer.transact((tx) => tx.getJob(projectId, id));
+    if (!states.ok) throw new Error(JSON.stringify(states.error));
+    expect(states.value?.state).toBe("succeeded");
+    expect(unwrap(readJobs().get(projectId, inspector, id)).resultRef).not.toBeNull();
+  });
+
+  it("refuses to put a result on a job a recovery already interrupted, and leaves no candidate", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "result-interrupted" });
+    const id = jobWith("interrupted");
+    const failure = await failureOf(service.generate(projectId, builder, blueprintId, { ...budget(), jobId: id }));
+    expect(failure.code).toBe("REVISION_CONFLICT");
+    expect(failure.reason).toBe("generation-job-terminal");
+    expect((failure.details as Record<string, unknown>)["jobState"]).toBe("interrupted");
+    // The whole step is one transaction: the refused result must not have left a candidate
+    // row, an artifact or an event behind it.
+    expect(candidateRows(blueprintId)).toBe(0);
+    expect(unwrap(readJobs().get(projectId, inspector, id)).resultRef).toBeNull();
+    expect(unwrap(readJobs().get(projectId, inspector, id)).state).toBe("interrupted");
+  });
+
+  it("publishes the job.updated event that names the candidate", async () => {
+    const { blueprintId } = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name: "result-event" });
+    const id = jobWith("running");
+    const committed = unwrap(await service.generate(projectId, builder, blueprintId, { ...budget(), jobId: id }));
+    const events = writer.transact((tx) => tx.eventsAfter(projectId, 0, 200));
+    if (!events.ok) throw new Error(JSON.stringify(events.error));
+    const updated = events.value.filter((event) => event.type === "job.updated" && event.aggregateId === id);
+    expect(updated.length).toBe(1);
+    const payload = updated[0]?.payloadJson as { state?: string; resourceIds?: string[] };
+    expect(payload.state).toBe("succeeded");
+    expect(payload.resourceIds).toContain(committed.candidateId);
   });
 });

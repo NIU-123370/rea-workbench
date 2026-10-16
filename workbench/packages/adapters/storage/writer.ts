@@ -285,7 +285,43 @@ class SqliteTransaction implements StorageTransaction {
          WHERE leases.cleanup_state IN (${placeholders}) ORDER BY leases.id ASC LIMIT ?`,
       )
       .all(...states, limit) as Row[];
-    return rows.map((row) => ({
+    return rows.map((row) => this.rowToLease(row));
+  }
+
+  listJobsAfter(projectId: Id, input: { cursor: { createdAt: Instant; id: Id } | null; limit: number }): JobRow[] {
+    const conditions = ["project_id = ?"];
+    const args: (string | number)[] = [projectId];
+    // A cursor is a whole row key this code issued; `{createdAt, id}` as one object is what
+    // makes a half-cursor page from the wrong side of the key unrepresentable.
+    if (input.cursor !== null) {
+      conditions.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      args.push(input.cursor.createdAt, input.cursor.createdAt, input.cursor.id);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM jobs WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      )
+      .all(...args, input.limit) as Row[];
+    return rows.map((row) => this.rowToJob(row));
+  }
+
+  listLeasesForJobs(projectId: Id, jobIds: readonly Id[]): LeaseRow[] {
+    if (jobIds.length === 0) return [];
+    const placeholders = jobIds.map(() => "?").join(",");
+    // The join on jobs.project_id is what keeps a caller from naming another project's
+    // lease id: the rows come back only when the owning job belongs to this project (§5).
+    const rows = this.db
+      .prepare(
+        `SELECT leases.* FROM resource_leases leases
+         JOIN jobs ON jobs.id = leases.job_id
+         WHERE jobs.project_id = ? AND leases.job_id IN (${placeholders}) ORDER BY leases.id ASC`,
+      )
+      .all(projectId, ...jobIds) as Row[];
+    return rows.map((row) => this.rowToLease(row));
+  }
+
+  private rowToLease(row: Row): LeaseRow {
+    return {
       id: asId(String(row["id"])),
       jobId: asId(String(row["job_id"])),
       kind: String(row["kind"]),
@@ -295,7 +331,7 @@ class SqliteTransaction implements StorageTransaction {
       lastErrorJson: parseJson(row["last_error_json"] === null ? null : String(row["last_error_json"])),
       retryAt: row["retry_at"] === null ? null : asInstant(String(row["retry_at"])),
       retryCount: Number(row["retry_count"]),
-    }));
+    };
   }
 
   findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null {
@@ -977,17 +1013,7 @@ class SqliteTransaction implements StorageTransaction {
       .prepare("SELECT leases.* FROM resource_leases leases JOIN jobs ON jobs.id = leases.job_id WHERE jobs.project_id = ? AND leases.job_id = ?")
       .get(projectId, jobId) as Row | undefined;
     if (!row) return null;
-    return {
-      id: asId(String(row["id"])),
-      jobId: asId(String(row["job_id"])),
-      kind: String(row["kind"]),
-      resourceIdentityJson: parseJson(String(row["resource_identity_json"])),
-      ownershipProofJson: parseJson(String(row["ownership_proof_json"])),
-      cleanupState: String(row["cleanup_state"]) as LeaseRow["cleanupState"],
-      lastErrorJson: parseJson(row["last_error_json"] === null ? null : String(row["last_error_json"])),
-      retryAt: row["retry_at"] === null ? null : asInstant(String(row["retry_at"])),
-      retryCount: Number(row["retry_count"]),
-    };
+    return this.rowToLease(row);
   }
 
   updateLeaseCleanup(

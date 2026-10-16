@@ -38,7 +38,7 @@ npm ci
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/domain`                           | 主张三色投影、canonical JSON 与两类摘要、不透明 Id / Instant、向量与契约语义、目标 SDK 的 OpenAPI 3.1.1 文档与候选 ABI（`openapi.ts`）、STORED ZIP 与导出标签规则（`zip.ts` / `export.ts`） |
 | `packages/contracts`                        | 严格 wire schema 与上游镜像：`rea-evidence.ts`（envelope）、`rea-web-capture.ts`（抓包）、`rea-static-analysis.ts`（`analyze_javascript_application`）、`sandbox.ts`（broker 四命令与 egress 策略）、`rea-analysis-view.ts` / `rea-evidence-bundle.ts`（保留与导入导出）、`verification.ts`（比较器具名版本与 evaluator 完成回执）、`export.ts`（导出记录、manifest 与 ZIP 下载回执） |
-| `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、`builder-service.ts`（蓝图 → 候选的唯一生成口）、`verification-service.ts`（验证报告的唯一生产者）、`export-service.ts`（打包与 verified-samples 闸门的唯一消费方）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
+| `packages/application`                      | VectorService / PlanService / ContractService / BlueprintService、`static-analysis.ts`（ASAR 静态支路）、`builder-service.ts`（蓝图 → 候选的唯一生成口）、`job-read.ts`＋`graph-read.ts`＋`candidate-read.ts`（§8 的三个具名读）、`verification-service.ts`（验证报告的唯一生产者）、`export-service.ts`（打包与 verified-samples 闸门的唯一消费方）、DiagnosticsSanitizer、AuditService、决策与事务日志 |
 | `packages/adapters/rea`                     | MCP 回复解码、Evidence 索引投影、HTTP 抓包事实读取、session 身份、具名 schema 对账（`schema-reconciliation.ts`）与按引用保留（`retention.ts`）                    |
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
@@ -81,14 +81,28 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   都不在里面——这一条不是断言，是用真 spawn 让子进程自己报出来的。
   崩溃留下的 run 目录在下次启动、拿到排他锁之后、服务第一条命令之前被回收，
   且只认 workbench 自己的 run id 形状（§5 禁止按名字猜）。
+- 页面**能自己发现候选了**，走的是 §8 早就写好的那条路：`GET /projects/:p/jobs`
+  （line 277，含持久 `resultRef`「可恢复构建/验证资源 ID」）+ 「一次成功的生成，其 resultRef
+  就是 candidate ID」（line 294）。本仓原先两条都没兑现——命令表里没有 jobs 分页，
+  `candidate.generate` 也从不把 candidate id 写回 job 行——所以我此前那句「§8 没有列候选的路由」
+  是错的，正确说法是**路由在文档里、实现缺着**（issue #55 已按这个结论重写并关闭）。
+  现在：`packages/application/job-read.ts` 是分页与单条读的唯一所有者，`job.get` 与 `jobs.list`
+  都走 `projectJobRecord` 这一个投影（§8 要求 GET job / GET jobs / job.updated 用同一组具名时间
+  字段，之前 `job.get` 手搓的对象少了 `cleanupRetryAt` 和 `error`，而那个投影函数存在了很久
+  却没有被任何一条命令用过），`builder-service.ts` 在同一个事务里写 resultRef、把 job 推到
+  succeeded 并补一条 `job.updated` 事件；已经 failed/cancelled/interrupted 的 job **不接受结果**
+  （§11：终态不复活）。UI 侧「代码」Tab 的入口因此是推导出来的：作业页 → 最近一次成功的
+  `build` → 它的 resultRef → `GET /candidates/:c` → 选一个文件取正文。
 - **未验证 / 未实现的部分**：生成的 `adapter.ts` 从未被执行，`openapi.json` 也没喂给任何
   第三方 OpenAPI 校验器（本机不装依赖）——两条都只由本仓的单测断言其内容与摘要，「SDK
   真的能调用成功」不属于已证事实。独立**进程**不等于独立**沙箱**：这里没有容器、没有 namespace、
   没有 seccomp，那属于 §11 的 broker（仍未实现），所以「无网络」目前是靠「不给它任何端点/凭据、
   也不给它 RPC socket 路径」实现的，不是靠内核强制执行。
-  另外这条读取路径**还不能被页面自己走通**：§8 没有「列出某项目的候选」这条路由，
-  所以 UI 无法从一个 candidate id 之外的入口发现候选——三栏的「代码」Tab 因此仍是具名空态。
-  我没有为了补 UI 去发明一条 §8 之外的路由（命令表是边界），这条缺口记在 issue #19。
+  「代码」Tab 现在只**读**：浏览器里没有任何入口能发起一次生成——§8 line 294 说
+  `POST /projects/:p/candidates` 收 `{blueprintId, deadlineAt?}` 并回 202 JobRecord，
+  而本仓的 `candidate.generate` 仍要调用方自带 `jobId` + 预算 + generator 描述，直接回候选摘要。
+  把这条改成文档那个形状，等于让 worker 自己挑一个 §7.3 没有给过数字的生成预算，
+  所以我没动它（这一条偏离记在这里，不在 README 里假装已经一致）。
 
 导出与 verified-samples（F11 / issue #22）的边界：
 
@@ -229,8 +243,12 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   把作用域放宽到整模块、把禁令删掉、把岛屿真正 import 进路由半边，三种变异都会红。
 - 列表行同时带图标、文字与 `status-positive|caution|negative` 颜色类，并且"来源 N"与
   "创建定向调查"两个按钮就在行上——跳转与发起不依赖画布存在。
-- "代码"Tab 对复核者是启用的，但只输出一句具名空态：§8 还没有读取候选文件内容的命令，
-  所以 Monaco 依赖被**删掉**而不是挂着不用（issue #19 的另一半补上时再一起回来）。
+- "代码"Tab 对复核者是**真读**的：它先读作业页、挑出最近一次成功的 `build`、拿它的
+  resultRef 当 candidate id，再列文件、按 manifest file id 取正文（§8 lines 277/294-296）。
+  没有候选、没有成功的构建、或 resultRef 不是个 id，三种空态各说各的话，不合并成"暂无数据"。
+  Monaco 依赖仍然是删掉的而不是挂着不用：展示用的是 `<pre>`，编辑器不属于这一条读取路径。
+- 左栏的"任务/清理"现在来自作业页的第一行（§8：GET job、GET jobs 与 job.updated 用同一组
+  具名时间字段，**左栏不从日志推断重试时间**）；在此之前它写死 `job: null`，所以那一格永远空着。
 
 浏览器实测（2026-10-16，真 Chrome 1440×832；worker、`npm run web`、`next dev` 三个真进程）：
 
@@ -242,6 +260,25 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
   代码给具名空态；三栏几何为 left 280@x=16、middle 821@x=312、right 260@x=1149，画布在 middle 内；
 - **仍未测**：鼠标拖拽平移（只按了控件）、键盘焦点顺序与读屏朗读、`next build` 产物路径
   （本次走的是 `next dev`），以及真 REA provider 导入之后的图。
+
+浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
+把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：
+
+- 播种脚本用真的 `BuilderService.generate()` 造候选，不是手插行：作业行落下来是
+  `state=succeeded`、`resultRef = 7eb7919a-82ec-47d4-90bb-e4727cc801da`（候选 id 本身）。
+  顺带证到一条：脚本第一次用 `inspector` actor 调生成，被 `only-the-builder-generates` 拒绝。
+- 左栏那一格真的填上了：任务 `41f63f01-6aeb-491f-a8d8-e9b4db6f6ff1`、清理 `pending`。
+- 「代码」Tab 自己发现候选并列出三个文件：`adapter.ts（typescript，1036 字节）`、
+  `openapi.json（json，1363 字节）`、`candidate-manifest.json（json，258 字节）`；
+  点第一个之后正文渲染 1036 个字符，首行
+  `// Generated from a frozen REA Workbench blueprint. Do not edit by hand.`，
+  `data-code-sha256="dc3449a3e08b77e927e6f8e99e4e34c3bb1c9b2405455bd951613579836415c4"`。
+- 那个摘要与磁盘上真正存着的那份字节**独立对上**：`shasum -a 256` 对
+  `projects/6732…/artifacts/candidate/dc3449a3…15c4.bin` 得到同一个值、同一个 1036 字节。
+- 请求链就是设计的那四条，全 200：`…/graph` → `…/jobs?limit=50` → `…/candidates/<id>` →
+  `…/candidates/<id>/files/<id>`；控制台里唯一的错误是配对之前那两次 `/session` 401（预期）。
+- **这一轮仍未测**：由浏览器发起一次生成（页面上没有那个入口，见上文 §8 line 294 那条偏离）、
+  分页游标在真实数据上的翻页（作业页只有一页）、以及 `next build` 产物路径。
 
 ## 还没有的东西
 
