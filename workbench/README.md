@@ -69,10 +69,23 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   而不是把换过的字节显示出去。选择器只有 manifest file id：`Id` 是带品牌的 opaque UUID，
   路径形状的字符串连构造都构造不出来，`storage_key` 也不在任何回包里（§5 要求它仅服务端可见）。
   超过内文联调限额（`CANDIDATE_BODY_LIMIT_BYTES`）的文件是**具名拒绝**并带上大小与限额，不做截断。
+- **Builder 现在真的是独立进程**（§2「独立进程 / 文件视图 / 无网络」、§5 line 425）：worker 把
+  一份冻结交接件写进 `<dataDir>/builder-role/<runId>/`，用 `planBuilderLaunch` **重建**的环境
+  spawn `apps/worker/builder-child.ts`，等它退出，然后**核验**而不是信任它交回的东西——文件集合
+  必须恰好是声明的那三个、每个都在字节预算内、`openApiDigest` 由父进程按自己的 canonicalization
+  预算重算比对、operation 列表必须与发出去的交接件一致。任何一条不过都是具名拒绝
+  （`builder-role-output-set` / `-file-too-large` / `-digest-mismatch` /
+  `-operation-mismatch` / `-timeout` / `-exited`），且**运行目录一定被清掉**。
+  子进程看到的环境只有 `HOME`(=它自己的 run 目录)、`PATH`(固定的系统对)、`LANG`、
+  `NO_COLOR`、`NODE_DISABLE_COLORS`：宿主 HOME、`WB_*`、provider 入口、代理、`NODE_OPTIONS`
+  都不在里面——这一条不是断言，是用真 spawn 让子进程自己报出来的。
+  崩溃留下的 run 目录在下次启动、拿到排他锁之后、服务第一条命令之前被回收，
+  且只认 workbench 自己的 run id 形状（§5 禁止按名字猜）。
 - **未验证 / 未实现的部分**：生成的 `adapter.ts` 从未被执行，`openapi.json` 也没喂给任何
   第三方 OpenAPI 校验器（本机不装依赖）——两条都只由本仓的单测断言其内容与摘要，「SDK
-  真的能调用成功」不属于已证事实。Builder 仍然是 worker 命令表里的一个具名命令与一种 actor，
-  没有独立进程与自己的落地文件视图（issue #19 的第一条完成条件）。
+  真的能调用成功」不属于已证事实。独立**进程**不等于独立**沙箱**：这里没有容器、没有 namespace、
+  没有 seccomp，那属于 §11 的 broker（仍未实现），所以「无网络」目前是靠「不给它任何端点/凭据、
+  也不给它 RPC socket 路径」实现的，不是靠内核强制执行。
   另外这条读取路径**还不能被页面自己走通**：§8 没有「列出某项目的候选」这条路由，
   所以 UI 无法从一个 candidate id 之外的入口发现候选——三栏的「代码」Tab 因此仍是具名空态。
   我没有为了补 UI 去发明一条 §8 之外的路由（命令表是边界），这条缺口记在 issue #19。

@@ -44,6 +44,21 @@ function err(failure: GateFailure | Err<GateFailure>): Err<GateFailure> {
   return "ok" in failure ? failure : { ok: false, error: failure };
 }
 
+// A producer that refuses says so with a name. The service maps it onto a §8 code and
+// journals it; an unlabelled exception would arrive as a generic failure and hide which
+// boundary the role hit.
+export class BuilderRoleFailure extends Error {
+  public override readonly name: string = "BuilderRoleFailure";
+  readonly reason: string;
+  readonly details: string[];
+
+  constructor(reason: string, details: string[] = []) {
+    super(reason);
+    this.reason = reason;
+    this.details = details;
+  }
+}
+
 export type GenerationBudget = {
   maxAttemptsPerBlueprint: number;
   // Wall-clock bound supplied by the caller and checked against the worker's clock,
@@ -60,19 +75,57 @@ export type CandidateCommit = {
   openApiVersion: string;
 };
 
+// The handoff shape, named from the one function that consumes it rather than
+// re-declared here: a second spelling is a second thing that can drift.
+export type BuilderHandoff = Parameters<typeof buildTargetOpenApi>[0];
+
+// The generation itself: a pure function of the handoff. The Builder role's own program
+// (`apps/worker/builder-child.ts`) calls exactly this, so the isolated process and the
+// in-process path cannot grow into two different generators. Everything the candidate is
+// made of - the adapter source, the OpenAPI document and its digest, the entry manifest -
+// derives from the frozen blueprint and nothing else.
+export function produceCandidateFiles(handoff: BuilderHandoff, limits: CanonicalLimits): CandidateFile[] {
+  const openApi = buildTargetOpenApi(handoff);
+  const digest = openApiDigest(openApi.document, limits);
+  const operations: ReviewedOperation[] = handoff.contractRevisions.flatMap((entry) =>
+    entry.httpOperations.map((operation) => ({
+      operationId: operation.operationId,
+      method: operation.method,
+      path: operation.path,
+    })),
+  );
+  const manifest = candidateManifest({
+    schemaVersion: 1,
+    entry: "adapter.ts",
+    operationIds: operations.map((operation) => operation.operationId),
+    openApiDigest: digest,
+  });
+  return [
+    { path: "adapter.ts", body: adapterSource(operations), mediaType: "text/typescript" },
+    { path: "openapi.json", body: JSON.stringify(openApi.document), mediaType: "application/json" },
+    { path: "candidate-manifest.json", body: JSON.stringify(manifest), mediaType: "application/json" },
+  ];
+}
+
 export class BuilderService {
   readonly storage: StorageWriterPort;
   readonly artifacts: ArtifactPort;
   readonly limits: CanonicalLimits;
+  // The worker injects the process-backed producer, so the bytes of a candidate are made
+  // outside this process and this service only ever publishes and commits what arrives.
+  // Async because the production producer spawns a child; the default is the pure function.
+  readonly produce: (handoff: BuilderHandoff, limits: CanonicalLimits) => Promise<CandidateFile[]>;
 
   constructor(deps: {
     storage: StorageWriterPort;
     artifacts: ArtifactPort;
     limits: CanonicalLimits;
+    produce?: (handoff: BuilderHandoff, limits: CanonicalLimits) => Promise<CandidateFile[]>;
   }) {
     this.storage = deps.storage;
     this.artifacts = deps.artifacts;
     this.limits = deps.limits;
+    this.produce = deps.produce ?? (async (handoff, limits) => produceCandidateFiles(handoff, limits));
   }
 
   async generate(
@@ -220,27 +273,31 @@ export class BuilderService {
       );
     }
 
-    const openApi = buildTargetOpenApi(payload);
-    const digest = openApiDigest(openApi.document, this.limits);
-    const operations: ReviewedOperation[] = payload.contractRevisions.flatMap((entry) =>
-      entry.httpOperations.map((operation) => ({
-        operationId: operation.operationId,
-        method: operation.method,
-        path: operation.path,
-      })),
-    );
-    const operationIds = operations.map((operation) => operation.operationId);
-    const manifest = candidateManifest({
-      schemaVersion: 1,
-      entry: "adapter.ts",
-      operationIds,
-      openApiDigest: digest,
-    });
-    const files: CandidateFile[] = [
-      { path: "adapter.ts", body: adapterSource(operations), mediaType: "text/typescript" },
-      { path: "openapi.json", body: JSON.stringify(openApi.document), mediaType: "application/json" },
-      { path: "candidate-manifest.json", body: JSON.stringify(manifest), mediaType: "application/json" },
-    ];
+    let files: CandidateFile[];
+    try {
+      files = await this.produce(payload, this.limits);
+    } catch (failure) {
+      const named = failure instanceof BuilderRoleFailure ? failure : null;
+      const reason = named?.reason ?? "builder-producer-failed";
+      recordDeny(this.storage, {
+        projectId,
+        actor,
+        resourceType: "candidate",
+        action: "builder.generate",
+        resourceId: blueprintId,
+        decision: "deny",
+        reasonCode: reason,
+        metadata: { blueprintId },
+      });
+      return err(
+        gateFail(
+          "CAPABILITY_UNAVAILABLE",
+          reason,
+          "the builder role did not produce a candidate",
+          named === null ? {} : { details: named.details as unknown as JsonValue },
+        ),
+      );
+    }
 
     const published: { file: CandidateFile; sha256: Digest; byteLength: number; storageKey: string }[] = [];
     for (const file of files) {

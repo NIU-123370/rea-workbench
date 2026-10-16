@@ -197,7 +197,10 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
     const storage = report.checks.find((check) => check.name === "storage-layout");
     const sandbox = report.checks.find((check) => check.name === "sandbox-profile");
     if (storage === undefined || sandbox === undefined) throw new Error("doctor omitted a required check");
-    expect(storage.facts).toEqual({ migrationsApplied: 5 });
+    // Exact, not a subset: the layout check is where the boot-time reclaim of an orphaned
+    // Builder role run is reported, and a fact that silently disappears from a doctor report
+    // is how a leftover staging directory stops being anybody's business.
+    expect(storage.facts).toEqual({ migrationsApplied: 5, sweptRoleRuns: 0 });
     expect(sandbox.state).toBe("degraded");
     expect(JSON.stringify(report)).not.toContain(dataDir);
   });
