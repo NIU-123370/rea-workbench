@@ -8,7 +8,7 @@
 
 Local software archaeology. Evidence first.
 
-[![CI](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml) ![Stage: Early Development](https://img.shields.io/badge/stage-early%20development-f0b44d) [![REA baseline: 6.4.0](https://img.shields.io/badge/REA%20baseline-6.4.0-8bd5e8)](https://github.com/morluto/rea/tree/98d8470d36cfbf7cd25820a4ed430aebae20c0c5)
+[![CI](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml) ![Stage: Early Development](https://img.shields.io/badge/stage-early%20development-f0b44d) [![REA baseline: 6.4.0](https://img.shields.io/badge/REA%20baseline-6.4.0-8bd5e8)](https://github.com/morluto/rea/tree/98d8470d36cfbf7cd25820a4ed430aebae20c0c5) [![License: MIT](https://img.shields.io/badge/license-MIT-8bd5e8)](LICENSE)
 
 [项目亮点](#highlights) · [产品预览](#preview) · [开发上手](#development) · [路线图](#roadmap) · [English](README.en.md)
 
@@ -194,4 +194,4 @@ REA 提供分析能力，Workbench 负责项目工作流与交付。设计采用
 
 **致谢**：感谢 [REA](https://github.com/morluto/rea) 提供底层分析能力与 Evidence 契约。宣传图的生成提示词见[资产说明](docs/assets/README.md)。
 
-**许可**：本仓库尚未声明许可证，使用或分发前请先与维护者确认授权；上游依赖遵循各自许可证。
+**许可**：本项目采用 [MIT 许可证](LICENSE)；上游依赖遵循各自许可证。
