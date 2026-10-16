@@ -62,6 +62,92 @@ function envelope(id) {
   };
 }
 
+// A capture-shaped envelope that satisfies the mirrored contract in
+// packages/contracts/rea-web-capture.ts, so the ingestion loop can be driven
+// end-to-end: ordinal + json-pointer coordinates, a transport-credential redaction
+// on one header value, a text response body and one retained binary sidecar.
+function harRecordsEnvelope(id) {
+  const base = envelope(id);
+  base.parameters = { capture_path: "/fixture/session.har", format: "har", sensitive_values: [] };
+  base.relationship_coverage = { status: "complete" };
+  base.normalized_result = {
+    decoder: { id: "har-1.2", name: "HAR", version: "1.2" },
+    container: {
+      reported: { log: { version: "1.2", creator: { name: "chrome", version: "141" } } },
+      numeric_literals: [],
+      redactions: [],
+      records_pointer: "/log/entries",
+    },
+    total_records: 2,
+    records: [
+      {
+        ordinal: 0,
+        location: { kind: "json-pointer", pointer: "/log/entries/0" },
+        reported: {
+          cache: {},
+          request: {
+            method: "GET",
+            url: "http://127.0.0.1:9/card?include=items",
+            httpVersion: "HTTP/2",
+            queryString: [{ name: "include", value: "items" }],
+            headers: [
+              { name: "authorization", value: "redacted" },
+              { name: "accept", value: "application/json" },
+            ],
+            cookies: [],
+          },
+          response: {
+            status: 200,
+            statusText: "OK",
+            headers: [{ name: "content-type", value: "application/json" }],
+            cookies: [],
+            content: { size: 11, compression: 0, mimeType: "application/json", text: '{"items":[]}' },
+            redirectURL: "",
+          },
+          startedDateTime: "2026-10-16T09:00:00.000Z",
+          time: 12,
+        },
+        binary_fields: [],
+        numeric_literals: [{ pointer: "/log/entries/0/response/status", producer_type: "json-number", literal: "200" }],
+        redactions: [{ pointer: "/log/entries/0/request/headers/0/value", reason: "transport-credential" }],
+        limitations: [],
+      },
+      {
+        ordinal: 1,
+        location: { kind: "json-pointer", pointer: "/log/entries/1" },
+        reported: {
+          request: {
+            method: "POST",
+            url: "http://127.0.0.1:9/card/items",
+            queryString: [],
+            headers: [{ name: "content-type", value: "application/json" }],
+            postData: { mimeType: "application/json", text: "{}" },
+          },
+          response: { status: 201, headers: [], content: { size: 0, mimeType: "application/json" } },
+        },
+        binary_fields: [
+          {
+            pointer: "/log/entries/1/request/postData/text",
+            state: "retained",
+            representation: "har-base64-content",
+            content_base64: "e30=",
+            bytes: 2,
+            sha256: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          },
+        ],
+        numeric_literals: [],
+        redactions: [],
+        limitations: ["response-body-not-retained"],
+      },
+    ],
+    artifact: { path: "/fixture/session.har", sha256: HEX, bytes: 512 },
+    format: "har",
+    runtime_attribution: "unknown",
+    limitations: [],
+  };
+  return base;
+}
+
 function tool(name, required) {
   return {
     name,
@@ -119,7 +205,25 @@ async function callTool(name, args) {
     inFlight -= 1;
     return { result: { peak, active: inFlight } };
   }
-  if (name === "inspect_web_network_capture") return envelope(HEX);
+  if (name === "inspect_web_network_capture") {
+    if (CASE === "har_records") return harRecordsEnvelope(HEX);
+    if (CASE === "resource_constraint") {
+      return {
+        errorReply: {
+          code: "resource_constraint",
+          category: "resource_constraint",
+          message: "the reply exceeds the transport budget",
+          retryable: true,
+          remediation: { action: "read the retained record" },
+          details: {
+            partial_observation: { kind: "retained-evidence", evidence_id: `ev_${"b".repeat(64)}` },
+            resource: "memory",
+          },
+        },
+      };
+    }
+    return envelope(HEX);
+  }
   if (name === "probe_error") {
     return { errorReply: { code: "unsupported_target", category: "unsupported_target", message: "no", retryable: false, remediation: { action: "pick another" } } };
   }

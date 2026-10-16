@@ -2,10 +2,12 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { Digest } from "../../domain/canonical-json.ts";
 import { asDigest } from "../../domain/canonical-json.ts";
-import type { Id } from "../../domain/identity.ts";
+import type { Id, Instant } from "../../domain/identity.ts";
 import { asId, asInstant } from "../../domain/identity.ts";
 import type { JsonValue } from "../../domain/json-value.ts";
 import type { Result } from "../../domain/result.ts";
+import { TransactionRefused } from "../../application/decision.ts";
+import type { CleanupState } from "../../contracts/jobs.ts";
 import type {
   ArtifactRow,
   AuditRow,
@@ -207,6 +209,13 @@ class SqliteTransaction implements StorageTransaction {
         row.projectId,
         row.id,
       );
+  }
+
+  findJobByKey(projectId: Id, idempotencyKey: string): JobRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM jobs WHERE project_id = ? AND idempotency_key = ?")
+      .get(projectId, idempotencyKey) as Row | undefined;
+    return row ? this.rowToJob(row) : null;
   }
 
   getJob(projectId: Id, jobId: Id): JobRow | null {
@@ -716,6 +725,38 @@ class SqliteTransaction implements StorageTransaction {
       );
   }
 
+  getLeaseByJob(projectId: Id, jobId: Id): LeaseRow | null {
+    // The lease belongs to a job of this project; a caller cannot reach another
+    // project's lease by guessing an id.
+    const row = this.db
+      .prepare("SELECT leases.* FROM resource_leases leases JOIN jobs ON jobs.id = leases.job_id WHERE jobs.project_id = ? AND leases.job_id = ?")
+      .get(projectId, jobId) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: asId(String(row["id"])),
+      jobId: asId(String(row["job_id"])),
+      kind: String(row["kind"]),
+      resourceIdentityJson: parseJson(String(row["resource_identity_json"])),
+      ownershipProofJson: parseJson(String(row["ownership_proof_json"])),
+      cleanupState: String(row["cleanup_state"]) as LeaseRow["cleanupState"],
+      lastErrorJson: parseJson(row["last_error_json"] === null ? null : String(row["last_error_json"])),
+      retryAt: row["retry_at"] === null ? null : asInstant(String(row["retry_at"])),
+      retryCount: Number(row["retry_count"]),
+    };
+  }
+
+  updateLeaseCleanup(
+    leaseId: Id,
+    cleanupState: CleanupState,
+    lastErrorJson: JsonValue | null,
+    retryAt: Instant | null,
+    retryCount: number,
+  ): void {
+    this.db
+      .prepare("UPDATE resource_leases SET cleanup_state = ?, last_error_json = ?, retry_at = ?, retry_count = ? WHERE id = ?")
+      .run(cleanupState, lastErrorJson === null ? null : jsonOf(lastErrorJson), retryAt, retryCount, leaseId);
+  }
+
   insertAudit(row: AuditRow): number {
     const result = this.db
       .prepare(
@@ -789,6 +830,9 @@ export class SqliteStorageWriter implements StorageWriterPort {
       } catch {
         // The transaction already ended; the caller sees the original failure.
       }
+      // A business refusal is not a storage failure: it propagates so the caller
+      // can report the named reason it refused for, after the rollback.
+      if (error instanceof TransactionRefused) throw error;
       return { ok: false, error: mapSqliteError(error) };
     }
   }

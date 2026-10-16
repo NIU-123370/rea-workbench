@@ -99,8 +99,13 @@ const RULES: Record<string, Rule> = {
   },
 };
 
-const FROM_CLAUSE = /\b(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/g;
-const SIDE_EFFECT_IMPORT = /\bimport\s*["']([^"']+)["']/g;
+// Anchored to the start of a line on purpose. Unanchored, the word `import`
+// inside a string literal (`resourceType: "import",`) runs straight into the next
+// quoted value and invents a specifier — a gate that reports what it was meant to
+// prevent is worse than one that misses, because it trains everyone to trust the
+// noise. Real imports in this codebase always begin a line.
+const FROM_CLAUSE = /^\s*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm;
+const SIDE_EFFECT_IMPORT = /^\s*import\s*["']([^"']+)["']/gm;
 const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
 const REQUIRE_CALL = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
 

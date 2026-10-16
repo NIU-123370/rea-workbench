@@ -45,6 +45,19 @@ export function recordDeny(writer: StorageWriterPort, draft: AuditDraft): { reco
   return { recorded: outcome.ok };
 }
 
+// Thrown by `commitDecision` inside the transaction when the work refused. The
+// storage writer propagates it instead of mapping it to a SQLite failure, so a
+// refusal rolls back every row it had already written: "denied" must mean nothing
+// was committed, not merely that the audit row says deny.
+export class TransactionRefused extends Error {
+  public readonly failure: GateFailure;
+
+  public constructor(failure: GateFailure) {
+    super(`refused:${failure.reason}`);
+    this.failure = failure;
+  }
+}
+
 export type Step<T> =
   | { kind: "failure"; failure: Err<GateFailure> }
   | { kind: "committed"; value: T };
@@ -64,12 +77,13 @@ export function commitDecision<T>(
   writer: StorageWriterPort,
   decision: Decision<T>,
 ): Result<{ value: T; auditSeq: number }, GateFailure> {
-  const outcome = writer.transact((tx) => {
-    const step = decision.work(tx);
-    if (step.kind === "failure") {
+  let outcome: Result<{ value: T; auditSeq: number }, GateFailure>;
+  try {
+    const committed = writer.transact((tx) => {
+      const step = decision.work(tx);
+      if (step.kind === "failure") throw new TransactionRefused(step.failure.error);
       return {
-        kind: "denied" as const,
-        failure: step.failure.error,
+        value: step.value,
         auditSeq: tx.insertAudit(
           buildAuditRow({
             projectId: decision.projectId,
@@ -77,34 +91,31 @@ export function commitDecision<T>(
             resourceType: decision.resourceType,
             action: decision.action,
             resourceId: decision.resourceId,
-            decision: "deny",
-            reasonCode: step.failure.error.reason,
-            metadata: {},
+            decision: "allow",
+            reasonCode: decision.allowReason,
+            metadata: decision.metadata,
           }),
         ),
       };
-    }
-    return {
-      kind: "allowed" as const,
-      value: step.value,
-      auditSeq: tx.insertAudit(
-        buildAuditRow({
-          projectId: decision.projectId,
-          actor: decision.actor,
-          resourceType: decision.resourceType,
-          action: decision.action,
-          resourceId: decision.resourceId,
-          decision: "allow",
-          reasonCode: decision.allowReason,
-          metadata: decision.metadata,
-        }),
-      ),
-    };
-  });
-  if (!outcome.ok) return gateFail("INVALID_INPUT", outcome.error.code, outcome.error.message);
-  if (outcome.value.kind === "denied") {
-    const failure = outcome.value.failure;
+    });
+    if (!committed.ok) return gateFail("INVALID_INPUT", committed.error.code, committed.error.message);
+    outcome = { ok: true, value: committed.value };
+  } catch (error) {
+    if (!(error instanceof TransactionRefused)) throw error;
+    // The refusal is journalled after the rollback, in its own transaction, so the
+    // denial survives while nothing it refused is left committed.
+    const failure = error.failure;
+    recordDeny(writer, {
+      projectId: decision.projectId,
+      actor: decision.actor,
+      resourceType: decision.resourceType,
+      action: decision.action,
+      resourceId: decision.resourceId,
+      decision: "deny",
+      reasonCode: failure.reason,
+      metadata: {},
+    });
     return gateFail(failure.code, failure.reason, failure.message, failure.details);
   }
-  return { ok: true, value: { value: outcome.value.value, auditSeq: outcome.value.auditSeq } };
+  return outcome;
 }
