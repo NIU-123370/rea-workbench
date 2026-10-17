@@ -51,6 +51,7 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
+  "blueprint.read",
   "candidate.generate",
   "export.create",
   "export.download",

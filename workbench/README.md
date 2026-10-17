@@ -275,7 +275,7 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **29 条**，仍缺 **11 条**。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **30 条**，仍缺 **10 条**。
 这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
@@ -291,10 +291,12 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 所以门拒绝它而不是收下后丢掉（页面不能以为自己记下了一个没人保存的理由）；③§8 的三条回包写的是
 「200 TestVector／ContractRevision／VerificationPlan」，而当时封闭命令表里 `contract.*` 还没有读命令，
 门只能出服务真正回答的那份回执（receipt），它是一份具名契约而不是命令返回值的转储。
-缺的 11 条里只剩 `GET /blueprints/:b` 一条连命令都还没有（`blueprint.*` 只有 freeze／handoff／manifest，
-而 §8 那一行明令此门不得出 source manifest／holdout，所以它要的是一个新的具名投影，不是复用 handoff）；
 `GET /contracts/:c` 与 `GET /verifications/:v` 是本轮补上的——两侧服务的 `read` 一直都在，
 连「Builder 只读蓝图投影」那条拒绝都写好了，缺的只是封闭命令表上的两个名字和一扇门。
+`GET /blueprints/:b` 是同一批里的第三条：`blueprint.handoff` 早就把那份 bundle 交给 Builder 了，
+这一轮把它抬成控制面也能读的一扇门（`blueprint.read`），并只按 §8 那一列多给一个 `verificationPlanId`——
+**而 Builder 拿不到它**（计划是 holdout 的另一半）。回包 schema 里根本没有能装 source manifest
+或 holdout 清单的字段，这是那句「所有角色均不经此接口读取」的可检查版本。
 三个创建门各有一处 §8 偏离，都是「文档给了字段而实现无处安放」：vector 的 `sensitiveValues`、
 plan／contract 的 `expectedGraphRevision`（§7.4 让计划自己绑图版本）都由门**具名拒收**，
 而 contract 不在 §8 line 261 的幂等清单里，所以那扇门没有键——浏览器实测同键重发拿到的是
@@ -370,6 +372,15 @@ details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键�
   「修订 4／两行 approved／0 个按钮」，证明这条线不是粘住的。
 - 点击「来源」不再往队列里塞草稿（队列计数 0），而带缺口的格子点「创建定向调查」仍然入队一条
   `capture-new`（`unmappedReasons: []`）——「读得到」与「还缺证据」在页面上是两件事。
+- 第三条读门（`GET .../blueprints/:b`）这轮是**在页面里把整条链走完之后读到的**：同一个配对会话里
+  建计划 201 → 读计划 200（`review.status=draft`）→ 故意少交 `expectedInventoryRevision` 的审阅 **400**
+  → 补齐后审阅 200 → 冻结 **201**（`blueprintId b9202368…`、`auditSeq 12`）→ 读蓝图 **200**，
+  键集合恰好 `bundle,digest,id,scope,verificationPlanId`，`digest` 与冻结回执逐字相同、
+  `verificationPlanId` 与刚建刚批的那个计划相同，`scope` 2 条、`bundle.publicVectors` 1 条、
+  `bundle.contractRevisions` 1 条，整段回包里 `manifest|holdout` 一个都不匹配（大小写不敏感）。
+  bundle 的七个键就是 §7.3 那份名录。中途还有一次真实读数：计划没批的时候去冻结拿到
+  **422 `BLUEPRINT_BLOCKED`**，而路径里 id 写成 `undefined` 时命中的正是新加的
+  `blueprint-id-malformed` 400——不是 404。
 - 两条新读门在同一轮里由配对页面同源取过：`GET .../contracts/da06…` 回 200、16 个键，
   `digest` = `ec5d1eec…9e62` 与库里那一行逐字相同，`review.status` 是 `draft`；
   `GET .../verifications/01d2…` 回 200、12 个键（**没有** `staleness`——§8 那一列写的是报告本身，

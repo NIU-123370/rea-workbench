@@ -34,7 +34,17 @@ import {
 import type { PlanVectorFact, VerificationPlanContent } from "../domain/plan.ts";
 import { planGateReasons } from "../domain/plan.ts";
 import type { TestVector } from "../domain/vector.ts";
-import { mayRecordDecision, type Actor } from "./actor.ts";
+import { isControlPlane, mayRecordDecision, type Actor } from "./actor.ts";
+
+// What §8 line 293 answers with: the two facts of the row, the scope the plan froze, the
+// allowlisted bundle, and the plan id for the control plane only.
+export type BlueprintRead = {
+  id: Id;
+  digest: Digest;
+  scope: string[];
+  bundle: BlueprintPayload;
+  verificationPlanId: Id | null;
+};
 import { claimFactOf, contractContentOf } from "./contract-service.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, issueNames, type GateFailure } from "./gate-failure.ts";
@@ -670,6 +680,37 @@ export class BlueprintService {
       return gateFail("REA_CONTRACT_MISMATCH", "blueprint-digest-drift", "blueprint bytes no longer match the row digest");
     }
     return { ok: true, value: payload };
+  }
+
+  // §8 line 293: the frozen blueprint read back through the same door the Builder is served
+  // from. `handoff` is the only place that re-parses the stored bytes against the allowlist
+  // schema and recomputes the digest, so a second copy of that work is exactly how a read
+  // starts answering from bytes the freeze gate would have refused.
+  //
+  // Which plan a blueprint was cut from goes to the control plane and not to a Builder: §8
+  // grants the Builder this route only as a capability scoped to one id, and the plan is the
+  // holdout other half. The source manifest and the holdout list are not in this reply at
+  // all - that is what `blueprintReadSchema` having no field for them means.
+  async read(
+    projectId: Id,
+    actor: Actor,
+    blueprintId: Id,
+  ): Promise<Result<BlueprintRead, GateFailure>> {
+    const handed = await this.handoff(projectId, blueprintId);
+    if (!handed.ok) return handed;
+    const row = this.storage.transact((tx) => tx.getBlueprint(projectId, blueprintId));
+    if (!row.ok) return gateFail("INVALID_INPUT", row.error.code, row.error.message);
+    if (row.value === null) return gateFail("NOT_FOUND", "blueprint-unknown", "blueprint not found");
+    return {
+      ok: true,
+      value: {
+        id: row.value.id,
+        digest: row.value.digest,
+        scope: handed.value.verificationScope,
+        bundle: handed.value,
+        verificationPlanId: isControlPlane(actor) ? row.value.verificationPlanId : null,
+      },
+    };
   }
 
   async readSourceManifest(

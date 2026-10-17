@@ -130,6 +130,10 @@ export const COMMAND_NAMES = [
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
+  // The blueprint read (§8 line 293). `blueprint.handoff` already served the same bundle to a
+  // Builder; this is the control-plane door over that one body, with the plan id added for the
+  // roles §8 names - and still no way to reach the source manifest or the holdout list.
+  "blueprint.read",
   // The Builder's own operation (§7.3, §10 / issue #19). It is a command like any
   // other, so the actor kind arrives on the frame and the service — not this table —
   // decides whether that kind may generate.
@@ -719,6 +723,12 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     },
     "blueprint.freeze": async (payload, actor) =>
       relay(await blueprints.freeze(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
+    "blueprint.read": async (payload, actor) => {
+      const blueprintId = pickId(payload, "blueprintId");
+      const refused = missing(blueprintId);
+      if (refused !== null) return refused;
+      return relay(await blueprints.read(projectIdOr(payload), actor, blueprintId as Id));
+    },
     "blueprint.handoff": async (payload) => {
       const blueprintId = pickId(payload, "blueprintId");
       const refused = missing(blueprintId);

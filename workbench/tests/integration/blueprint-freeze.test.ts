@@ -471,6 +471,31 @@ describe("blueprint handoff carries the allowlist and nothing else (DESIGN §7.3
     expect(payload.verificationScope).toContain("excluded-behavior:paging");
   });
 
+
+  it("reads the frozen blueprint back, with the plan id only for the control plane (§8 line 293)", async () => {
+    const forControlPlane = unwrap(await blueprints.read(projectId, reviewer, blueprintId));
+    expect(forControlPlane.id).toBe(blueprintId);
+    expect(forControlPlane.digest).toBe(digest);
+    expect(Object.keys(forControlPlane).sort()).toEqual(["bundle", "digest", "id", "scope", "verificationPlanId"]);
+    expect(forControlPlane.verificationPlanId).not.toBeNull();
+    // The bundle is the very object a Builder is handed. One frozen thing, one projection: a
+    // second copy of the re-parse and digest check is where the two would start to disagree.
+    expect(forControlPlane.bundle).toEqual(unwrap(await blueprints.handoff(projectId, blueprintId)));
+    expect(forControlPlane.scope).toEqual(forControlPlane.bundle.verificationScope);
+
+    const forBuilder = unwrap(await blueprints.read(projectId, builder, blueprintId));
+    // §8 grants a Builder this route only as a capability over one id; which plan the blueprint
+    // was cut from is the other half of the holdout and stays with the control plane.
+    expect(forBuilder.verificationPlanId).toBeNull();
+    expect(forBuilder.bundle).toEqual(forControlPlane.bundle);
+    // Neither reply names a source manifest or a holdout list anywhere in it.
+    expect(JSON.stringify(forBuilder)).not.toMatch(/manifest|holdout/i);
+    expect(JSON.stringify(forControlPlane)).not.toMatch(/manifest|holdout/i);
+
+    const unknown = errorOf(await blueprints.read(projectId, reviewer, newId()));
+    expect(unknown.reason).toBe("blueprint-unknown");
+  });
+
   it("discloses no evidence id, locator, target, project, snapshot or storage path", async () => {
     const payload = unwrap(await blueprints.handoff(projectId, blueprintId));
     const text = JSON.stringify(payload);

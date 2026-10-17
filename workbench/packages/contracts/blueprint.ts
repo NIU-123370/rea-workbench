@@ -122,8 +122,8 @@ export const blueprintFreezeHttpRequestSchema = z.strictObject({
 // the digest the Builder will be handed, the manifest digest, and the three counts the gate
 // verified. §8's third column also names `planDigest`, `scope` and `limitations`; those live in
 // the blueprint artifact's payload rather than in the commit, and reading the artifact back is
-// `GET /blueprints/:b` - which still has no command (issue #58, category 2). Inventing them here
-// would put words in a reply the command did not answer.
+// `GET /blueprints/:b` (`blueprintReadSchema` below). Inventing them here would put words in a
+// reply the freeze command did not answer.
 export const blueprintFreezeReceiptSchema = z.strictObject({
   blueprintId: idSchema,
   digest: digestSchema,
@@ -133,6 +133,19 @@ export const blueprintFreezeReceiptSchema = z.strictObject({
   holdoutVectorCount: z.int().nonnegative(),
   contractCount: z.int().nonnegative(),
   auditSeq: z.int().nonnegative(),
+});
+
+// §8 line 293's blueprint read: the frozen handoff, plus the two facts that place it (the row id
+// and the digest the Builder will be handed) and - for the control plane only - which plan it was
+// cut from. There is deliberately no field here for the source manifest or the holdout list:
+// §8 says no role reads them through this interface, and a schema with no place for them is the
+// checkable version of that sentence.
+export const blueprintReadSchema = z.strictObject({
+  id: idSchema,
+  digest: digestSchema,
+  scope: z.array(nonEmptyString),
+  bundle: builderBlueprintSchema,
+  verificationPlanId: idSchema.nullable(),
 });
 
 export const sourceManifestClaimSchema = z.strictObject({

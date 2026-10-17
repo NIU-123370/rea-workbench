@@ -20,7 +20,7 @@ import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/
 import { vectorCommitReceiptSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
 import { contractCommitReceiptSchema, contractRevisionSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
-import { blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
+import { blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal, MAX_IDEMPOTENCY_KEY_LENGTH } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
@@ -1045,7 +1045,7 @@ describe("the §8 read routes (issue #58)", () => {
     return call("GET", pathname, { headers: { host: `127.0.0.1:${String(address.port)}`, cookie } });
   }
 
-  it("mounts exactly the seven documented reads and refuses each one unpaired", async () => {
+  it("mounts exactly the eight documented reads and refuses each one unpaired", async () => {
     const id = newId();
     for (const pathname of [
       `${API_PREFIX}/projects/${id}`,
@@ -1055,6 +1055,7 @@ describe("the §8 read routes (issue #58)", () => {
       `${API_PREFIX}/projects/${id}/verification-plans/${id}`,
       `${API_PREFIX}/projects/${id}/contracts/${id}`,
       `${API_PREFIX}/projects/${id}/verifications/${id}`,
+      `${API_PREFIX}/projects/${id}/blueprints/${id}`,
     ]) {
       const anonymous = await call("GET", pathname);
       expect(`${pathname}:${String(anonymous.status)}`).toContain("401");
@@ -2120,6 +2121,35 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     expect(body.error.details["reasonCount"]).toBe(1);
     expect(body.error.details["reason"]).toBe("plan-not-approved");
     expect(JSON.stringify(body.error.details)).not.toContain("contract-not-approved");
+  });
+
+  it("reads a frozen blueprint back over HTTP with the plan id for this role (§8 line 293)", async () => {
+    const { session, seeded } = await chain("freeze-read", true);
+    const frozen = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-read-1");
+    expect(frozen.status, frozen.text).toBe(201);
+    const receipt = blueprintFreezeReceiptSchema.safeParse(JSON.parse(frozen.text) as JsonValue);
+    if (!receipt.success) throw new Error(frozen.text);
+
+    const read = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/blueprints/${receipt.data.blueprintId}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(read.status, read.text).toBe(200);
+    const body = blueprintReadSchema.safeParse(JSON.parse(read.text) as JsonValue);
+    if (!body.success) throw new Error(`${JSON.stringify(body.error.issues)}\n${read.text}`);
+    // The same digest the freeze committed, and the plan the freeze named: this is the read that
+    // lets a page re-open a blueprint it was told about rather than being shown a new claim.
+    expect(body.data.id).toBe(receipt.data.blueprintId);
+    expect(body.data.digest).toBe(receipt.data.digest);
+    expect(body.data.verificationPlanId).toBe(String(seeded.planId));
+    expect(body.data.bundle.blueprintId).toBe(receipt.data.blueprintId);
+    // §8 says no role reads a source manifest or a holdout list through this interface, and the
+    // reply has nowhere to put them.
+    expect(JSON.stringify(body.data)).not.toMatch(/manifest|holdout/i);
+
+    const malformed = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/blueprints/not-an-id`, { headers: { host: host(), cookie: session.cookie } });
+    expect(malformed.status, malformed.text).toBe(400);
+    expect((JSON.parse(malformed.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("blueprint-id-malformed");
+    const unknown = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/blueprints/${String(newId())}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(unknown.status, unknown.text).toBe(404);
+    expect((JSON.parse(unknown.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("blueprint-unknown");
   });
 
   it("holds the door behind the session and the CSRF header", async () => {

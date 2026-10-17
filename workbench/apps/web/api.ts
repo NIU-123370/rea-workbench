@@ -9,7 +9,7 @@ import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
-import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
+import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
@@ -120,6 +120,10 @@ const ROUTES: readonly RouteSpec[] = [
   // a test asked for them (issue #58).
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/contracts/:contractId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/verifications/:verificationId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The blueprint read (§8 line 293): the frozen handoff, its digest and - for this role - the
+  // plan it was cut from. No route here reaches a source manifest or a holdout list; §8 says so
+  // for every role, and `blueprintReadSchema` has no field they could arrive in.
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/blueprints/:blueprintId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The three review writes (§8 lines 285, 287, 291). Session-bound and mutating, and - unlike
   // the creations §8 line 261 lists - they take no Idempotency-Key: a review carries its own
   // conflict token (the digest it looked at, and for the inventory-bound two the revision they
@@ -954,6 +958,25 @@ async function readContract(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   return jsonSuccess(ctx.requestId, 200, revision.value);
 }
 
+// §8 line 293. One path segment, one id, no query: the blueprint is named, not searched, and
+// the reply is the same bundle the Builder was handed - which is the point of reading it back:
+// two roles looking at one frozen thing see the same bytes.
+async function readBlueprint(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const blueprintId = pathId(ctx, "blueprintId");
+  if (projectId === null) return unknownProject(ctx);
+  if (blueprintId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "blueprint-id-malformed", "the blueprint segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("blueprint.read", { projectId, blueprintId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const blueprint = parseStrict(blueprintReadSchema, outcome.value);
+  if (!blueprint.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "blueprint-shape", "the worker did not answer with a frozen blueprint", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, blueprint.value);
+}
+
 // §8 line 298 names the body as the VerificationReport, so the staleness the service re-derives
 // for its own callers stays behind this hop: what leaves is the stored claim, re-hashed and
 // re-parsed by the service, not a second opinion about whether it still holds.
@@ -1284,6 +1307,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readContract(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/verifications/:verificationId")) {
       response = await readVerification(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/blueprints/:blueprintId")) {
+      response = await readBlueprint(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {
