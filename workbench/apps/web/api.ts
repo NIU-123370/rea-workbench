@@ -8,7 +8,7 @@ import {
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createUrlTargetRequestSchema, createdProjectSchema, evidenceViewSchema, projectPageSchema, projectViewSchema, targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
-import { verificationReportSchema, verificationRequestSchema } from "../../packages/contracts/verification.ts";
+import { comparatorPolicyReadSchema, verificationReportSchema, verificationRequestSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
@@ -130,6 +130,11 @@ const ROUTES: readonly RouteSpec[] = [
   // revocations and unauthenticated refusals that belong to no project.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/audit`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/audit`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // Which comparator names this build installed (issue #82). The second route in this adapter that
+  // §8's table does not list (the first is `GET /projects/:p/exports`), and the reason is the same:
+  // the write door needs a name from this list, and a table the caller cannot read turns "am I right"
+  // into a journalled refusal. Recorded as a deviation rather than silently extended.
+  { method: "GET", template: `${API_PREFIX}/comparator-policies`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The five §8 reads that had a worker command and no HTTP door (issue #58). Each one is a
   // single resource under the project, session-bound, and answered by the command of the
   // same name; none of them takes a body, and none of them resolves a path.
@@ -578,6 +583,22 @@ async function readGlobalAudit(ctx: Context, deps: ApiDependencies): Promise<Api
 // them. A path segment that is not an opaque identifier is refused as "not a resource"
 // rather than forwarded: §8 authorises a path id by matching the project, not by believing
 // the caller, and echoing the string back would put it in a log line and a page (§12.1).
+
+// Issue #82: the read §8's table lacks and §8 line 297 needs. A session, no body, the worker's
+// answer checked against its named schema - like the reads above. Two things this door does *not*
+// do: it does not sort (the installed order is the code's, and a reordering could be read as a
+// ranking - putting the looser policy first would be precisely §10's mistake), and it adds no
+// `default` or `recommended` field. The page that shows this list has to leave the choice unmade,
+// which is what its empty first option is for.
+async function readComparatorPolicies(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const outcome = await deps.worker.call("comparator.list", {}, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const parsed = parseStrict(comparatorPolicyReadSchema, outcome.value);
+  if (!parsed.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "comparator-policy-shape", "the worker did not answer with the comparator policies it installed", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, parsed.value);
+}
 
 async function readProject(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
@@ -1752,6 +1773,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       // `/audit`, and letting the scoped branch claim it would turn the unrooted journal
       // into a "project unknown" answer.
       response = await readGlobalAudit(ctx, deps);
+    } else if (route.method === "GET" && route.template === `${API_PREFIX}/comparator-policies`) {
+      response = await readComparatorPolicies(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/audit")) {
       response = await readProjectAudit(ctx, deps);
     } else if (route.method === "GET" && route.template === `${API_PREFIX}/projects/:projectId`) {

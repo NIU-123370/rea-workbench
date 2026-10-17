@@ -39,6 +39,10 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "jobs.list",
   "job.cancel",
   "job.cleanupRetry",
+  // §8 line 275's read of the installed comparator names (issue #82). The route is not in §8's
+  // table, so the command is the place the deviation is visible: it answers from the same constant
+  // `findComparatorPolicy` consults, which is why it belongs on the worker rather than in the page.
+  "comparator.list",
   // §8 line 275's door: asking for a capture or an inspect against a target. Written here as well as
   // in the handler table because §14 makes this list a boundary a reviewer has to cross on purpose.
   "job.request",
@@ -373,6 +377,38 @@ describe("named commands and the local RPC (§14)", () => {
     if (builders.ok) return;
     expect(builders.error.code).toBe("ACCESS_DENIED");
     expect(builders.error.reason).toBe("role-may-not-request-verification");
+  });
+
+  // The read of the installed comparators and the gate that accepts one of their names are one
+  // table (issue #82). The cross-check goes through the *write* on purpose: a name this read hands
+  // out must get past `comparator-policy-not-installed` and reach the next question, because a list
+  // the gate would reject is worse than no list at all - it teaches the operator a wrong answer.
+  it("lists exactly the comparator names its own verification gate accepts (§8 line 297, issue #82)", async () => {
+    const created = unwrap(await request("project.create", { name: "comparator-list" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const listed = unwrap(await request("comparator.list", {}, inspector)) as { policies: { policyId: string }[] };
+    expect(listed.policies.length).toBeGreaterThan(0);
+    for (const policy of listed.policies) {
+      const asked = await request("verification.request", {
+        projectId,
+        idempotencyKey: `comparator-${policy.policyId}`,
+        request: { candidateId: newId(), comparatorPolicyId: policy.policyId },
+      }, inspector);
+      expect(asked.ok).toBe(false);
+      if (asked.ok) continue;
+      // The candidate does not exist, and that is the wanted answer: the name was accepted and the
+      // request walked on to the service's next question.
+      expect(asked.error.reason).toBe("candidate-unknown");
+    }
+
+    const invented = await request("verification.request", {
+      projectId,
+      idempotencyKey: "comparator-invented",
+      request: { candidateId: newId(), comparatorPolicyId: "looser-than-anything-v9" },
+    }, inspector);
+    expect(invented.ok).toBe(false);
+    if (invented.ok) return;
+    expect(invented.error.reason).toBe("comparator-policy-not-installed");
   });
 
   // The cell §8 line 275's door makes necessary: a `capture` or an `inspect` row can now be asked for

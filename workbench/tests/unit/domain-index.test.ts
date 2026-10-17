@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import * as canonicalJson from "../../packages/domain/canonical-json.ts";
+import * as comparators from "../../packages/domain/comparators.ts";
 import * as blueprint from "../../packages/domain/blueprint.ts";
 import * as contract from "../../packages/domain/contract.ts";
 import * as evidence from "../../packages/domain/evidence.ts";
@@ -31,6 +32,7 @@ const DOMAIN_DIR = path.join(ROOT, "packages/domain");
 
 const MODULES: Record<string, unknown> = {
   "canonical-json.ts": canonicalJson,
+  "comparators.ts": comparators,
   "blueprint.ts": blueprint,
   "contract.ts": contract,
   "evidence.ts": evidence,
@@ -51,6 +53,7 @@ const MODULES: Record<string, unknown> = {
 
 const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["canonical-json.ts", "digestCanonicalJson"],
+  ["comparators.ts", "isComparatorNormalization"],
   ["canonical-json.ts", "digestBytes"],
   ["canonical-json.ts", "canonicalJson"],
   ["canonical-json.ts", "isDigest"],
@@ -158,6 +161,23 @@ describe("domain module inventory (DESIGN §3)", () => {
     // A domain file that no test imports is untested by construction.
     expect(onDisk.filter((file) => !imported.includes(file))).toEqual([]);
     expect(imported.filter((file) => !onDisk.includes(file))).toEqual([]);
+  });
+
+  // The comparator vocabulary exists in `domain` for one reason: the page has to name what each
+  // installed policy will treat as equal, and `contracts/verification.ts` is reached through zod,
+  // which §3 keeps out of `apps/web`. That only holds while there is one list, so the re-export is
+  // asserted here rather than trusted - a second copy in the contract would let the server accept a
+  // normalization the page refuses to label, and the read door would answer "清单读不到" forever.
+  it("keeps one owner of the comparator normalization vocabulary", () => {
+    const contract = readFileSync(path.join(ROOT, "packages/contracts/verification.ts"), "utf8");
+    expect(contract).toContain('export { COMPARATOR_NORMALIZATIONS as comparatorNormalizations } from "../domain/comparators.ts";');
+    expect(contract).not.toMatch(/const comparatorNormalizations\s*=\s*\[/);
+    // Browser-safe for the same reason `id.ts` is: no Node builtin, no zod.
+    const source = readFileSync(path.join(DOMAIN_DIR, "comparators.ts"), "utf8");
+    expect(source).not.toMatch(/from\s*["'](node:|zod)/);
+    // The predicate is the owner of the closed list, so a name outside it cannot be labelled.
+    expect(comparators.isComparatorNormalization("json-key-order")).toBe(true);
+    expect(comparators.isComparatorNormalization("ignore-everything")).toBe(false);
   });
 
   it("keeps the id shape importable from a browser bundle", () => {

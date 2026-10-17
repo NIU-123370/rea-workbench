@@ -12,6 +12,11 @@ import type { JsonValue } from "../../../packages/domain/json-value.ts";
 // instead of `identity.ts`.
 import { JOB_STATES, isTerminalJobState } from "../../../packages/domain/job-states.ts";
 import type { JobState } from "../../../packages/domain/job-states.ts";
+// The comparator vocabulary is node-free and zod-free for the same reason as the two above: the
+// page has to say what each installed policy will treat as equal, and the only other owner of that
+// list is reached through zod, which §3 keeps out of this bundle.
+import { isComparatorNormalization } from "../../../packages/domain/comparators.ts";
+import type { ComparatorNormalization } from "../../../packages/domain/comparators.ts";
 
 // The three-column workbench surface (PRD F04, DESIGN §6, issue #18).
 //
@@ -828,6 +833,72 @@ export function uploadDraftOf(input: { file: File | null; kind: string; deadline
     form.append("sensitiveValues", value);
   }
   return { ok: true, form };
+}
+
+// --- The comparator a verification request is made against (§8 line 297, issue #82) -------------
+//
+// The write door accepts a policy *name*, and until the read door existed the only way to find out
+// whether a name was installed was to send it and be refused - a refusal the worker journals, so
+// even "is this right?" had a cost. The page now lists what the build installed, in the installed
+// order, and still leaves the choice unmade: deciding it for the operator is exactly §10's 不能为变绿
+// 自动忽略字段, and of the two installed names the looser one sorts first alphabetically, so no
+// reordering, no "recommended" field and no preselected option.
+
+export type ComparatorPolicyOption = { policyId: string; version: string; label: string };
+
+// Three states, three sentences. "The read did not answer" and "this build installs nothing" are
+// different facts about the world; an empty control must not stand in for either.
+export const COMPARATOR_UNREADABLE_LINE = "比较器清单读不到：这道门要的是已安装的策略名，页面不替你猜一个。";
+export const COMPARATOR_EMPTY_LINE = "本 build 没有安装任何比较器策略：任何验证请求都会在门口被具名拒绝。";
+export const COMPARATOR_UNSELECTED_LINE = "还没有选比较器策略：差别是裁决口径（把哪些差异视为相同），§10 不许页面替你默认一档。";
+
+const NORMALIZATION_PHRASES: Record<ComparatorNormalization, string> = {
+  "http-header-name-case": "header 名大小写",
+  "json-key-order": "JSON 键序",
+  "timestamp-second-rounding": "时间戳取整到秒",
+};
+
+// The read's contract is `comparatorPolicyReadSchema`, which this bundle may not import, so the shape
+// is checked here field by field. Anything the server should have refused before answering is treated
+// as "the list did not arrive" rather than shown half-read: a policy whose normalization is an
+// unknown word is a policy the page cannot label honestly, and a partly-labelled list is the one
+// thing this control must not present.
+export function comparatorOptionsOf(value: unknown): ComparatorPolicyOption[] | null {
+  const policies = (value as { policies?: unknown } | null)?.policies;
+  if (!Array.isArray(policies)) return null;
+  const options: ComparatorPolicyOption[] = [];
+  for (const entry of policies) {
+    const policy = entry as { policyId?: unknown; version?: unknown; normalization?: unknown };
+    if (typeof policy.policyId !== "string" || policy.policyId === "") return null;
+    if (typeof policy.version !== "string" || policy.version === "") return null;
+    if (!Array.isArray(policy.normalization)) return null;
+    const names: ComparatorNormalization[] = [];
+    for (const name of policy.normalization) {
+      if (typeof name !== "string" || !isComparatorNormalization(name)) return null;
+      names.push(name);
+    }
+    options.push({
+      policyId: policy.policyId,
+      version: policy.version,
+      label: `${policy.policyId}｜v${policy.version}｜${names.length === 0
+        ? "什么都不视为相同（逐字节严格）"
+        : `会视为相同：${names.map((name) => NORMALIZATION_PHRASES[name]).join("、")}`}`,
+    });
+  }
+  return options;
+}
+
+export type VerifyDraft = { ok: true; comparatorPolicyId: string } | { ok: false; line: string };
+
+// One owner for "may this request go out", in the order the refusal actually happens: no token to
+// sign with, then the list's own three states, then the name the operator picked.
+export function verifyDraftOf(input: { csrf: string; options: ComparatorPolicyOption[] | null; chosen: string }): VerifyDraft {
+  const gate = sessionGate(input.csrf);
+  if (!gate.ok) return { ok: false, line: gate.line };
+  if (input.options === null) return { ok: false, line: COMPARATOR_UNREADABLE_LINE };
+  if (input.options.length === 0) return { ok: false, line: COMPARATOR_EMPTY_LINE };
+  if (input.chosen === "") return { ok: false, line: COMPARATOR_UNSELECTED_LINE };
+  return { ok: true, comparatorPolicyId: input.chosen };
 }
 
 // --- §13's event stream, read by the job panel (issue #85) -------------------------------------
