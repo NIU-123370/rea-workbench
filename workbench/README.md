@@ -43,7 +43,7 @@ npm ci
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
-| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账，**并核对源码里点名的编号确实存在**）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
+| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账，**并核对源码里点名的 T/A/D 编号在三张表里都声明过**）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
 | `tests/{unit,integration,fixtures,support}` | 纯逻辑门禁、真 SQLite / 真文件门禁、固定 envelope fixture，以及跨套件共用的交接数据播种（`support/blueprint-seed.ts`）                                       |
 
 Builder 生成支路（F08 / A07 / issue #19）的边界：
@@ -1234,6 +1234,40 @@ runner 的，见下文"这轮没做浏览器"）：
 而 DECISIONS 的行形状（`- D23｜选了：…`）需要另一个解析器；本轮只钉住已经查出错号的 T/A 两族。
 另：本文里那些 `A11`／`A17` 是**变异批次号**不是验收号，所以源码扫描不含 README——这条限制写在
 `infra/release/docs-check.mjs` 的头注释里，不是漏掉。
+
+发布门禁·第廿二轮（2026-10-18 03:31–03:37，上一条留的 D 族洞补齐了）：
+
+- **先更正上一条**：那句「`docs/DECISIONS.md` 的 **D##** 族没进闸」**现在不成立**——本轮把它收进来了。
+  当时是分两笔的判断，不是漏读文档；DECISIONS 的行形状是 bullet（`- D23｜选了：…`）而不是表格，
+  所以要第三个解析器，**32 行全部按这个形状**（`grep -cE '^- D[0-9]{2}｜'` 现读 32）。
+- **这一族今天没有 bug，它是防腐**：本轮实测源码引用 **262 处 / 199 文件**，分族
+  **T 45／A 86／D 131**，其中 D 族**越界 0 处**（先量后写：03:30 那次独立测算是 120 处 / 0 越界，
+  笔内增长来自我自己新写的注释）。所以别把这笔读成"又抓到一个错号"，它抓的是**下一次 DECISIONS 重排
+  或有人凭空写一个不存在的决策号**。
+- **闸连着两次抓到我自己的手**，两次都不该用豁免标记解决：
+  ① 第一版把上一轮那两处缺陷的**原话**（含凭空写的 case 号与 criterion 号）写进 `docs-check.mjs`
+  的头注释，扫描器当场报了这个文件 2 条；② 第二版为了说明"未映射的族会得到什么"，随手举了一个
+  不存在的决策号当例子，又被报 1 条。⇒ 改成**在被扫的文件里不点名错号**，把具体编号留在本文与 PR 正文。
+  `docs-check-ignore` 留给"**必须**携带错号才能证拒绝"的用例行（本笔后共 9 处，全在 `docs-check.test.ts`；
+  上一条里那句「共 8 行」是本笔之前的读数，那条不动），不留给散文。
+- **删掉一条测不到的防御分支**：族标签查表的 `?? "id-family-unrecognized"`。键集就是扫描正则的字符类
+  `[TAD]`，走不到那支；真走到了得到 `undefined:<id>(文件:行)`——**仍然是非空原因、仍然红**，
+  所以删它不损失拦截，只少一条永绿分支（这条判断写在注释里，不是藏在 diff 里）。
+- **N6/N6b 这对读数和上一轮 M9 同一形状，如实记**：把决策解析器喂空时，**去掉具名守卫照样红**——
+  红成 131 条 `decision-ref-undeclared`；守卫在场是 132 条且**第一条就是
+  `decisions-table-unreadable:no - D## rows matched`**。⇒ 守卫的增量依旧是"顶上那行读得懂的原因"，
+  不是红/绿本身。
+- 末态闸门：typecheck 0／lint **206 文件 0 条**／`test:unit` **671/39**（本笔 +1 解析器用例）／
+  `test:integration` **503 passed + 6 skipped / 25 files**（不变：本笔不碰运行时行为）／`review` **0 命中**／
+  `docs:check` **17·13·32·262 引用/199 文件** exit 0。变异 **7 支（N1–N7）全红**，无等义变异存活。
+
+**这轮仍然没做的**：**还有第四族，但它没有可对账的来源**。同一棵树里另有 **8 处 `S##`**（板子切片号
+`S12/S13/S14/S19/S20`，出现在 `apps/web/ui/view-model.ts:977,1169`、`packages/adapters/rea/projection.ts:18`、
+`tests/integration/verification-service.test.ts:52`、`tests/unit/architecture.test.ts:125`、
+`tests/unit/rea-envelope.test.ts:10`——本轮现读的站点，不是回忆），而那些编号活在 **GitHub issue 标题**里、
+不在 `docs/`，所以钉它就得让 `docs:check` 去读 API。本轮**不引入这条依赖**（离线闸不能因为网络抖动而变红），
+第四族留作"来源先落在文档里"之后的事。另：`docs-check-ignore` 现共 **9 处使用**（全在 `docs-check.test.ts`）
+＋闸文件里 1 处常量定义；README 里那些 `A11`／`A17` 是**变异批次号**、不是验收号，所以本文不在扫描面内。
 
 
 ## 还没有的东西

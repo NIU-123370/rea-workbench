@@ -1,6 +1,7 @@
 // Release-gate tooling: reconcile the acceptance ids in `docs/PRD.md` against the
 // verification matrix in `docs/TESTPLAN.md` (TESTPLAN §6 / PRD A01-A13, issue #23), and
-// then reconcile the *source tree* against those two tables.
+// then reconcile the *source tree* against the three id tables the documents own:
+// cases (`T##`), criteria (`A##`) and decisions (`D##`, DECISIONS.md's `- D23｜选了：…`).
 //
 // The point is not to restate the documents — they stay the single source — but to fail
 // a release when the two stop agreeing: a test case that names an acceptance id that does
@@ -11,18 +12,36 @@
 // The third check exists because source files and the doctor's own advisory strings name
 // these ids at operators. A reference to a case the matrix never had reads as a promise
 // that some acceptance will eventually turn the gate green, and nothing in the tree notices
-// when the id is invented or when the document it came from is renumbered.
+// when the id is invented or when the document it came from is renumbered. That is not
+// hypothetical: this repository shipped a CAPABILITY_UNAVAILABLE payload that pointed an
+// operator at a case id the matrix never had, and a restore command that cited a criterion
+// the PRD does not declare. The ids are left out here on purpose — this file is scanned too,
+// and a header that needs an opt-out marker to describe the refusal is a header teaching the
+// next reader to add one.
 
 const TEST_CASE_ROW = /^\|\s*(T\d{2})\s*\|\s*([^|]+)\|/;
 const ACCEPTANCE_ROW = /^\|\s*(A\d{2})\s+[^|]+\|\s*[^|]+\|/;
+const DECISION_ROW = /^-\s*(D\d{2})｜/;
 const ID_IN_TEXT = /\bA\d{2}\b/g;
 
-// A source file names a case (`T16`) or a criterion (`A12`), and the token has to stand
-// alone for that to mean anything: `2026-10-16T09:00:00Z` carries a `T09` whose preceding
-// character is a digit, and a base64 run carries `A12` followed by a letter. Both are
-// excluded here, because a scanner that fired on timestamps would be switched off inside a
-// week — and a switched-off scanner is worse than none, since it reports a clean pass.
-const SOURCE_ID_REF = /(?<![0-9A-Za-z._-])([TA]\d{2})(?![0-9A-Za-z])/g;
+// A source file names a case (`T16`), a criterion (`A12`) or a decision (`D23`), and the
+// token has to stand alone for that to mean anything: `2026-10-16T09:00:00Z` carries a `T09`
+// whose preceding character is a digit, and a base64 run carries `A12` followed by a letter.
+// Both are excluded here, because a scanner that fired on timestamps would be switched off
+// inside a week — and a switched-off scanner is worse than none, since it reports a clean pass.
+const SOURCE_ID_REF = /(?<![0-9A-Za-z._-])([TAD]\d{2})(?![0-9A-Za-z])/g;
+
+// One row per id family, so adding a fourth table means adding it here rather than nesting
+// another ternary where a missing branch reads as "that family is checked". The key set is
+// `SOURCE_ID_REF`'s character class, so an unmapped family cannot reach the lookup; if one
+// ever did, the reason would carry the literal `undefined` where the family name belongs —
+// still a non-empty reason, so the gate fails rather than passing silently. (This comment
+// once spelled that example with an invented id, and the scanner flagged this file for it.)
+const REF_REASON_BY_PREFIX = {
+  T: "test-case-ref-undeclared",
+  A: "acceptance-ref-undeclared",
+  D: "decision-ref-undeclared",
+};
 
 // A line that has to carry an id outside the matrix — testing the refusal itself — opts out
 // inline and says why, so the opt-out stays visible at the site instead of exempting a file.
@@ -30,6 +49,7 @@ const IGNORE_MARKER = "docs-check-ignore";
 
 export const TESTPLAN_FILE = "docs/TESTPLAN.md";
 export const PRD_FILE = "docs/PRD.md";
+export const DECISIONS_FILE = "docs/DECISIONS.md";
 export const SOURCE_ROOTS = ["packages", "apps", "tests", "infra"];
 export const SOURCE_EXTENSIONS = [".ts", ".mts", ".mjs"];
 export const SKIPPED_DIRECTORIES = ["node_modules", ".next", "dist", "coverage"];
@@ -66,6 +86,19 @@ export function parseAcceptanceRows(markdown) {
   return rows;
 }
 
+// DECISIONS.md is a bullet list, not a table: `- D23｜选了：… ；为什么：… ；放弃了：…`.
+// Same reason as the other two parsers for staying line-shaped — a row that stops matching
+// is the defect, and a renumbering that the source tree has not caught up with must not be
+// able to pass by shrinking the declared set to nothing.
+export function parseDecisionRows(markdown) {
+  const rows = [];
+  for (const line of markdown.split("\n")) {
+    const match = DECISION_ROW.exec(line);
+    if (match !== null) rows.push(match[1]);
+  }
+  return rows;
+}
+
 /**
  * Every matrix/criterion id a source file names, with the site so a reason is actionable.
  * `file` is only ever used to label the reason — the caller reads the text.
@@ -89,15 +122,15 @@ export function findIdReferences(file, text) {
 
 /**
  * @param {{ ref: string, file: string, line: number }[]} references
- * @param {{ cases: string[], accepts: string[] }} declared the ids the documents declare
+ * @param {{ cases: string[], accepts: string[], decisions: string[] }} declared the ids the documents declare
  * @returns {string[]} one reason per reference that names an id no table declares
  */
 export function checkSourceReferences(references, declared) {
-  const known = new Set([...declared.cases, ...declared.accepts]);
+  const known = new Set([...declared.cases, ...declared.accepts, ...declared.decisions]);
   const reasons = [];
   for (const reference of references) {
     if (known.has(reference.ref)) continue;
-    const kind = reference.ref.startsWith("T") ? "test-case-ref-undeclared" : "acceptance-ref-undeclared";
+    const kind = REF_REASON_BY_PREFIX[reference.ref.charAt(0)];
     reasons.push(`${kind}:${reference.ref}(${reference.file}:${String(reference.line)})`);
   }
   return reasons;
@@ -178,7 +211,10 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
 
   const testplan = readFileSync(path.join(root, TESTPLAN_FILE), "utf8");
   const prd = readFileSync(path.join(root, PRD_FILE), "utf8");
+  const decisions = readFileSync(path.join(root, DECISIONS_FILE), "utf8");
   const reasons = checkDocs(testplan, prd);
+  const declaredDecisions = parseDecisionRows(decisions);
+  if (declaredDecisions.length === 0) reasons.push("decisions-table-unreadable:no - D## rows matched");
 
   /** @type {{ ref: string, file: string, line: number }[]} */
   const references = [];
@@ -208,12 +244,13 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
   reasons.push(...checkSourceReferences(references, {
     cases: parseTestCaseRows(testplan).map((row) => row.case),
     accepts: parseAcceptanceRows(prd),
+    decisions: declaredDecisions,
   }));
 
   const rows = parseTestCaseRows(testplan).length;
   const accepts = parseAcceptanceRows(prd).length;
   process.stdout.write(
-    `docs:check 用例 ${String(rows)} 条 / 验收 ${String(accepts)} 条 / 源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）\n`,
+    `docs:check 用例 ${String(rows)} 条 / 验收 ${String(accepts)} 条 / 决策 ${String(declaredDecisions.length)} 条 / 源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）\n`,
   );
   for (const reason of reasons) process.stdout.write(`- ${reason}\n`);
   process.exit(reasons.length > 0 ? 1 : 0);
