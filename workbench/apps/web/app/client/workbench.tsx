@@ -17,7 +17,6 @@ import type { CandidateDiscovery, ComparatorPolicyOption, DirectedInquiry, Graph
 // component would also drag `node:crypto` into the browser bundle.
 import type { Id } from "../../../../packages/domain/identity.ts";
 import type { ClaimEvidenceState } from "../../../../packages/domain/evidence.ts";
-import type { Digest } from "../../../../packages/domain/canonical-json.ts";
 
 // The browser half of the three columns (PRD F04 / issue #18).
 //
@@ -683,7 +682,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       ? { reason: "graph-unreadable" }
       : buildLeftPanel({
           job: newestJob,
-          target: graph.targetId === null ? null : { id: graph.targetId as Id, kind: "har", snapshotDigest: null as Digest | null },
+          target: graph.targetId === null ? null : { id: graph.targetId as Id },
           limitations: graph.truncated ? ["视图已截断：只读到前 500 条"] : [],
           scopeLabel: graph.note ?? "本项目的图",
         });

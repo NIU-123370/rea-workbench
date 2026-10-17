@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { asDigest } from "../../packages/domain/canonical-json.ts";
-import type { Digest } from "../../packages/domain/canonical-json.ts";
 import { newId } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
@@ -183,7 +181,7 @@ describe("the side columns (§6, §7.3)", () => {
   it("shows limitations next to the thing they limit", () => {
     const panel = buildLeftPanel({
       job: { id: newId(), state: "succeeded", cleanupState: "complete", errorJson: null },
-      target: { id: newId(), kind: "har", snapshotDigest: asDigest("9".repeat(64)) as Digest },
+      target: { id: newId() },
       limitations: ["关系覆盖为部分", "loopback 未观察"],
       scopeLabel: "cart 读取",
     });
@@ -196,7 +194,7 @@ describe("the side columns (§6, §7.3)", () => {
   it("states the absence of preview frames instead of leaving the slot blank", () => {
     const base = {
       job: { id: newId(), state: "succeeded", cleanupState: "complete", errorJson: null },
-      target: { id: newId(), kind: "har", snapshotDigest: asDigest("9".repeat(64)) as Digest },
+      target: { id: newId() },
       limitations: [],
       scopeLabel: "cart 读取",
     };
