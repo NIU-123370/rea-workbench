@@ -452,9 +452,12 @@ worker 的 `UNIQUE (project_id, idempotency_key)` 替换键重发兜底。**这�
 它的规矩一条条都能指回文档：字段名录就是 §8 那一格列的四件（`file`／`kind`／`deadlineAt`／
 `sensitiveValues`），第五个名字**报键名拒收**——worker 自己的命令其实支持 `recordOrdinals` 选段，
 文档这行没写，所以门不替文档加料（这条偏离记在下面那串「文档给了字段而实现无处安放」旁边）；
-`kind:'asar'` 有两种答案，按 §8 自己区分的顺序来：带 `sensitiveValues` 时 **422
-`SENSITIVE_PROJECTION_UNSUPPORTED`**（那是调用方能改的东西），不带时 **503 `import-asar-not-wired`**
-（本 build 只接了 HAR 闭环）；媒体类型只收 `CAPTURE_MEDIA_TYPES` 三个，越界回 422 并把允许表给出来。
+`kind:'asar'` 从这一轮起**与 `har` 走同一条闭环**（issue #113）：带 `sensitiveValues` 时仍按 §8 先回
+**422 `SENSITIVE_PROJECTION_UNSUPPORTED`**（那是调用方能改的东西），不带时是 **202 + 一行 `inspect` 作业**，
+生产者换叫 `analyze_javascript_application`，目标行按 §5 记 `source_sha256` 而 `snapshot_digest` 为 null、
+`identity_reason` 为 `file-import-without-capture`。此前这里回的是 503 `import-asar-not-wired`——门点名两种
+kind 而只有一种有实现，F12 整条静态支路因此只能被"自己播种信封"的测试摸到；媒体类型只收 `CAPTURE_MEDIA_TYPES`
+三个（归档走 `application/octet-stream`，不需要新值），越界回 422 并把允许表给出来。
 文件名是**显示文本**：它进 `targets.original_locator` 前过一遍 basename，落盘路径是内容地址
 `projects/<p>/artifacts/inspector/<sha256>.bin`，浏览器递 `../../../../etc/passwd` 也换不来一个路径。
 回执的形状这轮改了一次：`harImportReceiptSchema` 原来同时写着 `jobId`＋`jobState`，而 §8 要的是
@@ -1159,6 +1162,40 @@ runner 的，见下文"这轮没做浏览器"）：
   把插值 id 写成 `id={""}`、删掉勾组的 name。
 - rig 收尾：worker 收 `worker stopped`、`worker.lock` 与 `worker.rpc.sock` 自己消失；web 收 `web stopped`；
   4312/4499 两个端口都释放。**上一轮遗留的 4310/4496 两个进程仍然没动**（不是我的，也不该顺手停）。
+
+
+浏览器实测·第二十轮（2026-10-18 01:08，命令门与真 HTTP 门两侧的 asar 读数；本轮**没有新控件**，
+所以下面是门与库的读数，页面部分仍欠一次「选文件时勾 asar」的点击）：
+
+- **§8 line 272 的两个 kind 现在都是真的**（issue #113）：`formOf({kind:'asar'})` 过 Next 中继 →
+  **202**、`{targetId, job}` 恰好两键、作业 `kind:'inspect' state:'queued'`；runner 一轮之后
+  目标行 `kind:'asar'`／`source_sha256` 非空／`snapshot_digest` **null**／`identity_reason`
+  `file-import-without-capture`／`evidence_ids` ＝ `[ev_aaa…]`，信封的 `operation` 是
+  `analyze_javascript_application`。带 `sensitiveValues` 时仍先 **422**，不回 503 也不回 202。
+- **生产者是被存下来的行选的，不是被请求再声明一次的**：`runInspection` 读 `targets.kind` 决定问哪把工具，
+  变异「永远问采集工具」与「按请求里的 format」两条各被对应用例打死。
+- 夹具这次**必须真的回答我们递过去的文件**：`analyze_javascript_application` 的答复把 `parameters.input_path`
+  改写成收到的那个路径，用例再用它去 `readFileSync` 并把字节重哈希与 `targets.source_sha256` 比对——
+  把这一行改回"照抄录制值"的变异（A7）当场红。
+- 顺手抓到的一处自相矛盾：回执 `snapshotDigest` 原来无条件写「测得的摘要」，而 §5 说归档没有部署快照，
+  于是同一件事在行里是 null、在回执里是一个摘要。改成**读行的值**，并给 HAR 与 ASAR 各一条断言
+  （只有 asar 那条为 null 才算区分开；把 A5 变异——重新自己推导——打死）。
+- 一条**没有主人的检查被删掉**而不是留着：我起先加了「目标既不是 har 也不是 asar ⇒ 拒」的运行时分支，
+  然后发现走不到——URL 目标没有 store 铸出的 source artifact，上面一条 `import-incomplete` 先把它拒了；
+  而想绕过就得伪造 `recordOrdinals`，那又撞在 `rejectedKeys` 门外。留着它=一条永远不会红的装饰，
+  所以删成一个类型收窄（`target.kind === "asar" ? "asar" : "har"`）并把原因写在注释里。
+- 新守卫一条：`FILE_TARGET_KINDS` 成为「导入的两种 kind」的唯一所有者——门口那份内联
+  `["har","asar"]` 换成它，契约的 `format` 也从它取（原来是 `z.literal("har")`，那正是门点名两种而
+  实现只有一种的机器可读版本）。
+- 末态闸门：typecheck 0／lint 205 文件 0 条／`test:unit` **667/39**／`test:integration`
+  **503 passed + 6 skipped / 25 files**（本笔 +2：HTTP 门那条改写＋命令门两条新用例）／`review` 0 命中／
+  `docs:check` 17·13。变异 7 支（A1–A7）全被该杀它的用例杀掉，无等义变异。
+
+**这轮仍然没做的**：页面里勾 `asar` 再点「上传」的读数（控件是 select，值已经在 §8 的门上验过，但按规矩
+「新路由都要在浏览器点一次」这条不算数）；以及 ASAR 静态支路**读起来的那一半**——
+`StaticAnalysisService` 在 `apps/` 里没有任何装配点、封闭命令表里没有它的名字，所以投影与未知项查询
+今天仍只有单测调用方（这是 #56/#107/#108 同一类，规模小于它们，下一步补）。
+大文件仍是 #77（本笔不动协议：HTTP 侧还是 5 MiB 一条路）。
 
 
 ## 还没有的东西

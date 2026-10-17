@@ -2,14 +2,22 @@ import type { JsonValue } from "../../domain/json-value.ts";
 import type { CaptureInspectionOutcome, CaptureInspectionRequest } from "../../application/ports.ts";
 import type { ReaSession } from "./session.ts";
 import type { ReaEvidence, ReaToolError } from "../../contracts/rea-evidence.ts";
+import { webNetworkCaptureInputSchema } from "../../contracts/rea-web-capture.ts";
+import { analyzeJavaScriptApplicationInputSchema } from "../../contracts/rea-static-analysis.ts";
 
-// The one producer call the HAR ingestion loop is allowed to make (DESIGN §9).
+// The producer calls the ingestion loop is allowed to make (DESIGN §9, §1's first and third
+// rows: what a capture recorded, and which static modules and boundaries an archive holds).
 //
 // This adapter exists so the ingestion service cannot hold a transport: it can ask
 // for an inspection of a path the artifact store minted, and everything about the
 // connection — tool naming, envelope decoding, the retained-record ledger, and the
 // rule that a `resource_constraint` answer is consumed by reference instead of
 // re-run — lives here.
+//
+// One method, two tools, chosen by the stored `format` and by nothing else. §8 line 272 makes the
+// kind the caller's only statement about what the bytes are, and the row's format is the record of
+// what was actually accepted, so a caller cannot ask the capture tool to read an archive or the
+// analyser to read a HAR.
 
 type InspectorCode = CaptureInspectionOutcome extends infer O
   ? O extends { kind: "failure"; code: infer C }
@@ -67,16 +75,9 @@ export class ReaCaptureInspector {
   }
 
   async inspect(input: CaptureInspectionRequest): Promise<CaptureInspectionOutcome> {
-    // Argument names are the producer's own (`capture_path`, `format`,
-    // `record_ordinals`, `sensitive_values`), mirrored in contracts/rea-web-capture.ts.
-    const args: Record<string, JsonValue> = {
-      capture_path: input.capturePath,
-      format: input.format,
-      sensitive_values: [...input.sensitiveValues],
-    };
-    if (input.recordOrdinals !== null) args["record_ordinals"] = [...input.recordOrdinals];
-
-    const called = await this.session.callTool("inspect_web_network_capture", args);
+    const named = input.format === "har" ? this.captureArgs(input) : this.archiveArgs(input);
+    if (!named.ok) return { kind: "failure", code: "REA_CONTRACT_MISMATCH", reason: named.reason, message: named.message };
+    const called = await this.session.callTool(named.tool, named.args);
     if (!called.ok) {
       return {
         kind: "failure",
@@ -115,7 +116,53 @@ export class ReaCaptureInspector {
         };
       }
     }
-    const named = NAMED_CODE_BY_REA_ERROR[error.code] ?? "CAPABILITY_UNAVAILABLE";
-    return { kind: "failure", code: named, reason: error.code, message: error.message };
+    const mapped = NAMED_CODE_BY_REA_ERROR[error.code] ?? "CAPABILITY_UNAVAILABLE";
+    return { kind: "failure", code: mapped, reason: error.code, message: error.message };
   }
+
+  // Outgoing arguments are checked against the same mirrors the advertised `tools/list` shapes were
+  // recorded into (`retention.ts` states why: the MCP layer refuses an unknown argument with prose
+  // that is not an envelope at all, so an unvalidated call has no readable failure).
+  private captureArgs(input: CaptureInspectionRequest):
+    | { ok: true; tool: string; args: Record<string, JsonValue> }
+    | { ok: false; reason: string; message: string } {
+    const built: Record<string, JsonValue> = {
+      capture_path: input.capturePath,
+      format: input.format,
+      sensitive_values: [...input.sensitiveValues],
+    };
+    if (input.recordOrdinals !== null) built["record_ordinals"] = [...input.recordOrdinals];
+    const checked = webNetworkCaptureInputSchema.safeParse(built);
+    if (!checked.success) return refusedArgs("inspect_web_network_capture", checked.error.issues.map((issue) => issue.path.join(".")));
+    return { ok: true, tool: "inspect_web_network_capture", args: checked.data as unknown as Record<string, JsonValue> };
+  }
+
+  private archiveArgs(input: CaptureInspectionRequest):
+    | { ok: true; tool: string; args: Record<string, JsonValue> }
+    | { ok: false; reason: string; message: string } {
+    // Upstream has no sensitive projection for this tool, which is why §8 line 272 answers an ASAR
+    // declaration with 422 before anything is stored. The empty list is not a suppression: it is the
+    // statement that nothing was declared, so the mirror can keep `additionalProperties:false` honest.
+    // Only what §1's row for this tool names: the path and the format. `integrity_policy` and
+    // `detail` carry producer defaults in the mirror, and the arguments actually sent are the parsed
+    // object below - so the defaults that travel are the ones this repository declared, not whatever
+    // the child happens to assume.
+    const checked = analyzeJavaScriptApplicationInputSchema.safeParse({
+      input_path: input.capturePath,
+      format: input.format,
+    });
+    if (!checked.success) {
+      return refusedArgs("analyze_javascript_application", checked.error.issues.map((issue) => issue.path.join(".")));
+    }
+    return { ok: true, tool: "analyze_javascript_application", args: checked.data as unknown as Record<string, JsonValue> };
+  }
+}
+
+function refusedArgs(tool: string, fields: string[]): { ok: false; reason: string; message: string } {
+  // Field names only: an argument value can be a declared secret, and this string reaches a row.
+  return {
+    ok: false,
+    reason: `producer-args-rejected:${tool}`,
+    message: `the outgoing arguments do not match the mirrored schema at ${fields.join(",") || "an unnamed field"}`,
+  };
 }

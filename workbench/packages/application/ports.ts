@@ -4,6 +4,7 @@ import type { Id, Instant } from "../domain/identity.ts";
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
 import type { RequestSide, ResponseSide, VectorSource } from "../domain/vector.ts";
+import type { FileTargetKind } from "../domain/target.ts";
 import type { CleanupState, JobKind, JobState } from "../contracts/jobs.ts";
 import type {
   CancelOwnedBrokerRequest,
@@ -257,8 +258,12 @@ export type GraphEdgeRow = {
 // thing it can ask for is an inspection of a file the workbench itself staged
 // (DESIGN §8 ingestion, §9, D25).
 export type CaptureInspectionRequest = {
+  // A path this build's own store minted - never a caller's string - for either format. §8 line 272
+  // names two producers (`inspect_web_network_capture` for a HAR, `analyze_javascript_application`
+  // for an ASAR archive); which one is asked is decided by `format` alone, so a caller cannot pair an
+  // archive path with the capture tool or the other way round.
   capturePath: string;
-  format: "har";
+  format: FileTargetKind;
   recordOrdinals: number[] | null;
   // Lives only for this call. Nothing in the persistence path reads it back, and
   // no field of it is stored or journalled.

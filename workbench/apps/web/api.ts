@@ -15,6 +15,8 @@ import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, expor
 import { cancelRequestSchema, cleanupRetryReceiptSchema, jobPageSchema, jobRecordSchema, jobRequestSchema } from "../../packages/contracts/jobs.ts";
 import type { JobRecord } from "../../packages/contracts/jobs.ts";
 import { CAPTURE_MEDIA_TYPES, harImportHttpResponseSchema } from "../../packages/contracts/imports.ts";
+import { FILE_TARGET_KINDS } from "../../packages/domain/target.ts";
+import type { FileTargetKind } from "../../packages/domain/target.ts";
 import { instantSchema } from "../../packages/contracts/primitives.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
@@ -1140,7 +1142,7 @@ async function requestJob(ctx: Context, deps: ApiDependencies, key: string): Pro
 // worker's own command does support a `recordOrdinals` selection; §8 line 272 does not list it, so
 // it stays a service-side capability and the deviation is recorded on issue #58.)
 const IMPORT_FIELDS: readonly string[] = ["file", "kind", "deadlineAt", "sensitiveValues"];
-const IMPORT_KINDS: readonly string[] = ["har", "asar"];
+const IMPORT_KINDS: readonly string[] = FILE_TARGET_KINDS;
 
 async function importCapture(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
@@ -1205,9 +1207,6 @@ async function importCapture(ctx: Context, deps: ApiDependencies, key: string): 
   if (kind === "asar" && declaredValues.length > 0) {
     return refused(ctx.requestId, "SENSITIVE_PROJECTION_UNSUPPORTED", "import-asar-sensitive-values-unsupported", "the ASAR path records no short-lived sensitive declaration (§8 line 272: 不伪称上游支持)", declaration);
   }
-  if (kind === "asar") {
-    return refused(ctx.requestId, "CAPABILITY_UNAVAILABLE", "import-asar-not-wired", "this build wires the HAR ingestion loop only (README 还没有的东西)", declaration);
-  }
   // Display text, never a path this process opens (§5): the bytes arrived in this request, and
   // nothing below reads the name again.
   const filename = part.name;
@@ -1216,7 +1215,10 @@ async function importCapture(ctx: Context, deps: ApiDependencies, key: string): 
   const safeBody: Record<string, JsonValue> = {
     filename,
     mediaType,
-    format: "har",
+    // The one place a kind becomes a format, and it is a cast to the type the list already proves:
+    // the row the worker writes, the tool the adapter asks for, and the schema the command parses
+    // all read this value, so a kind outside `FILE_TARGET_KINDS` cannot reach any of them.
+    format: kind as FileTargetKind,
     byteLength: bytes.byteLength,
     sourceSha256,
   };

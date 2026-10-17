@@ -342,6 +342,18 @@ async function callTool(name, args) {
       },
     };
   }
+  if (name === "analyze_javascript_application") {
+    // The recorded envelope of the real tool's reply, with one thing rewritten: it has to be about
+    // the archive this call was actually handed. A fixture that answers with a recorded `input_path`
+    // nobody sent lets an ingestion test pass without ever reading the bytes it imported.
+    const recorded = JSON.parse(readFileSync(path.join(HERE, "asar-application-envelope.json"), "utf8"));
+    recorded.parameters = {
+      ...recorded.parameters,
+      input_path: typeof args?.["input_path"] === "string" ? args["input_path"] : null,
+      format: typeof args?.["format"] === "string" ? args["format"] : "asar",
+    };
+    return recorded;
+  }
   if (name === "inspect_analysis_view") {
     if (args?.source?.kind !== "retained-evidence" || typeof args.source.evidence_id !== "string") {
       // The provider refuses a reference it cannot resolve, naming the field.

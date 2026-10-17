@@ -204,6 +204,9 @@ describe("the runner drives the ingestion row an upload left (§8 line 272, §11
     expect(asked.job.kind).toBe("inspect");
     expect(asked.job.state).toBe("queued");
     const jobId = asId(asked.job.id);
+    // The captured half of §8 line 272: same field, real value. Without this paired assertion the
+    // nullable above would just look like a broken projection.
+    expect((await ask("capture.importHar", importPayload(projectId, "import-exec-one")) as { value?: { snapshotDigest?: string | null } }).value?.snapshotDigest).not.toBeNull();
 
     // Before the turn, §8 line 281's door has nothing to answer: this is the reading that shows the
     // row was genuinely un-driven rather than the evidence arriving some other way.
@@ -304,6 +307,75 @@ describe("the runner drives the ingestion row an upload left (§8 line 272, §11
     // A broken row is refused, not handed to whichever service happens to be wired: no evidence read
     // was attempted, so nothing was consumed from the provider.
     expect((await ask("evidence.get", { projectId, evidenceId: EVIDENCE_ID })).ok).toBe(false);
+  });
+
+  it("reads the producer choice off the stored row, not off a re-declared kind (§8 line 272, issue #113)", async () => {
+    const projectId = await newProject("inspect-exec-asar");
+    const asarBytes = new TextEncoder().encode(JSON.stringify({ fake: "archive bytes" }));
+    const asked = unwrap(await ask("capture.importHar", {
+      projectId,
+      command: {
+        filename: "app.asar",
+        mediaType: "application/octet-stream",
+        format: "asar",
+        byteLength: asarBytes.byteLength,
+        sourceSha256: digestBytes(asarBytes),
+        idempotencyKey: "import-exec-asar",
+      },
+      bytesBase64: Buffer.from(asarBytes).toString("base64"),
+    })) as { targetId: string; job: { id: string }; snapshotDigest: string | null };
+    // The receipt reads the row's own answer. It used to re-derive the content digest here, which
+    // made it claim a snapshot §5 says an archive cannot have - two answers about one fact.
+    expect(asked.snapshotDigest).toBeNull();
+
+    const outcome = await turn();
+    expect(outcome.kind).toBe("inspected");
+    if (outcome.kind !== "inspected") return;
+    expect(outcome.jobState).toBe("succeeded");
+
+    // The row is the authority for both halves of §5's line: kind asar, source digest yes,
+    // deployment snapshot no, and the envelope is the analyser's, not the capture tool's.
+    const target = unwrap(await ask("target.read", { projectId, targetId: asked.targetId })) as {
+      kind: string;
+      snapshotDigest: string | null;
+      identityReason: string | null;
+      evidenceIds: string[];
+    };
+    expect(target.kind).toBe("asar");
+    expect(target.snapshotDigest).toBeNull();
+    expect(target.identityReason).toBe("file-import-without-capture");
+    expect(target.evidenceIds).toEqual([EVIDENCE_ID]);
+    const envelope = unwrap(await ask("evidence.get", { projectId, evidenceId: EVIDENCE_ID })) as { evidence: JsonValue };
+    const record = envelope.evidence as { operation: string; parameters: { format?: string } };
+    expect(record.operation).toBe("analyze_javascript_application");
+    expect(record.parameters.format).toBe("asar");
+  });
+
+  it("refuses the two combinations no door should be able to ask a producer for", async () => {
+    const projectId = await newProject("inspect-exec-refusals");
+    const asarBytes = new TextEncoder().encode(JSON.stringify({ fake: "archive bytes" }));
+    const withSelection = await ask("capture.importHar", {
+      projectId,
+      command: {
+        filename: "app.asar",
+        mediaType: "application/octet-stream",
+        format: "asar",
+        byteLength: asarBytes.byteLength,
+        sourceSha256: digestBytes(asarBytes),
+        idempotencyKey: "import-exec-asar-selection",
+        // The command schema admits a selection; the analyser has no records to select. Only the
+        // worker's own socket can pair the two, and this is the case that says it is refused rather
+        // than silently analysed whole.
+        recordOrdinals: [0],
+      },
+      bytesBase64: Buffer.from(asarBytes).toString("base64"),
+    });
+    expect(withSelection.ok).toBe(true);
+    const stopped = await turn();
+    expect(stopped.kind).toBe("failed");
+    if (stopped.kind !== "failed") return;
+    expect(stopped.reason).toBe("inspection-record-ordinals-for-archive");
+
   });
 
   it("leaves §8 line 310's investigation row queued and untouched", async () => {

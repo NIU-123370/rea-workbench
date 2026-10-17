@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { digestSchema, idSchema, instantSchema, jsonValueSchema, limitSchema, nonEmptyString } from "./primitives.ts";
+import { FILE_TARGET_KINDS } from "../domain/target.ts";
 import { jobRecordSchema } from "./jobs.ts";
 
 // HAR ingestion contract (DESIGN §8 ingestion, §5 targets/jobs, D25, PRD F02/A01).
@@ -21,7 +22,9 @@ export const harImportCommandSchema = z.strictObject({
   // opens: the bytes arrive in this request.
   filename: nonEmptyString.max(255),
   mediaType: z.enum(CAPTURE_MEDIA_TYPES),
-  format: z.literal("har"),
+  // §8 line 272 names both kinds on this one door; the value is the target row's kind too, so the
+  // vocabulary is the domain's (`FILE_TARGET_KINDS`) and not a second list that can drift.
+  format: z.enum(FILE_TARGET_KINDS),
   byteLength: z.int().nonnegative(),
   sourceSha256: digestSchema,
   idempotencyKey: nonEmptyString.max(200),
@@ -44,9 +47,12 @@ export const harImportReceiptSchema = z.strictObject({
   job: jobRecordSchema,
   leaseId: idSchema,
   sourceArtifactId: idSchema,
-  // A file target's snapshot identity is its content digest, stated rather than
-  // guessed: the snapshot exists before any producer has looked inside.
-  snapshotDigest: digestSchema,
+  // A captured file's snapshot identity is its content digest, stated rather than
+  // guessed: the snapshot exists before any producer has looked inside. §5 says an archive is never
+  // captured, so the same field is null for one - and the receipt reads the row's value rather than
+  // re-deriving `measured`, because a receipt that named a snapshot the stored target denies would
+  // be two answers about one fact.
+  snapshotDigest: digestSchema.nullable(),
   byteLength: z.int().nonnegative(),
   reused: z.boolean(),
 });
@@ -68,7 +74,7 @@ export const harImportHttpResponseSchema = z.strictObject({
 export const ingestionJobInputSchema = z.strictObject({
   filename: nonEmptyString.max(255),
   mediaType: z.enum(CAPTURE_MEDIA_TYPES),
-  format: z.literal("har"),
+  format: z.enum(FILE_TARGET_KINDS),
   byteLength: z.int().nonnegative(),
   sourceSha256: digestSchema,
   // A selection is stated, an omitted selection is `null` - not an empty list, which would read as
