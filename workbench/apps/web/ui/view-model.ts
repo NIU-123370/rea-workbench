@@ -301,6 +301,9 @@ export type LeftPanel = {
   // operator has to go looking for.
   limitations: string[];
   cleanupState: string | null;
+  // What a refused task says about itself (§8's ApiError on the job row, issue #59). Null means
+  // this row has not been refused - not that it failed without a reason.
+  failure: string | null;
   // The 画面 slot of the left column. An offline HAR import has no frames to show, and
   // saying so is the point: a missing preview must not read as "the capture produced
   // nothing worth looking at" (§6's honesty rule applied to the sandbox panel).
@@ -328,6 +331,7 @@ export function buildLeftPanel(input: {
     viewLabel: input.scopeLabel,
     limitations: [...input.limitations],
     cleanupState: input.job?.cleanupState ?? null,
+    failure: jobFailureLine(input.job?.errorJson ?? null),
     frames: {
       count: (input.frameLabels ?? []).length,
       note: (input.frameLabels ?? []).length > 0 ? "见下方画面列表" : "无画面：本次导入只带请求与响应，没有预览帧",
@@ -503,6 +507,35 @@ export function samplesPageOf(payload: unknown): SamplesPage {
 export function refusalLine(head: string, reason: string, facts: Record<string, number | boolean>): string {
   const published = refusalFactsLine(facts);
   return published === null ? `${head}：${reason}` : `${head}：${reason}（${published}）`;
+}
+
+// The one place a refused job row is turned into a sentence. §11's machine puts the reason and
+// the numbers on `jobs.error_json` (issue #59 made them survive both filters to get there), and
+// until now the left column rendered only the state word - so a generation that spent its budget
+// read as "failed" with the two numbers that explain it sitting one request away, unread.
+//
+// The details object arrives already reduced to the declared-safe keys (`safeFailureDetails` at the
+// worker's socket boundary, re-checked by this process); this function only orders and joins, so a
+// key that was never whitelisted cannot appear here any more than it can appear in the reply.
+export function jobFailureLine(errorJson: JsonValue | null): string | null {
+  if (errorJson === null || typeof errorJson !== "object" || Array.isArray(errorJson)) return null;
+  const error = errorJson as Record<string, JsonValue>;
+  const reason = typeof error["message"] === "string" ? error["message"] : null;
+  const code = typeof error["code"] === "string" ? error["code"] : null;
+  if (reason === null && code === null) return null;
+  const facts =
+    error["details"] !== null && typeof error["details"] === "object" && !Array.isArray(error["details"])
+      ? Object.fromEntries(
+          Object.entries(error["details"] as Record<string, JsonValue>).filter(
+            ([, value]) => typeof value === "number" || typeof value === "boolean",
+          ),
+        )
+      : {};
+  const head = [code, reason].filter((part): part is string => part !== null).join(" / ");
+  const published = refusalFactsLine(facts as Record<string, number | boolean>);
+  // The reason string is the named code the queue stored, so a row that failed without one still
+  // says which field of the shape is missing rather than rendering "undefined".
+  return published === null ? `本次任务被拒：${head}` : `本次任务被拒：${head}（${published}）`;
 }
 
 export function samplesRefusalLine(kind: "read" | "decision", reason: string, facts: Record<string, number | boolean>): string {

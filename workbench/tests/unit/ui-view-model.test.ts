@@ -4,6 +4,7 @@ import { newId } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
 import {
+  jobFailureLine,
   buildLeftPanel,
   buildMiddlePanel,
   canvasEdges,
@@ -1803,3 +1804,73 @@ describe("plan builder (DESIGN §8 line 289 / §7.4)", () => {
     expect(planBuildLine({ ...receipt, reviewStatus: "approved" })).not.toContain("草稿");
   });
 });
+
+// Issue #59's projection half: the left column may only say what the reply published. The four
+// shapes below are the ones a job row can actually arrive with - no error, an error with numbers,
+// an error whose details carry only the reason name, and a value that is not a number.
+describe("jobFailureLine says what the refusal published (issue #59)", () => {
+  it("stays silent for a row that was not refused", () => {
+    expect(jobFailureLine(null)).toBeNull();
+    expect(jobFailureLine("a string is not an ApiError")).toBeNull();
+    expect(jobFailureLine({ retryable: false })).toBeNull();
+  });
+
+  it("quotes the reason and every published number", () => {
+    expect(
+      jobFailureLine({
+        code: "RESOURCE_LIMIT",
+        message: "generation-budget-exhausted",
+        details: { reason: "generation-budget-exhausted", attempt: 4, maxAttempts: 3 },
+      }),
+    ).toBe("本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 4 · maxAttempts 3）");
+  });
+
+  it("names the refusal without inventing a number when only the reason name was published", () => {
+    // `reason` is a string, and a string never becomes page text here: the sentence the operator
+    // reads has to be built from what the reply measured, not from whatever text a detail carried.
+    expect(jobFailureLine({ code: "STALE_INPUT", message: "graph-moved-since-plan", details: { reason: "graph-moved-since-plan" } })).toBe(
+      "本次任务被拒：STALE_INPUT / graph-moved-since-plan",
+    );
+  });
+
+  it("ignores a detail that is not a number or a boolean", () => {
+    // The API already filtered keys; this is the second half of the same rule - a string value
+    // does not become page text here even if a future key ever carried one.
+    expect(
+      jobFailureLine({ code: "RESOURCE_LIMIT", message: "inventory-too-large", details: { limit: 500, note: "raw producer text" } }),
+    ).toBe("本次任务被拒：RESOURCE_LIMIT / inventory-too-large（limit 500）");
+  });
+});
+
+  // The wiring, not just the sentence: a row the left column was handed is what decides whether a
+  // refusal appears at all. Without this case `buildLeftPanel` could keep returning `failure: null`
+  // for every job and every text-level test would still pass.
+  it("carries the refusal from the job row into the left column", () => {
+    const refused = buildLeftPanel({
+      job: {
+        id: newId(),
+        state: "failed",
+        cleanupState: "complete",
+        errorJson: {
+          code: "RESOURCE_LIMIT",
+          message: "generation-budget-exhausted",
+          retryable: false,
+          details: { reason: "generation-budget-exhausted", attempt: 4, maxAttempts: 3 },
+        },
+      },
+      target: { id: newId() },
+      limitations: [],
+      scopeLabel: "cart 读取",
+    });
+    if ("reason" in refused) throw new Error("the panel refused to build");
+    expect(refused.failure).toBe("本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 4 · maxAttempts 3）");
+
+    const running = buildLeftPanel({
+      job: { id: newId(), state: "running", cleanupState: "pending", errorJson: null },
+      target: { id: newId() },
+      limitations: [],
+      scopeLabel: "cart 读取",
+    });
+    if ("reason" in running) throw new Error("the panel refused to build");
+    expect(running.failure).toBeNull();
+  })

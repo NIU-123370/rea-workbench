@@ -41,9 +41,20 @@ export type SessionState = "unknown" | "paired" | "unpaired";
 // The two reads the 代码 tab needs (§8 lines 277, 294-296). Cast rather than re-validated:
 // the API replied through `jobPageSchema` and `candidateViewSchema` on its way out, and a
 // second parser in the browser bundle would be a second owner of the same wire contract.
-// `error` is the safe projection the worker already sanitised (§12.1), never a raw message.
+// `error` is the safe projection the worker already sanitised (§12.1), never a raw message - and
+// `details` is part of that projection, not an extra: it is where §8's ApiError keeps the numbers
+// that separate "too big" from "not found" (issue #59). Dropping it from this type would put the
+// page back to reading `failed` alone while the reply it already holds says `attempt 4 /
+// maxAttempts 3`.
 export type JobsPagePayload = {
-  items: { id: string; kind: string; state: string; cleanupState: string; resultRef: string | null; error: { code: string; message: string } | null }[];
+  items: {
+    id: string;
+    kind: string;
+    state: string;
+    cleanupState: string;
+    resultRef: string | null;
+    error: { code: string; message: string; details?: Record<string, number | string | boolean> } | null;
+  }[];
   nextCursor: string | null;
 };
 

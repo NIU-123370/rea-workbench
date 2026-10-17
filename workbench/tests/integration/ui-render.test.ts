@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { WorkbenchColumns } from "../../apps/web/ui/panels.tsx";
-import { buildMiddlePanel, buildRightTabs, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, PLAN_NO_JOURNAL_LINE, PLAN_NO_TARGET_LINE, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { buildMiddlePanel, buildRightTabs, jobFailureLine, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, PLAN_NO_JOURNAL_LINE, PLAN_NO_TARGET_LINE, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
 import { Workbench } from "../../apps/web/app/client/workbench.tsx";
 import { ProjectList } from "../../apps/web/app/client/project-list.tsx";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
@@ -59,13 +59,15 @@ type RenderOptions = {
   mode: "canvas" | "list";
   isBuilder?: boolean;
   activeTab?: "contract" | "code" | "report";
+  // The refusal sentence the left column was handed, when the row it read had been refused.
+  failure?: string | null;
   onJumpToEvidence?: (evidenceId: string) => void;
   onInquiry?: (inquiry: unknown) => void;
   onSelectTab?: (id: string) => void;
 };
 
 function render(options: RenderOptions): string {
-  const { mode, isBuilder = false, activeTab = "contract", ...rest } = options;
+  const { mode, isBuilder = false, activeTab = "contract", failure = null, ...rest } = options;
   return renderToStaticMarkup(
     createElement(WorkbenchColumns, {
       left: {
@@ -74,6 +76,7 @@ function render(options: RenderOptions): string {
         viewLabel: "cart 读取",
         limitations: ["关系覆盖为部分"],
         cleanupState: "pending",
+        failure,
         frames: { count: 0, note: "无画面：本次导入只带请求与响应，没有预览帧" },
       },
       cells: built.cells,
@@ -91,6 +94,31 @@ function render(options: RenderOptions): string {
 function rendered(mode: "canvas" | "list", isBuilder = false): string {
   return render({ mode, isBuilder });
 }
+
+// Issue #59's last step: the numbers a refusal published have to be on the page, not only in the
+// reply the browser already holds. Two halves, because the missing half is the one that lies -
+// a row that was never refused must not gain a 被拒 field, and a refused row must not be able to
+// lose the numbers.
+describe("the left column says what a refused task said (issue #59)", () => {
+  it("renders the published numbers beside the reason", () => {
+    const html = render({
+      mode: "list",
+      failure: jobFailureLine({
+        code: "RESOURCE_LIMIT",
+        message: "generation-budget-exhausted",
+        retryable: false,
+        details: { reason: "generation-budget-exhausted", attempt: 4, maxAttempts: 3 },
+      }),
+    });
+    expect(html).toContain('data-job-failure="本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 4 · maxAttempts 3）"');
+    expect(html).toContain("被拒");
+  });
+
+  it("renders no refusal field at all when the row was not refused", () => {
+    expect(render({ mode: "list" })).not.toContain("data-job-failure");
+    expect(render({ mode: "list" })).not.toContain("被拒");
+  });
+});
 
 describe("the rendered three columns (PRD F04)", () => {
   it("states each status in words and glyphs, never as colour alone", () => {
