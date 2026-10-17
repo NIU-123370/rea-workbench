@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { apiErrorSchema } from "./errors.ts";
 import { idSchema, instantSchema, nonEmptyString } from "./primitives.ts";
+import { jobTaskSchema } from "./tasks.ts";
 // Imported for the schemas below *and* re-exported: a re-export alone would not put these names in
 // scope here, and a copy of the vocabulary in two files is what this move exists to remove.
 import { CLEANUP_STATES, JOB_KINDS, JOB_STATES } from "../domain/job-states.ts";
@@ -79,3 +80,24 @@ export const jobPageSchema = z.strictObject({
 
 export type JobListRequest = z.infer<typeof jobListRequestSchema>;
 export type JobPage = z.infer<typeof jobPageSchema>;
+
+// --- Asking for work (DESIGN §8 line 275 / issue #58) ---------------------------------
+//
+// The one route in §8's table whose body *is* a task: `CaptureTask | InspectTask`, the named union
+// that is the whole instruction surface a target may receive (no JS, no shell, no arbitrary file
+// access). Two fields here are not decoration:
+//   * `expectedGraphRevision` is required rather than optional because §8's own note says
+//     依赖图版本的写入必须带它, and a capture is such a write;
+//   * `deadlineAt` stays optional, and when it is absent the profile's queue wait decides - the
+//     service takes that number from the installed profile and invents nothing (§14).
+// `sensitiveValues` is a field of the capture task that never reaches this request's stored or
+// digested half (§12.1), which is why the service rebuilds the task rather than persisting what it
+// was handed.
+export const jobRequestSchema = z.strictObject({
+  targetId: idSchema,
+  expectedGraphRevision: z.int().nonnegative(),
+  deadlineAt: instantSchema.optional(),
+  task: jobTaskSchema,
+});
+
+export type JobRequest = z.infer<typeof jobRequestSchema>;

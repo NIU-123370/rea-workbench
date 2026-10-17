@@ -41,6 +41,7 @@ import { ContractService } from "../../packages/application/contract-service.ts"
 import { TargetService } from "../../packages/application/target-service.ts";
 import { ProjectReadService } from "../../packages/application/project-read.ts";
 import { JobLifecycleService } from "../../packages/application/job-lifecycle.ts";
+import { JobRequestService } from "../../packages/application/job-request.ts";
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
@@ -122,6 +123,11 @@ export const COMMAND_NAMES = [
   // machine; `job.cleanupRetry` re-schedules owned cleanup and nothing else.
   "job.cancel",
   "job.cleanupRetry",
+  // Asking for work against a target (§8 line 275). It is a *creation*, so §8 line 261 gives it an
+  // Idempotency-Key, and it is the last row in §8's table that this build can mount: the body is the
+  // named `CaptureTask | InspectTask` union, the answer is the queued row, and nothing in it can
+  // produce a conclusion - §10. What runs the row is issue #75's other half, and the doctor says so.
+  "job.request",
   // The two audit windows (§8 lines 302-303). They are separate names because the rows they
   // read are separate: one project's decisions, and the entries that belong to no project.
   "audit.list",
@@ -482,6 +488,23 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const targets = new TargetService({ storage: writer });
   const projectPage = new ProjectReadService({ storage: writer });
   const lifecycle = new JobLifecycleService({ storage: writer });
+  // Asking for work against a target (§8 line 275). The one thing this service cannot own is the
+  // profile registry: §14 makes the installed profile the only source of a job's wait budget, and a
+  // capture task names that profile by id. So the registry is handed down as a question - "is there a
+  // profile under this name, and what is its queue wait" - and a name with no profile behind it is a
+  // refusal rather than a number invented here. Like `generationContext`, this asks `get` rather than
+  // `availableFor`: whether this host can enforce the sandbox is the doctor's sentence, not a claim
+  // about the numbers in the file.
+  const jobRequests = new JobRequestService({
+    storage: writer,
+    limits: LIMITS,
+    profiles: {
+      resolve: (profileId) => {
+        const entry = profiles.get(profileId);
+        return entry === null ? null : { queueWaitMs: entry.profile.limits.queueWaitMs };
+      },
+    },
+  });
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
@@ -682,6 +705,20 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const refused = missing(jobId);
       if (refused !== null) return refused;
       return relay(lifecycle.retryCleanup(projectIdOr(payload), actor, jobId as Id));
+    },
+    // §8 line 275. The key is required here for the same reason it is required on the other
+    // creations: the jobs row carries it, and §5's unique (project, idempotency_key) index is what
+    // makes a retry land on one row rather than two pieces of queued work.
+    "job.request": (payload, actor) => {
+      const key = pickString(payload, "idempotencyKey");
+      if (key === null || !isIdempotencyKey(key)) {
+        return gateFail("INVALID_INPUT", "idempotency-key-required", "a job request carries an Idempotency-Key (§8 line 261)");
+      }
+      return relay(
+        jobRequests.request(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {}, key, {
+          defaultProfileId: config.sandboxProfile,
+        }),
+      );
     },
     "job.get": (payload, actor) => {
       const projectId = pickId(payload, "projectId");
@@ -1132,6 +1169,26 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
           return waiting.value === 0
             ? { state: "ok", facts: { queuedVerifyCount: 0 } }
             : { state: "degraded", reasons: ["verification-executor-not-installed"] };
+        },
+      },
+      {
+        // The same sentence for the two kinds §8 line 275 can now queue. The runner takes `build` rows
+        // only (issue #57's shape), and nothing in this build drives a browser or decodes an archive,
+        // so a `capture` or `inspect` row sits at `queued` until an executor exists. Without this cell
+        // the door would be the only place that ever claimed the work was on its way.
+        name: "target-work-executor",
+        run: (): CheckOutcome => {
+          const waiting = writer.transact((tx) => {
+            const queued = tx.listJobsByStates(["queued"], RECOVERY_SCAN_LIMIT);
+            return {
+              captures: queued.filter((job) => job.kind === "capture").length,
+              inspects: queued.filter((job) => job.kind === "inspect").length,
+            };
+          });
+          if (!waiting.ok) return { state: "failed", reasons: [`target-work-queue-read-${waiting.error.code}`] };
+          return waiting.value.captures + waiting.value.inspects === 0
+            ? { state: "ok", facts: { queuedCaptureCount: waiting.value.captures, queuedInspectCount: waiting.value.inspects } }
+            : { state: "degraded", reasons: ["target-work-executor-not-installed"] };
         },
       },
     ]);
