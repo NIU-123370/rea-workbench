@@ -12,6 +12,8 @@
 | [rea-workbench-concept.png](rea-workbench-concept.png) | 1672 × 941 | 三栏工作台设计愿景 | 图内标记 `INTERFACE CONCEPT · NOT A LIVE SCREENSHOT` |
 | [rea-workbench-promo-30s.mp4](rea-workbench-promo-30s.mp4) | 1920 × 1080，30 秒 | README 产品宣传片 | H.264、30 fps、无音轨；SHA-256 `7d2ab31deda19c284c20fb7ec0191b2897279f3d9f94a4dc498bdbbab590f295` |
 
+README 的内嵌播放器使用同一视频上传后生成的 [GitHub Attachment](https://github.com/user-attachments/assets/75f4bc4e-ae89-4c88-91d1-c50555f0b98b)；仓库内 MP4 是可追踪的原始资产。
+
 视觉系列采用 graphite / midnight blue 底色、ice cyan 与 muted amber 点缀。保留 `observed`、`derived`、`inferred` 与 `unknown` 的语义区别；不使用虚构性能数字或验证完成率。
 
 ## 可复用的最终提示词

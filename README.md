@@ -24,6 +24,8 @@ REA Workbench 是一个基于 [REA](https://github.com/morluto/rea) 的**本地�
 
 ## 30 秒了解 REA Workbench
 
+https://github.com/user-attachments/assets/75f4bc4e-ae89-4c88-91d1-c50555f0b98b
+
 <div align="center">
 
 [▶ 播放 30 秒宣传片](docs/assets/rea-workbench-promo-30s.mp4) · 1920 × 1080 · 无音乐
