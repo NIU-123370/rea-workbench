@@ -6,7 +6,7 @@ import type { Id } from "../domain/identity.ts";
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
 import { jobErrorFromFailure, projectJobRecord, transition } from "./job-queue.ts";
-import { harImportCommandSchema, inspectionCommandSchema } from "../contracts/imports.ts";
+import { harImportCommandSchema, ingestionJobInputSchema, inspectionCommandSchema } from "../contracts/imports.ts";
 import type { HarImportReceipt, InspectionReceipt } from "../contracts/imports.ts";
 import { reaEvidenceSchema } from "../contracts/rea-evidence.ts";
 import type { ReaEvidence } from "../contracts/rea-evidence.ts";
@@ -136,14 +136,24 @@ export class HarIngestionService {
     }
 
     const locator = safeBasename(command.filename);
-    const safeCommand: JsonValue = {
+    // Written through its own contract rather than as a literal, so the row the runner later reads
+    // has one owner for this shape: `ingestionJobInputSchema` is what tells an ingestion job apart
+    // from a directed investigation, and a drift between the writer and that test would otherwise
+    // show up as uploads whose rows nobody executes.
+    const projected = ingestionJobInputSchema.safeParse({
       filename: locator,
       mediaType: command.mediaType,
       format: command.format,
       byteLength: command.byteLength,
       sourceSha256: measured,
       recordOrdinals: command.recordOrdinals ?? null,
-    };
+    });
+    if (!projected.success) {
+      return gateFail("INVALID_INPUT", "ingestion-job-input", "the persisted import projection is not representable", {
+        issues: issueNames(projected.error.issues) as unknown as JsonValue,
+      });
+    }
+    const safeCommand: JsonValue = projected.data;
     // The stored input projection is filtered before it is written, so a filename
     // carrying a declared secret cannot become a persisted column.
     const cleanCheck = assertPayloadClean(safeCommand, context.sensitive);

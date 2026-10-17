@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { BOOT_CONFIG_FIELDS } from "../../packages/contracts/boot.ts";
-import { bootWorker } from "./composition.ts";
+import { WORKER_SCHEDULER_MS as RUNNER_POLL_MS, bootWorker } from "./composition.ts";
 import { startWorkerRpc } from "./rpc-server.ts";
 import { Terminal, stdoutSink } from "./terminal.ts";
 
@@ -49,12 +49,10 @@ function readJson(target: string): Record<string, string | undefined> {
   return defaults;
 }
 
-// How often the job runner looks at the queue. This is a latency choice of this process, not a
-// resource limit: §14's "measure it into the profile" rule covers the numbers that decide whether
-// work may run (the queue wait and the attempt budget), and both reach the runner through the
-// profile. Nothing is scheduled per second here, so a restart cannot lose a job by missing a beat -
-// the queue is a table, and the next turn reads whatever is in it.
-const RUNNER_POLL_MS = 250;
+// `RUNNER_POLL_MS` is the composition root's `WORKER_SCHEDULER_MS`, imported above: the same number
+// is what a requeued row's visible retry time is measured against (§11's 暂时不可用), so the two
+// cannot be set apart by accident. Nothing is scheduled per second here - the queue is a table, and
+// the next turn reads whatever is in it.
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const terminal = new Terminal(stdoutSink(process.stdout));
@@ -126,6 +124,14 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         const outcome = turn.value;
         if (outcome.kind === "succeeded") {
           terminal.print("runner", `succeeded job=${outcome.jobId} candidate=${outcome.candidateId} attempt=${String(outcome.attempt)}`);
+        } else if (outcome.kind === "inspected") {
+          // The ingestion turn says what the row became and how many evidence records it left, because
+          // §9's retained-reference stop also ends a turn and a line that only said "inspected" would
+          // read the same as a run that produced records.
+          terminal.print(
+            "runner",
+            `inspected job=${outcome.jobId} state=${outcome.jobState} evidence=${String(outcome.evidenceIds.length)}`,
+          );
         } else if (outcome.kind === "cancelled") {
           terminal.print("runner", `cancelled job=${outcome.jobId}`);
         } else if (outcome.kind !== "idle") {

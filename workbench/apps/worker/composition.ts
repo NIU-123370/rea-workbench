@@ -53,13 +53,14 @@ import { JobReadService } from "../../packages/application/job-read.ts";
 import { AuditReadService } from "../../packages/application/audit-read.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
-import { createJobRunner } from "../../packages/application/job-runner.ts";
+import { createJobRunner, planOf } from "../../packages/application/job-runner.ts";
 import type { RunnerOutcome } from "../../packages/application/job-runner.ts";
+import { createDeclarationMemo } from "../../packages/application/declaration-memo.ts";
 
 import { acquireWorkerLock, applyMigrations, openWriteConnection, planMigrations } from "../../packages/adapters/storage/database.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
-import { connectReaStdio } from "../../packages/adapters/rea/protocol.ts";
+import { connectReaStdio, handshake } from "../../packages/adapters/rea/protocol.ts";
 import { ReaSession } from "../../packages/adapters/rea/session.ts";
 import { ReaCaptureInspector } from "../../packages/adapters/rea/capture-inspection.ts";
 import { WebCaptureEvidenceFacts } from "../../packages/adapters/rea/web-capture-records.ts";
@@ -82,6 +83,14 @@ import { INSTALLED_COMPARATOR_POLICIES } from "../../packages/contracts/verifica
 
 const LIMITS = { maxDepth: 24, maxCodeUnits: 2_000_000 };
 const RECOVERY_SCAN_LIMIT = 500;
+
+// The worker's own scheduler tick, in one place: `apps/worker/main.ts` waits this long between turns,
+// and a job the runner could not start because a provider is *temporarily* unreachable (§11's
+// 暂时不可用) gets a visible retry time this far ahead. §14's profile list names `queueWaitMs` - how
+// long a job may wait before it must start - and no retry interval, so this stays a process choice
+// written where an operator can read it rather than a number invented per call site. Issue #108
+// records it as a deviation beside #99's list of profile numbers with no document home.
+export const WORKER_SCHEDULER_MS = 250;
 // §8 line 271's two id lists are "the recent ones", not the whole project: a bounded newest
 // first page is what keeps a screen input from becoming a table dump.
 const PROJECT_VIEW_LIST_BOUND = 20;
@@ -549,7 +558,14 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   });
 
   let session: ReaSession | null = null;
-  function providerSession(): Result<ReaSession, GateFailure> {
+
+  // §11's "暂时 broker 不可用" branch is only reachable if the worker can tell an unreachable provider
+  // from a reachable one. `connectReaStdio` answers the narrower question - did the child spawn - and
+  // a process that is not an MCP server spawns perfectly well. MCP requires `initialize` before any
+  // other request (`har-import.test.ts` does it by hand for the same reason), so the negotiation is
+  // what this build calls availability, and a session that never negotiated is closed and refused by
+  // name instead of cached and discovered mid-run by whichever tool call came first.
+  async function providerSession(): Promise<Result<ReaSession, GateFailure>> {
     if (session !== null) return { ok: true, value: session };
     const connected = connectReaStdio(process.execPath, [config.reaEntrypoint], {
       timeoutMs: 15_000,
@@ -558,13 +574,18 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       env: { PATH: "/usr/bin:/bin" },
     });
     if (!connected.ok) return gateFail("CAPABILITY_UNAVAILABLE", "provider-connect-failed", connected.error.message);
+    const negotiated = await handshake(connected.value);
+    if (!negotiated.ok) {
+      await connected.value.close();
+      return gateFail("CAPABILITY_UNAVAILABLE", "provider-handshake-failed", negotiated.error.message);
+    }
     const created = new ReaSession(connected.value);
     session = created;
     return { ok: true, value: created };
   }
 
-  function ingestionService(): Result<HarIngestionService, GateFailure> {
-    const peer = providerSession();
+  async function ingestionService(): Promise<Result<HarIngestionService, GateFailure>> {
+    const peer = await providerSession();
     if (!peer.ok) return peer;
     return {
       ok: true,
@@ -604,13 +625,38 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   // the same story in the other direction: it names who ran, and a model endpoint or a host path
   // would be a §12.1 leak into a row other roles read (§12.1: 记名字不记值).
   const runnerActor: Actor = { actorId: "worker-job-runner", actorKind: "builder" };
+  // The same argument for the ingestion turn (§7.3: 证据摄取归 Inspector): the identity is minted by
+  // the worker, §14 has it issue inspector-scope capabilities internally, and the service still checks
+  // the kind against its own list. `actorId` names the runner rather than a person, because §12.2's
+  // journal is read by other roles and an id that looked like an operator would be read as one.
+  const inspectionActor: Actor = { actorId: "worker-job-runner", actorKind: "inspector" };
+  const declarations = createDeclarationMemo();
   const runnerGenerator: JsonObject = { mintedBy: "job-runner", profileId: config.sandboxProfile };
   const jobRunner = createJobRunner({
     storage: writer,
     // The same bounded worker-wide scan recovery uses: both ask "what is in the queue" without a
     // project id to narrow by, and a second limit number here would be a second thing to measure.
     scanLimit: RECOVERY_SCAN_LIMIT,
+    retryDelayMs: WORKER_SCHEDULER_MS,
     now: nowInstant,
+    inspections: {
+      actor: inspectionActor,
+      // §11's temporary-unavailability question, asked before the row is touched. Reaching the
+      // provider is what spawns its child, so this is the same call the service would make a moment
+      // later - not a second probe with its own answer.
+      providerAvailable: async () => (await providerSession()).ok,
+      declaration: (jobId) => declarations.peek(jobId),
+      inspect: async (projectId, actor, command, context) => {
+        const service = await ingestionService();
+        if (!service.ok) return service;
+        const outcome = await service.value.runInspection(projectId, actor, command, context);
+        // Whatever the service decided, this process will not need those literals for this row
+        // again. Sanitizer's own rule is that a declaration is dropped once the operation's checks
+        // are finished; this is where that lifetime is honoured for a job driven in a later turn.
+        declarations.drop(command.jobId);
+        return outcome;
+      },
+    },
     builds: {
       actor: runnerActor,
       generator: runnerGenerator,
@@ -700,14 +746,19 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const refused = missing(projectId);
       if (refused !== null) return refused;
       if (bytes === null) return gateFail("INVALID_INPUT", "import-bytes", "the upload must be canonical base64");
-      const service = ingestionService();
+      const service = await ingestionService();
       if (!service.ok) return service;
       const fields = asRecord(payload);
-      return relay(
-        await service.value.importCapture(projectId as Id, actor, fields["command"] ?? {}, bytes, {
-          sensitive: { declaredValues: stringList(fields["sensitiveValues"]) },
-        }),
-      );
+      const declared = stringList(fields["sensitiveValues"]);
+      const imported = await service.value.importCapture(projectId as Id, actor, fields["command"] ?? {}, bytes, {
+        sensitive: { declaredValues: declared },
+      });
+      // The row this import queued is driven in a later turn, and the filter that turn needs is the
+      // list this request carried. It goes to worker memory only - §12.1 keeps it out of the row, the
+      // digest and the receipt, and a lost memo is the state D25 refuses by name rather than a
+      // silent "nothing was declared".
+      if (imported.ok) declarations.record(asId(imported.value.job.id), declared);
+      return relay(imported);
     },
     "job.cancel": (payload, actor) => {
       const jobId = pickId(payload, "jobId");
@@ -1197,24 +1248,58 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
         },
       },
       {
-        // The same sentence for the two kinds §8 line 275 can now queue. The runner takes `build` rows
-        // only (issue #57's shape), and nothing in this build drives a browser or decodes an archive,
-        // so a `capture` or `inspect` row sits at `queued` until an executor exists. Without this cell
-        // the door would be the only place that ever claimed the work was on its way.
+        // §8 line 275 can queue two kinds and this build can now drive one of them (issue #108). The
+        // sentence has to be per-kind: `inspect` used to be one undifferentiated absence, and after
+        // this module an ingestion row that is waiting for a provider, an investigation row that
+        // nothing can run, and a broken row the runner is about to fail all read differently. The
+        // plan comes from the runner's own `planOf`, so the doctor and the executor cannot disagree
+        // about which row belongs to whom.
         name: "target-work-executor",
-        run: (): CheckOutcome => {
+        run: async (): Promise<CheckOutcome> => {
           const waiting = writer.transact((tx) => {
             const queued = tx.listJobsByStates(["queued"], RECOVERY_SCAN_LIMIT);
-            return {
-              captures: queued.filter((job) => job.kind === "capture").length,
-              inspects: queued.filter((job) => job.kind === "inspect").length,
-            };
+            const counts = { capture: 0, ingest: 0, inquiry: 0, unreadable: 0 };
+            for (const job of queued) {
+              if (job.kind === "capture") counts.capture += 1;
+              // A `build` row has an executor by construction here, so its plan is not a thing worth
+              // counting; the four buckets are the ones an operator could act on.
+              else if (job.kind === "inspect") {
+                const plan = planOf(job);
+                if (plan === "ingest") counts.ingest += 1;
+                else if (plan === "inquiry") counts.inquiry += 1;
+                else counts.unreadable += 1;
+              }
+            }
+            return counts;
           });
           if (!waiting.ok) return { state: "failed", reasons: [`target-work-queue-read-${waiting.error.code}`] };
-          return waiting.value.captures + waiting.value.inspects === 0
-            ? { state: "ok", facts: { queuedCaptureCount: waiting.value.captures, queuedInspectCount: waiting.value.inspects } }
-            : { state: "degraded", reasons: ["target-work-executor-not-installed"] };
+          const facts = {
+            queuedCaptureCount: waiting.value.capture,
+            queuedIngestionCount: waiting.value.ingest,
+            queuedInquiryCount: waiting.value.inquiry,
+            queuedUnreadableInspectCount: waiting.value.unreadable,
+          };
+          const reasons: string[] = [];
+          // Capture needs `capture_browser_scenario`, which has no mirrored contract in this
+          // repository at all - not a wait, an absence.
+          if (waiting.value.capture > 0) reasons.push("capture-executor-not-installed");
+          // §8 line 310's investigation runs against the retained REA session (`inspect_analysis_view`
+          // for the rest of a graph, `static-analysis.ts:507` names the same gap). Its rows stay
+          // queued and untouched: failing them would blame the operator for a feature not shipped.
+          if (waiting.value.inquiry > 0) reasons.push("inspect-inquiry-executor-not-installed");
+          // An ingestion row does have an executor; if one is waiting, it is waiting on the provider,
+          // which §11 calls a temporary condition with a visible retry time.
+          if (waiting.value.ingest > 0 && !(await providerSession()).ok) reasons.push("provider-session-unavailable");
+          if (reasons.length > 0) return { state: "degraded", reasons };
+          return { state: "ok", facts };
         },
+      },
+      {
+        // The declaration memo is a memory of secrets with a lifetime tied to a job, so its size is
+        // an operator-visible fact (§12.1): a count that grows without bound is the leak, and the
+        // only way to see one is to read a number.
+        name: "sensitive-declaration-memo",
+        run: (): CheckOutcome => ({ state: "ok", facts: { heldDeclarations: declarations.size() } }),
       },
     ]);
   }
