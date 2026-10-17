@@ -1269,6 +1269,44 @@ runner 的，见下文"这轮没做浏览器"）：
 `evidence-over-inline-limit` 本轮没有读数）；broker 本体在 Linux x64 之外的宿主上仍然起不来（#23/#121 那一片）；
 本仓不带已安装 profile 这件事本轮只记不修；截图仍不可得（0×0 viewport），所有页面动作都是派发真 DOM 事件而不是真指针。
 
+浏览器实测·第廿二轮（2026-10-18 07:25–07:29，同一套生产构建 rig 重起一次（worker＋web 4312＋`next start -p 4499`）；
+读的是 #58 第 4 框剩下的那几扇门，以及一条**负读数**——哪些门在页面里根本没有调用方）：
+
+- **worker 重启使旧会话作废，页面自己说了实话**：带着上一轮那个浏览器会话回到落地页，`main` 的文本是
+  「还没有会话：项目清单要配对之后才读得到…」——§8 line 268 那句「重启也使全部会话失效」在真页面里的读数，不是用例。
+  用新打印的配对码点真「配对」→ `browser-rig-b59｜图 0｜库存 2`。
+- **§8 line 279（重排清理）在真页面上点出来了**：那一行的 `data-job-cleanup-retry=4d808c63…` →
+  网络面板逐字 `POST …/jobs/4d808c63…/cleanup-retry` **202**，紧接着页面自己 `GET …/jobs?limit=50` **200**。
+  **但作业行没动**：`cleanupState` 仍是 `pending`，`retryAt` 与 `cleanupRetryAt` 都是 `null`。
+  这条不是"按钮坏了"：那一行没有可重排的 owned 清理，202 说的是"按你要求排过了"，页面如实显示"没有任何时间被推前"——
+  两件事同时为真，我不替它编一个更顺的说法。
+- **§8 line 297（请求验证）走完了选择器**：`select` 的三个值逐字 `["", "exact-http-v1", "exact-http-normalized-v1"]`
+  （首项是"还没有选"）。未选就点被页面挡下，逐字「还没有选比较器策略：差别是裁决口径（把哪些差异视为相同），§10 不许页面替你默认一档。」；
+  选 `exact-http-v1` 再点「发起验证」→「已排入验证队列：作业 `77108fc4…`（queued）」。
+  **那个作业停在 queued**：这台机器上没有执行者会完成一次 verify，所以 `GET /verifications/:v` 这轮**读不到**——
+  不是门不通，是没有报告行可读（#20/#75 那一片的形状）。
+- **§8 line 278（取消）第一次有真读数**：正因为上面那个作业停在 queued，`data-job-cancel=77108fc4…` 那颗「请求取消」
+  在真页面上可点 → 点完同一行变 `cancelled`、`error` 是 `null`（§11「取消不是失败」）。
+  之前几轮这一格只读到终态行那句「这一行已是终态 failed：§11 不让终态复活，取消只会返回现状」。
+- **一条我自己造的 403，如实记**：我从页面同源 `fetch` 直接 POST 同一道 cleanup-retry 时**没带 CSRF 头**
+  （令牌在 React 状态里，不在 cookie 里），回包逐字 `403 ACCESS_DENIED / csrf-token-missing`、`retryable:false`、
+  `requestId=1ab9e42c…`。这**不是页面控件的行为**，是那一跳的闸门被我的手工请求撞到——记下来免得被算成"页面点出来的"。
+- **本轮最有用的是那条负读数**：#58 第 4 框写的是"每条新路由都在真浏览器里点一次并留读数"，但**有 6 条挂好的门在页面里没有调用方**
+  （现读 `grep -rn "data-export|/exports|verifications/\\$\{|data-report-read" apps/web/ui apps/web/app` → **0 命中**；
+  `"DELETE"` 只出现在中继的允许方法表里，不是页面发出的）：
+  `POST /projects/:p/exports`、`GET /projects/:p/exports`、`GET /projects/:p/exports/:e/download`、
+  `GET /projects/:p/verifications/:v`、`GET /projects/:p/jobs/:j`、`DELETE /session`。
+  ⇒ 第 4 框对这几条**无法开始**。要么给它们做控件（交付三件套、报告页、单作业页、退出登录），
+  要么把"页面点一次"重述成"页面点得到的那些点一次＋其余按 HTTP 门记账"。这是你的决定，不是我能替你选的默认。
+- console **0 条**；截图仍不可得（viewport 报 `0×0`，`click`/`screenshot` 被拒，与前几轮同一限制），
+  所有动作都是在真页面里派发真 DOM 事件、由真 React 处理。
+- rig 收尾：第一次 `kill -TERM` worker 之后它仍在（原因本轮没查，日志里没有痕迹），第二次才收 `worker stopped`，
+  随后 `worker.lock` 与 `worker.rpc.sock` 自己消失（#72 那条反面证据又应一次）；4312／4499 现读 free，
+  与本仓无关的 4310 那套旧进程没动。
+
+**这轮没有代码改动**：#59 那另外两条 RESOURCE_LIMIT 与上一轮同（`jobs-limit` 缺控件、`evidence-over-inline-limit` 无读数）；
+本轮新增的只有"6 条门无页面调用方"这条记账。
+
 发布门禁·第廿一轮（2026-10-18 03:15–03:28，**源码里点名的验收编号第一次有了对账方**）：
 
 - **缺陷形状**：`packages/contracts/sandbox.ts` 的 `SANDBOX_HOST_REQUIREMENTS.advisory` 是**会过线的字段**
@@ -1804,6 +1842,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   表就等于做一个会猜的表，所以这三扇仍靠 `fetch` 驱动，是 issue #58 剩下的账。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
   读不到日志就说读不到（`FREEZE_EMPTY_LINE` 的三种空态各有自己的句子）。
+  第廿二轮又把这条账往反方向量了一次：**挂好的门里有 6 条在页面里没有调用方**
+  （交付三件套 `POST/GET /projects/:p/exports` 与 `GET .../exports/:e/download`、`GET /projects/:p/verifications/:v`、
+  `GET /projects/:p/jobs/:j`、`DELETE /session`）——所以「每条新路由都在浏览器里点一次」对这几条**无法开始**，
+  要么补控件、要么改判据，那是 #58 那一边等的决定。已点到真页面的：作业取消（`queued → cancelled`）与清理重排（202，
+  但那一行没有可重排的 owned 清理，所以时间字段照旧 `null`）、请求验证（比较器三档逐字、未选被挡下）。
 - 「被拒」那一格有一条真浏览器读数了（第廿一轮）：一次预算耗尽的生成在左栏逐字显示
   「本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 2 · maxAttempts 1）」，且同一格 `任务`
   显示的就是那条 `failed` 行的 id。同族另两条只完成一半：`jobs-limit` 的 `{limit:999, maxLimit:200}` 在页面同源
