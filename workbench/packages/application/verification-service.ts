@@ -1,7 +1,7 @@
 import { canonicalJson, digestBytes } from "../domain/canonical-json.ts";
 import type { CanonicalLimits, Digest } from "../domain/canonical-json.ts";
 import { asDigest } from "../domain/canonical-json.ts";
-import { asId, newId, nowInstant } from "../domain/identity.ts";
+import { asId, isId, newId, nowInstant } from "../domain/identity.ts";
 import type { Id } from "../domain/identity.ts";
 import type { ExcludedVector } from "../domain/inventory.ts";
 import { planCounts } from "../domain/inventory.ts";
@@ -15,7 +15,7 @@ import type { EvaluatorCompletion } from "../contracts/verification.ts";
 import { evaluatorCompletionSchema, INSTALLED_COMPARATOR_POLICIES, verificationReportSchema, verificationRequestSchema } from "../contracts/verification.ts";
 import { findComparatorPolicy } from "../contracts/verification.ts";
 import type { JobRecord } from "../contracts/jobs.ts";
-import { projectJobRecord } from "./job-queue.ts";
+import { projectJobRecord, transition } from "./job-queue.ts";
 import type { EventDraft, JobRow } from "./ports.ts";
 import type {
   ArtifactPort,
@@ -340,6 +340,83 @@ export class VerificationService {
             ),
           };
         }
+        // The job the completion names has to be a job that exists, asked for this work, and is
+        // allowed to hold a result (§11: 只有 running 能到 succeeded).
+        //
+        // Before this, `completion.jobId` was copied into two artifact rows and the verification row
+        // while nothing looked the id up: a report could point its whole provenance at an id that was
+        // never a job, and the job that *had* been queued by `POST /verifications` stayed `queued`
+        // with no result pointer - so §8 line 277's 「含持久 resultRef，可恢复构建/验证资源 ID」 was
+        // only true for builds. Same shape as the §8 projection gap in issue #56: a rule that lives in
+        // one writer and has no non-test caller has not been established on the wire yet.
+        const job = tx.getJob(projectId, completion.jobId);
+        if (job === null) {
+          return {
+            kind: "failure",
+            failure: gateFail("NOT_FOUND", "verification-job-unknown", "no job in this project carries the id this completion names", {}),
+          };
+        }
+        if (job.kind !== "verify") {
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "INVALID_INPUT",
+              "verification-job-kind-mismatch",
+              "a verification result belongs to a verify job, and this id is a different kind of work",
+              { jobKind: job.kind },
+            ),
+          };
+        }
+        // The job's own request is the other half of the binding: §10 has the worker derive the bound
+        // identities from rows it owns, so a completion may not attach to a request that asked about a
+        // different candidate or adjudicated under a different policy. Field *names* are published, not
+        // the two values (§12.1) - the reader is the evaluator, who already knows what it submitted.
+        const asked = readVerifyRequest(job.inputJson);
+        const mismatched =
+          asked === null
+            ? ["candidateId", "comparatorPolicyId"]
+            : [
+                ...(asked.candidateId === completion.candidateId ? [] : ["candidateId"]),
+                ...(asked.comparatorPolicyId === completion.comparatorPolicyId ? [] : ["comparatorPolicyId"]),
+              ];
+        if (mismatched.length > 0) {
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "INVALID_INPUT",
+              "verification-job-request-mismatch",
+              "this job asked for something other than what this completion reports",
+              { fields: mismatched },
+            ),
+          };
+        }
+        if (job.state === "succeeded") {
+          // A second result for one job is not a repair: unlike a build, where §5 lets an attempt
+          // re-point the job at the newest candidate, a verification's row is immutable evidence and
+          // the job that carried one is done. Re-running means asking again (§8 line 297).
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "REVISION_CONFLICT",
+              "verification-job-already-completed",
+              "that job already carries a verification result; another run is another request (§11: 终态不复活)",
+              { jobState: job.state },
+            ),
+          };
+        }
+        const started = job.state === "queued" ? transition(job, "running", createdAt) : job;
+        const finishedJob = started === null ? null : transition(started, "succeeded", createdAt);
+        if (finishedJob === null) {
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "REVISION_CONFLICT",
+              "verification-job-terminal",
+              `a job in state ${job.state} does not take a result`,
+              { jobState: job.state },
+            ),
+          };
+        }
         tx.insertArtifact({
           id: reportArtifactId,
           projectId,
@@ -396,6 +473,17 @@ export class VerificationService {
             result: report.result,
             currentness: "current",
           },
+          createdAt,
+        } satisfies EventDraft);
+        // The job that was asked for is the row a client can read (§8 line 277), so the result has to
+        // land on it: succeeded, with the verification id as its resultRef. One transaction with the
+        // verification row, because a report nothing points at is a report nobody can find.
+        tx.updateJob({ ...finishedJob, resultRef: verificationId, updatedAt: createdAt });
+        tx.appendEvent({
+          projectId,
+          type: "job.updated",
+          aggregateId: completion.jobId,
+          payloadJson: { resourceIds: [completion.jobId, verificationId], state: "succeeded" },
           createdAt,
         } satisfies EventDraft);
         return {
@@ -914,4 +1002,19 @@ function parseJson(bytes: Uint8Array): JsonValue {
 
 function err(error: GateFailure): Err<GateFailure> {
   return { ok: false, error };
+}
+
+// The verify job's own request, read by name with the shape checked - the same discipline
+// `job-runner.ts` uses for a build job's `blueprintId`. `verification.request` writes exactly these two
+// fields into `input_json`, so a row that does not carry them is not a request this door made, and the
+// completion cannot be bound to it. `null` is a refusal, never an empty match: treating an unreadable
+// input as "no constraint" would let a hand-written job row accept any completion.
+function readVerifyRequest(input: JsonValue): { candidateId: Id; comparatorPolicyId: string } | null {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return null;
+  const named = input as Record<string, unknown>;
+  const candidateId = named["candidateId"];
+  const comparatorPolicyId = named["comparatorPolicyId"];
+  if (typeof candidateId !== "string" || !isId(candidateId)) return null;
+  if (typeof comparatorPolicyId !== "string" || comparatorPolicyId === "") return null;
+  return { candidateId: asId(candidateId), comparatorPolicyId };
 }
