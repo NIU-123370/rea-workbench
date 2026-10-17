@@ -1355,6 +1355,41 @@ runner 的，见下文"这轮没做浏览器"）：
 而它要 `WB_API_ORIGIN` 被设成非法值才出现；那条路径的两条用例是真模块＋真 `Response`，
 但"配错了操作者看到什么"这句仍只有单测证据。真进程验证要等 #119 有答案（默认值是否算配置）。
 
+发布门禁·第廿五轮（2026-10-18 04:23–04:27，**看板对账抓到的第一个真缺陷：`fsync` 只活在注释里**）：
+
+- **怎么抓到的**：这一轮我不再加功能，改成逐条核对 closed issue 的完成条件（见下"看板对账"）。
+  **#7 的第一框**写的是「私有 staging → 流式校验计量 → **fsync** → 原子发布 → 事务提交索引与 events」，
+  于是去代码里找那次 fsync：`grep -rn "fsync\|FD_SYNC\|datasync" packages apps tests` 现读
+  **只有 `artifacts.ts:12` 那一行注释命中，没有任何一处调用**。⇒ 这不是记账错，是**真的没做**：
+  `rename` 只保证"字节落盘之后名字是原子的"，字节本身没 flush 时，断电等效中断后可以是
+  **名字在、内容空/半截**——而那正是 T13「低磁盘/ENOMEM 不发布半写 artifact」与 T16 恢复语义要防的东西。
+- **改法**：加 `ArtifactDurability` 端口（`writeAndSync` = open/write/**sync**/close，
+  `syncDirectory` = open(dir)/**sync**/close），staging、所有权 marker、发布三条写路径都走它；
+  次序是**内容 flush 在 rename 之前、目录 flush 在 rename 之后**；任一 flush 失败 ⇒
+  `ARTIFACT_WRITE_FAILED` 具名拒绝，**temp 清掉、不假装发布成功**。
+  目录 flush 失败时**不删那个名字**（字节已经在，删它是在销毁一次重试想要的证据），
+  用例就断"同样字节的重试走 existing 分支并成功"。
+- **端口测的是次序而不是文件名**：rename 本身在端口外面，所以用"每次 flush 那一刻目录里有什么"来证——
+  内容 flush 时只有 `.tmp`、没有 `.bin`；目录 flush 时 `.bin` 在、`.tmp` 没了。
+  这一条同时打死"去掉目录 flush"（R1）与"把目录 flush 挪到 rename 前面"（R3），两支实跑都红。
+- **`fsync` 到底有没有发生，用户态观测不到**，所以另有一条**按源码形状**的守卫：
+  `NODE_ARTIFACT_DURABILITY.writeAndSync.toString()` 必须含 `.sync()` 与 `.close()`。
+  它不是好看：**没有它就等于把原来的错误换个位置重犯**——次序用例只证"存储层开口要 flush"，
+  默认实现里去掉 sync 时它们照样全绿（变异 R2 就是被这条杀掉的）。
+- **平台读数**：目录 fsync 在 darwin/arm64 上实测可用（`open(dir,'r')` → `FileHandle.sync()` → `close()`
+  跑通；CI 是 linux/x64，同一形状），所以失败按具名拒绝处理，**没有加"不支持就静默跳过"那一支**——
+  那正是文档禁止的 fail-open 形状。
+- **顺带把 `writeFile` 从 store 的 import 里摘掉了**：现在整个文件只有端口里那一次 `handle.writeFile`，
+  少一个"看起来还会走旧路径"的入口。
+- **末态闸门**：typecheck 0／lint **206 文件 0 条**／`test:unit` **686/39**／
+  `test:integration` **508 passed + 6 skipped / 25 files**（`storage.test.ts` 单档 **25** 条，本笔 +5）／
+  `review` **0 命中**／`docs:check` exit 0（**267 引用/199 文件 · 373 锚点/14 节**）。
+  变异 **6 支（R1–R6）全红**，无等义变异存活。
+
+**这轮仍然没做的**：**没有断电等效的真机读数**。这一对 flush 主张的是"崩溃后磁盘上应当有什么"，
+我能证的是**调用次序**与**失败时的具名拒绝**；真正的掉电演练要宿主层手段（TESTPLAN §2 的"恢复演练"层次），
+本轮没做，所以别把它读成"T16 的断电验收已通过"。
+
 
 ## 还没有的东西
 
