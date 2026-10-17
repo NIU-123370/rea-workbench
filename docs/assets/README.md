@@ -1,8 +1,8 @@
 # README visual assets
 
-本目录保存 REA Workbench 的项目宣传素材。两张图均使用 Codex 内置 `image_gen.imagegen` 生成，未通过 API、CLI 或第三方素材库生成；文件已经复制到仓库，可直接供 README 引用。
+本目录保存 REA Workbench 的项目宣传素材。两张图使用 Codex 内置 `image_gen.imagegen` 生成；30 秒宣传片由项目方提供并复制进仓库。所有文件都可直接供 README 引用。
 
-这些图片表达产品设计愿景。**它们不是已实现 Web 界面的截图，也不是功能验证证据。** 请保留图中的概念标记及引用处的说明，不将图片中的示意结构、状态或产物当作当前实现状态。
+这些素材表达产品设计愿景。**图片不是已实现 Web 界面的截图，视频也不是端到端功能验证证据。** 请保留引用处的说明，不将其中的示意结构、状态或产物当作当前实现状态。
 
 ## 素材
 
@@ -10,6 +10,7 @@
 | --- | --- | --- | --- |
 | [rea-workbench-hero.png](rea-workbench-hero.png) | 1672 × 941 | README 首屏项目宣传图 | 抽象软件结构与证据图谱；图内标记 `CONCEPT VISUAL` |
 | [rea-workbench-concept.png](rea-workbench-concept.png) | 1672 × 941 | 三栏工作台设计愿景 | 图内标记 `INTERFACE CONCEPT · NOT A LIVE SCREENSHOT` |
+| [rea-workbench-promo-30s.mp4](rea-workbench-promo-30s.mp4) | 1920 × 1080，30 秒 | README 产品宣传片 | H.264、30 fps、无音轨；SHA-256 `7d2ab31deda19c284c20fb7ec0191b2897279f3d9f94a4dc498bdbbab590f295` |
 
 视觉系列采用 graphite / midnight blue 底色、ice cyan 与 muted amber 点缀。保留 `observed`、`derived`、`inferred` 与 `unknown` 的语义区别；不使用虚构性能数字或验证完成率。
 
