@@ -4,7 +4,6 @@ import type { Id } from "../../../packages/domain/identity.ts";
 // `id.ts` rather than `identity.ts`: this module is reached from the browser bundle, and the
 // identity module owns `newId()`, which imports `node:crypto`.
 import { isId } from "../../../packages/domain/id.ts";
-import type { Digest } from "../../../packages/domain/canonical-json.ts";
 import type { JsonValue } from "../../../packages/domain/json-value.ts";
 // The §11 vocabulary comes from the node-free owner (`domain/job-states.ts`) rather than from the
 // contract that re-exports it: reaching it through `contracts/primitives.ts` would pull
@@ -291,7 +290,12 @@ export type LeftPanel = {
 
 export function buildLeftPanel(input: {
   job: { id: Id; state: string; cleanupState: string; errorJson: JsonValue | null } | null;
-  target: { id: Id; kind: string; snapshotDigest: Digest | null } | null;
+  // Only the id: this is the graph read's own `targetId`, and it is the *only* thing the left column
+  // decides from a target. The parameter used to demand `kind` and `snapshotDigest` too, which the
+  // page never learns from the graph read - so its caller was passing a literal `"har"` and a
+  // `null` digest it had invented. Nothing rendered them, which is exactly why no test caught it;
+  // a shape that forces the caller to fabricate fields is a false claim sitting in a type.
+  target: { id: Id } | null;
   limitations: readonly string[];
   scopeLabel: string;
   frameLabels?: readonly string[];

@@ -862,11 +862,17 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   仍未裁决的两点留在 #75：提交的字节走 staging 还是 RPC body（现在按 `evaluatorCompletionSchema` 的
   `reportStagingId + reportSha256`，即前者），以及谁把 `queued` 变 `running`（本 build 的答案是"没人"，
   所以才有上面那格报警）。
-- §8 line 275 的**页面把手没做**：门能收 `CaptureTask|InspectTask`，但页面现在没有任何东西能编出一份
-  `BrowserAction` 序列（`click/fill/waitFor` + `Locator`），也没有一处能让操作员挑"这个目标已有的主张"。
-  硬做一个输入框等于把 §8 的具名动作序列变成一个 JSON 文本域——那正是 tasks.ts 那份联合要避免的形状。
-  所以这一扇的状态是"有门没把手"：缺的是**页面读得到什么**，不是 HTTP。（同一类问题在比较器那一格已经收口——
-  #82 交了一条 `GET /comparator-policies` 读门，页面从清单里选而不是手打名字。）
+- §8 line 275 的**页面把手只做一半**：capture 那半编不出来——页面没有任何东西能生成一份
+  `BrowserAction` 序列（`click/fill/waitFor` + `Locator`），硬塞一个输入框等于把 §8 的具名动作序列降级成
+  自由文本，正是 `tasks.ts` 那份联合要避免的形状。inspect 那半**是可以做的**，而我先前在这里写过相反的话
+  （"页面挑不出这个目标已有的主张"）——那是我没读全 `contracts/graph.ts` 就下的判断：图读的**回包自带
+  `targetId`**（§8 line 275 的读门还接受 `?targetId=`），`claims[]` 就是那一格图的主张，
+  项目视图又给 `graphRevision`，所以"选哪些主张 + 问什么 + static/captured-runtime"三样页面都拿得到。
+  纠正同时写回 #58 的评论；这一格的实现是下一个模块。
+  顺手改掉的一处同类问题：`buildLeftPanel` 的参数原本**要求**调用方交出 `target.kind` 与 `snapshotDigest`，
+  而图读根本不给这两样——于是组件里写着 `{ kind: "har", snapshotDigest: null }` 两个字面量在编。
+  没有任何地方渲染它们，所以没有一条测试抓得到；参数收窄成 `{ id }` 之后，编译期就不允许再编（typecheck
+  是硬门禁，这就是这条的守卫）。
 - 页面**已订阅 §13 的 `job.updated`**（issue #85，第十一轮读到的是不重载就翻页）：一帧到达就是"整页重读"，
   面板不由事件自己拼状态，读门仍是页面唯一的来源；断开时那一行改说「下面这些行是上一次读到的快照，不是现在的
   状态」。仍然留着的两格边界：`job.cleanup-retry` 只重排租约、不改作业行，所以它**不产生**事件（写了就是
