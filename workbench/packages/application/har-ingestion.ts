@@ -5,7 +5,7 @@ import { asId, isReaEvidenceId, newId, nowInstant } from "../domain/identity.ts"
 import type { Id } from "../domain/identity.ts";
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
-import { jobErrorFromFailure, projectJobRecord, transition } from "./job-queue.ts";
+import { jobErrorFromFailure, namedReason, projectJobRecord, transition } from "./job-queue.ts";
 import { harImportCommandSchema, ingestionJobInputSchema, inspectionCommandSchema } from "../contracts/imports.ts";
 import type { HarImportReceipt, InspectionReceipt } from "../contracts/imports.ts";
 import { reaEvidenceSchema } from "../contracts/rea-evidence.ts";
@@ -489,13 +489,18 @@ export class HarIngestionService {
         if (lease !== null) {
           // Nothing was cleaned and nothing was retried: the retained record still
           // has to be resolved by reference, so ownership stays with this job.
-          tx.updateLeaseCleanup(lease.id, "failed", { reason: outcome.reason }, null, lease.retryCount + 1);
+          // The reason goes through the same name-only rule as `jobs.error_json`: §12.1 names this
+          // column beside that one, so a value the job row may not keep may not settle here instead.
+          tx.updateLeaseCleanup(lease.id, "failed", { reason: namedReason(outcome.reason) }, null, lease.retryCount + 1);
         }
         return tx.appendEvent({
           projectId,
           type: "job.updated",
           aggregateId: job.id,
-          payloadJson: { resourceIds: [job.id, outcome.evidenceId], state: "failed", reasonCode: outcome.reason },
+          // §5 says an event payload carries references, safe digests and states - so the reason
+          // name here obeys the same rule as the two columns this transaction writes, rather than
+          // persisting whatever text the producer call came back with.
+          payloadJson: { resourceIds: [job.id, outcome.evidenceId], state: "failed", reasonCode: namedReason(outcome.reason) },
           createdAt: nowInstant(),
         });
       });
@@ -541,7 +546,7 @@ export class HarIngestionService {
         });
         const lease = tx.getLeaseByJob(projectId, job.id);
         if (lease !== null) {
-          tx.updateLeaseCleanup(lease.id, "failed", { code: outcome.code, reason: outcome.reason }, null, lease.retryCount + 1);
+          tx.updateLeaseCleanup(lease.id, "failed", { code: outcome.code, reason: namedReason(outcome.reason) }, null, lease.retryCount + 1);
         }
         return true;
       });

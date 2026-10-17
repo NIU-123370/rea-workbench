@@ -1674,6 +1674,46 @@ network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待
 第三十一轮那条**真浏览器读数**照旧欠着（#59 最后一格的 DOM 断言仍是 `renderToStaticMarkup`）；
 这条门本身只跑在发布检查与单元层，没有新增集成用例（它不改变任何运行态行为）。
 
+发布门禁·第三十三轮（2026-10-18 07:03–07:10，**#125 第 6 格：`resource_leases.last_error_json` 的"无生产者"读数被推翻，同一条命名规则接到这一面**）：
+
+- **先更正上一条读数**（追加式，不改历史行）：第廿七轮那句「这一面今天没有任何非 null 写入点（现读
+  `grep -rn "lastErrorJson: [^n]" packages apps` **0 命中**）」是**假阴性**——那条 grep 是**属性形状**的，
+  而这两个写入点把值走的是 `updateLeaseCleanup(leaseId, state, lastError, retryAt, retryCount)` 的
+  **第三个位置参数**，模式里那个 `lastErrorJson:` 前缀在任何文件里都不可能出现。本轮现读：非 null 写入点有
+  **两个**，`packages/application/har-ingestion.ts:492`（§9 第 7 条的 retained-reference 停，落 `{reason}`）
+  与 `:544`（inspection 失败，落 `{code, reason}`），另有 `job-lifecycle.ts:127` 与 `har-ingestion.ts:665` 写 null。
+  所以这一格能交的不是"在 README 里列成字段存在、生产者缺席"，而是第 5 格那条规则**在这面上的缺失**。
+- 缺失的形状与第 5 格一字不差：`jobs.error_json` 的唯一构造点已经强制 `message` 必须是**裸名字**
+  （`/^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/`，不合形状整条换成 `reason-unshapeable`），而同一笔事务往 lease 列里
+  写的 `{code, reason}` **没有过这道形状检查**——§12.1 是把这两列并排点名的。改法不是在这里再叫一次
+  `redactText`（拿不到声明上下文），而是把**同一个谓词**导出来复用：`namedReason()` 从 `job-queue.ts` 导出，
+  三处落库点（lease 两列分支 ＋ 同一事务的 `events.payload_json.reasonCode`，§5 说事件正文只带引用、
+  安全摘要与状态）都过它，规则只有一份。
+- 顺带被这条规则捞到的那一处是**本轮发现的**，不在 #125 的框里：retained-reference 那一支除了写 job 行与
+  lease 行，还把同一个 `outcome.reason` 写进事件行。它今天是字面量所以不出事，但"今天不出事"正是第 5 格
+  被写成注释时的状态。
+- 新增用例 **3** 条（`har-import.test.ts` 现 **20** 条；`test:integration` 543→**546 passed + 6 skipped / 27 files**）：
+  三条都把 inspector 换成**假 port**——唯一变的就是 producer 回来的文字，所以断言红只可能是那一列留住了文字。
+  ① 失败分支：回包照旧带原始 reason（`run.error.reason` 含声明值——**行为没改，改的只是允许留下什么**），
+  而 lease 列**整份 JSON** 等于 `{code:"CAPABILITY_UNAVAILABLE", reason:"reason-unshapeable"}`、不含声明值，
+  且同一事务的 `jobs.error_json.message` 是同一个名字（两列不许对同一次失败给出两个名字）；
+  ② 具名 reason 原样通过（证明这是一条形状规则，不是"吞掉一切"）；
+  ③ retained-reference 那一面同样，并额外断事件行的 `reasonCode` 被换掉且整行不含声明值。
+  真的 fixture 那条（`records a retained reference…`）补上第 4 个读数：这一列确实有生产者，落的正是那个名字。
+- 一个副作用是**读数而不是断言**：全树跑完 **0 条回归**，说明今天确实没有非名字形状的 reason 流进这三处；
+  这条改动因此是"把已经成立的事变成不可违反"，不是改行为。
+- 变异 **8 支全红，0 存活**：L1 失败分支留原文／L2 retained 分支留原文／L3 事件行留原文／
+  L4 谓词一律替换（证明它不是沉默）／L5 形状规则放宽成收散文／L6 失败分支不再记 `code`／
+  L7 不合形状时保留前 40 字符（半回显）／L8 谓词用错地方（拿它去套 `code`、原文漏在 `reason`）。
+- 末态闸门：typecheck 0／lint **213 文件 0 条**／`review` 206 文件命中 **0**／`test:unit` **707/39**／
+  `test:integration` **546 passed + 6 skipped / 27 files**／`docs:check` exit 0。
+
+**这轮仍然没做的**：#125 第 3 格（导出面）仍等你的裁决——`export.create` 的 §8 那一行没有 `sensitiveValues`，
+而 §12.1 line 441 把声明定义成**不持久化**的操作上下文，所以"导出前拿哪一份声明"是接口决定不是实现细节；
+回包那一路（`gateFail(...)` 把原始 reason 交给调用方）**本轮没动**，它归 `apps/web/api-envelope.ts` 的过滤器管，
+我没有为它加新读数；`audit_entries.reason_code` 也**没有**纳入这条谓词——它的值来自各服务的字面量，
+要不要把具名列一起纳入，等你一句话。第 6 格勾上的是"enforce ＋ 可证"，不是"列成空白"。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配

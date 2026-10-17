@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TargetService } from "../../packages/application/target-service.ts";
-import { projectJobRecord } from "../../packages/application/job-queue.ts";
+import { projectJobRecord, UNSHAPEABLE_REASON } from "../../packages/application/job-queue.ts";
 import { apiErrorSchema } from "../../packages/contracts/errors.ts";
 
 import { digestBytes } from "../../packages/domain/canonical-json.ts";
@@ -28,6 +28,7 @@ import { commitDecision } from "../../packages/application/decision.ts";
 import { gateFail } from "../../packages/application/gate-failure.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
+import type { CaptureInspectionOutcome, CaptureInspectorPort } from "../../packages/application/ports.ts";
 import type { Result } from "../../packages/domain/result.ts";
 import type { HarImportReceipt } from "../../packages/contracts/imports.ts";
 import { testVectorSchema } from "../../packages/contracts/vectors.ts";
@@ -493,6 +494,16 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
     expect(record.error.message).toBe("resource-constraint-reference-retained");
     expect(record.error.retryable).toBe(false);
     expect(record.error.requestId).toBe(stopped.idempotencyKey);
+
+    // The same transaction's lease row, through the real producer: its name is a bare name, so it
+    // lands verbatim. This is the reading that says the column has a producer at all (§12.1's face
+    // is reachable from here), and what shape the shared predicate leaves behind.
+    const lease = db
+      .prepare("SELECT cleanup_state, last_error_json FROM resource_leases WHERE job_id = ?")
+      .get(String(staged.job.id)) as { cleanup_state: string; last_error_json: string | null } | undefined;
+    if (lease === undefined) throw new Error("the stopped job lost its lease row");
+    expect(lease.cleanup_state).toBe("failed");
+    expect(JSON.parse(String(lease.last_error_json))).toEqual({ reason: "resource-constraint-reference-retained" });
   });
 
   it("reads back the evidence and the import job a captured target owns (§8 line 274)", async () => {
@@ -632,5 +643,135 @@ describe("the ingestion path cannot reach a recorded URL (PRD F02, DESIGN §12)"
     for (const forbidden of ["url", "command", "image", "shell", "host", "timeout"]) {
       expect(request.includes(forbidden), `the inspection request exposes ${forbidden}`).toBe(false);
     }
+  });
+});
+
+// §12.1 names `resource_leases.last_error_json` beside `jobs.error_json` as one face of one rule, and
+// issue #125's sixth condition asked what covers it. The answer this block gives is not "nothing writes
+// a value there" — two sites do, both in this service, and both reach the column through
+// `updateLeaseCleanup`'s third *positional* argument, which a `lastErrorJson:`-shaped grep cannot see.
+// The port is faked here for exactly one reason: the only thing that varies is the text the producer
+// call came back with, so a failure of these assertions means the column kept that text.
+describe("the lease error column keeps a name, not the prose a failure arrived in (issue #125)", () => {
+  function leaseOf(jobId: Id): { cleanup_state: string; last_error_json: string | null; retry_count: number } {
+    const row = db
+      .prepare("SELECT cleanup_state, last_error_json, retry_count FROM resource_leases WHERE job_id = ?")
+      .get(jobId) as { cleanup_state: string; last_error_json: string | null; retry_count: number } | undefined;
+    if (row === undefined) throw new Error("the staged job has no lease row");
+    return row;
+  }
+
+  function errorOf(jobId: Id): string {
+    const row = db.prepare("SELECT error_json FROM jobs WHERE id = ?").get(jobId) as { error_json: string | null } | undefined;
+    if (row === undefined) throw new Error("the staged job is not in the store");
+    return String(row.error_json);
+  }
+
+  function jsonColumn(text: string | null): Record<string, unknown> {
+    return JSON.parse(String(text)) as Record<string, unknown>;
+  }
+
+  // A project of its own per case, because the artifact store dedupes inside (project, class, digest)
+  // and two cases sharing a project would share a staging lease.
+  async function stagedWith(
+    outcome: CaptureInspectionOutcome,
+    nonce: string,
+  ): Promise<{ jobId: Id; run: Awaited<ReturnType<HarIngestionService["runInspection"]>> }> {
+    const project = newId();
+    const created = writer.transact((tx) => {
+      tx.insertProject({
+        id: project,
+        name: `lease-${nonce}`,
+        createdAt: nowInstant(),
+        graphRevision: 0,
+        inventoryRevision: 0,
+        schemaVersion: 1,
+      });
+      return true;
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    const service = new HarIngestionService({
+      storage: writer,
+      artifacts: store,
+      inspector: { inspect: async () => outcome } satisfies CaptureInspectorPort,
+      ledger: session,
+      limits: LIMITS,
+    });
+    const staged = unwrapAsync(
+      await service.importCapture(project, inspectorActor, command({ idempotencyKey: `lease-${nonce}` }), harBytes, context),
+    );
+    const run = await service.runInspection(
+      project,
+      inspectorActor,
+      { projectId: project, jobId: staged.job.id, expectedJobState: "queued" },
+      context,
+    );
+    return { jobId: asId(staged.job.id), run };
+  }
+
+  it("replaces the prose a failure came back with, in both columns that job touches", async () => {
+    const { jobId, run } = await stagedWith(
+      {
+        kind: "failure",
+        code: "CAPABILITY_UNAVAILABLE",
+        reason: `provider said ${SECRET} while reading line 3`,
+        message: "the capture tool refused the record",
+      },
+      "prose",
+    );
+    // The caller still gets the refusal the service makes, reason and all: what changed is only what
+    // the transaction is allowed to keep.
+    expect(run.ok).toBe(false);
+    if (run.ok) return;
+    expect(run.error.code).toBe("CAPABILITY_UNAVAILABLE");
+    expect(run.error.reason).toContain(SECRET);
+
+    const lease = leaseOf(jobId);
+    expect(lease.cleanup_state).toBe("failed");
+    expect(lease.retry_count).toBe(1);
+    // The whole persisted value, not a substring check: a `{code, reason}` pair whose reason is the
+    // name says the same diagnosable thing the raw text said, and holds nothing else.
+    expect(jsonColumn(lease.last_error_json)).toEqual({ code: "CAPABILITY_UNAVAILABLE", reason: UNSHAPEABLE_REASON });
+    expect(String(lease.last_error_json)).not.toContain(SECRET);
+    // The job row this same transaction writes went through the same predicate, so the two columns
+    // cannot disagree about which name the failure has.
+    expect(jsonColumn(errorOf(jobId))["message"]).toBe(UNSHAPEABLE_REASON);
+  });
+
+  it("leaves a name alone, so the rule is a shape and not a silence", async () => {
+    const { jobId } = await stagedWith(
+      { kind: "failure", code: "REA_CONTRACT_MISMATCH", reason: "capture-without-evidence", message: "a non-evidence result" },
+      "named",
+    );
+    expect(jsonColumn(leaseOf(jobId).last_error_json)).toEqual({
+      code: "REA_CONTRACT_MISMATCH",
+      reason: "capture-without-evidence",
+    });
+  });
+
+  it("holds the retained-reference stop to the same rule, event row included", async () => {
+    const { jobId, run } = await stagedWith(
+      {
+        kind: "retained-reference",
+        evidenceId: `ev_${"c".repeat(64)}`,
+        reason: `the producer kept ${SECRET} for a later read`,
+        continuationName: null,
+      },
+      "retained",
+    );
+    // The stop is a recorded fact rather than a refusal, so it has to survive the rewrite of its name.
+    expect(run.ok).toBe(true);
+    const lease = leaseOf(jobId);
+    expect(lease.cleanup_state).toBe("failed");
+    expect(jsonColumn(lease.last_error_json)).toEqual({ reason: UNSHAPEABLE_REASON });
+    expect(String(lease.last_error_json)).not.toContain(SECRET);
+    // §5 says an event payload carries references, safe digests and states. This is the same
+    // transaction writing the same reason into a third place, so the third place obeys too.
+    const event = db
+      .prepare("SELECT payload_json FROM events WHERE aggregate_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(jobId) as { payload_json: string } | undefined;
+    if (event === undefined) throw new Error("the stop journalled nothing");
+    expect(event.payload_json).not.toContain(SECRET);
+    expect(jsonColumn(event.payload_json)["reasonCode"]).toBe(UNSHAPEABLE_REASON);
   });
 });
