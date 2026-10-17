@@ -139,7 +139,20 @@ class SqliteTransaction implements StorageTransaction {
 
   getProject(projectId: Id): ProjectRow | null {
     const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as Row | undefined;
-    if (!row) return null;
+    return row ? this.projectRowOf(row) : null;
+  }
+
+  listProjectsAfter(afterId: Id | null, limit: number): ProjectRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM projects
+         WHERE (? IS NULL OR id > ?) ORDER BY id ASC LIMIT ?`,
+      )
+      .all(afterId, afterId, limit) as Row[];
+    return rows.map((row) => this.projectRowOf(row));
+  }
+
+  private projectRowOf(row: Row): ProjectRow {
     return {
       id: asId(String(row["id"])),
       name: String(row["name"]),

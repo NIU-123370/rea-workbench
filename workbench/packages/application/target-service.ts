@@ -9,7 +9,7 @@ import { commitDecision, recordDeny } from "./decision.ts";
 import type { Step } from "./decision.ts";
 import { blockedByReasons, gateFail, type GateFailure } from "./gate-failure.ts";
 import type { StorageWriterPort } from "./ports.ts";
-import { targetCreateRequestSchema } from "../contracts/resources.ts";
+import { createUrlTargetRequestSchema } from "../contracts/resources.ts";
 import type { TargetCreated, TargetView } from "../contracts/resources.ts";
 
 // Declaring and reading capture targets (DESIGN §8 lines 273-274, §5; PRD F01; issue #58).
@@ -59,19 +59,12 @@ export class TargetService {
     if (!isControlPlane(actor)) {
       return this.denied(projectId, actor, "target.create", null, "role-may-not-declare-targets", "only the control plane declares a capture target (§7.3)");
     }
-    const parsed = targetCreateRequestSchema.safeParse(input);
+    const parsed = createUrlTargetRequestSchema.safeParse(input);
     if (!parsed.success) {
       return gateFail("INVALID_INPUT", "target-request", "the target declaration was rejected", {
         fields: parsed.error.issues.map((issue) => issue.path.join(".")),
         rejectedKeys: parsed.error.issues.flatMap((issue) => (issue as { keys?: string[] }).keys ?? []),
       });
-    }
-    if (parsed.data.kind !== "url") {
-      return gateFail(
-        "INVALID_INPUT",
-        "target-kind-needs-import",
-        "a har or asar target is created by the import that brought the file, not by a declaration (§8 line 272)",
-      );
     }
     const locator = normalizeUrlLocator(parsed.data.url);
     if (!locator.ok) return blockedByReasons(locator.error, "INVALID_INPUT", "the declared URL");

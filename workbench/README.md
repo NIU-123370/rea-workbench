@@ -275,7 +275,7 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **34 条**，仍缺 **6 条**。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **35 条**，仍缺 **5 条**。
 这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
@@ -390,6 +390,13 @@ details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键�
   ——这就是幂等日志在起作用：重放的是那次决定，不是第二次执行。
   §11 的终态由 `canTransitionJob` 那张表持有，所以服务里**没有**再加一道"是否终态"的检查：
   变异 P1 证明那道检查与它守的规矩没有任何可观察差别，属于装饰，本轮把它删了。
+- 项目分页（`GET /api/v1/projects`，2026-10-17 01:28 同源读数）：库里三个项目，`?limit=1` 逐页走 ——
+  第一页 `browser-page-b`、游标 `YTQyNDM3…` **解码回来正是那一行的 id**（游标是服务端发的，不是调用方写的），
+  第二页 `read-doors-pass`（`inventoryRevision=2`），第三页一行、游标为 null，**没有任何一页是空的**
+  （`hasMore` 靠"多问一行"决定，这条被变异 Q2 验过：让它恒为真就会发出一条通向空页的游标）。
+  拒绝侧：自造游标 → **400 `projects-cursor`**；`limit=abc` → **400 `projects-limit-malformed`**；
+  `limit=5000` → **413** `{reason:"projects-limit", limit:5000, maxLimit:200}`——
+  #59 那份具名键名单在这里第一次派上用场，两个数字真的过了 socket 到操作者眼前。
 - 两条 target 门也在同一套 rig 里过了一遍（配对页面同源，2026-10-17 01:03）：
   `POST .../targets` 交 `HTTPS://Shop.Example/Cart/../checkout?x=1` → **201**
   `{kind:"url", snapshotDigest:null, identityReason:"url-declared-not-captured", auditSeq:14}`；

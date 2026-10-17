@@ -38,6 +38,7 @@ import { normalizeEventLimit, toStreamEvents } from "../../packages/application/
 import { VectorService } from "../../packages/application/vector-service.ts";
 import { ContractService } from "../../packages/application/contract-service.ts";
 import { TargetService } from "../../packages/application/target-service.ts";
+import { ProjectReadService } from "../../packages/application/project-read.ts";
 import { JobLifecycleService } from "../../packages/application/job-lifecycle.ts";
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
@@ -58,7 +59,7 @@ import { connectReaStdio } from "../../packages/adapters/rea/protocol.ts";
 import { ReaSession } from "../../packages/adapters/rea/session.ts";
 import { ReaCaptureInspector } from "../../packages/adapters/rea/capture-inspection.ts";
 import { WebCaptureEvidenceFacts } from "../../packages/adapters/rea/web-capture-records.ts";
-import { createProjectRequestSchema } from "../../packages/contracts/resources.ts";
+import { createProjectRequestSchema, projectListQuerySchema } from "../../packages/contracts/resources.ts";
 import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
 import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
 import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
@@ -103,6 +104,9 @@ export type CompositionRequest = {
 export const COMMAND_NAMES = [
   "project.create",
   "project.get",
+  // The project page (§8 line 270): control-plane inventory only, and the cursor is the
+  // server's own encoding of the last row shown.
+  "projects.list",
   "capture.importHar",
   // The two target routes (§8 lines 273-274). Declaring a URL target and reading one back are
   // commands like any other, so the actor kind arrives on the frame and the service decides.
@@ -183,8 +187,7 @@ const PROJECTLESS_COMMANDS: readonly string[] = [
   "audit.listGlobal",
   "session.pair",
   "session.read",
-  "session.revoke",
-];
+  "session.revoke", "projects.list"];
 
 export type CommandName = (typeof COMMAND_NAMES)[number];
 export type CommandOutcome = Result<JsonValue, GateFailure>;
@@ -458,6 +461,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     limits: LIMITS,
   });
   const targets = new TargetService({ storage: writer });
+  const projectPage = new ProjectReadService({ storage: writer });
   const lifecycle = new JobLifecycleService({ storage: writer });
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
@@ -583,6 +587,11 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const refused = missing(targetId);
       if (refused !== null) return refused;
       return relay(targets.read(projectIdOr(payload), actor, targetId as Id));
+    },
+    "projects.list": (payload, actor) => {
+      const parsed = projectListQuerySchema.safeParse(asRecord(payload)["request"] ?? {});
+      if (!parsed.success) return gateFail("INVALID_INPUT", "projects-list", "the project page request was rejected");
+      return relay(projectPage.list(actor, { cursor: parsed.data.cursor ?? null, limit: parsed.data.limit ?? null }));
     },
     "capture.importHar": async (payload, actor) => {
       const projectId = pickId(payload, "projectId");

@@ -310,6 +310,9 @@ export type JobIdempotency =
 export type StorageTransaction = {
   insertProject(row: ProjectRow): void;
   getProject(projectId: Id): ProjectRow | null;
+  // §8 line 270's project page: a keyset cut on the same column the ORDER BY uses, so a page
+  // cannot skip or repeat a row when another project is created beside it.
+  listProjectsAfter(afterId: Id | null, limit: number): ProjectRow[];
   insertTarget(row: TargetRow): void;
   getTarget(projectId: Id, targetId: Id): TargetRow | null;
   // Which target a project should be looked at through is a bounded listing, newest
