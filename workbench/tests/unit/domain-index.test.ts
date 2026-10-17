@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import * as canonicalJson from "../../packages/domain/canonical-json.ts";
 import * as comparators from "../../packages/domain/comparators.ts";
+import * as capture from "../../packages/domain/capture.ts";
 import * as blueprint from "../../packages/domain/blueprint.ts";
 import * as contract from "../../packages/domain/contract.ts";
 import * as evidence from "../../packages/domain/evidence.ts";
@@ -34,6 +35,7 @@ const DOMAIN_DIR = path.join(ROOT, "packages/domain");
 const MODULES: Record<string, unknown> = {
   "canonical-json.ts": canonicalJson,
   "comparators.ts": comparators,
+  "capture.ts": capture,
   "blueprint.ts": blueprint,
   "contract.ts": contract,
   "evidence.ts": evidence,
@@ -57,6 +59,9 @@ const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["canonical-json.ts", "digestCanonicalJson"],
   ["comparators.ts", "isComparatorNormalization"],
   ["inspect.ts", "isInspectScope"],
+  ["capture.ts", "isBrowserActionKind"],
+  ["capture.ts", "isLocatorKind"],
+  ["capture.ts", "isWaitState"],
   ["target.ts", "isTargetKind"],
   ["canonical-json.ts", "digestBytes"],
   ["canonical-json.ts", "canonicalJson"],
@@ -190,6 +195,30 @@ describe("domain module inventory (DESIGN §3)", () => {
   // enforce them import them. A second inline copy would let the door accept a value the page cannot
   // name - and, for the target kinds, would let a page call an unknown kind "not a URL target" and
   // send an inspect the worker then refuses.
+  // The capture vocabulary is the one the page must be able to *offer* a row for (issue #58's capture
+  // half), so the same one-owner rule applies as for the scopes and the target kinds - with one
+  // addition that matters more here than anywhere else: no scripting kind may appear in the contract
+  // again, because an `evaluate` option on a capture is arbitrary code wearing a form field.
+  it("keeps one owner of the capture instruction vocabulary, and keeps it closed", () => {
+    const contract = readFileSync(path.join(ROOT, "packages/contracts/tasks.ts"), "utf8");
+    expect(contract).toContain('export { BROWSER_ACTION_KINDS as browserActionKinds, LOCATOR_KINDS as locatorKinds, WAIT_STATES as waitStates } from "../domain/capture.ts";');
+    expect(contract).toContain("state: z.enum(WAIT_STATES)");
+    expect(contract).not.toMatch(/z\.enum\(\s*\[\s*"visible"/);
+    const source = readFileSync(path.join(DOMAIN_DIR, "capture.ts"), "utf8");
+    expect(source).not.toMatch(/from\s*["'](node:|zod)/);
+    expect(capture.BROWSER_ACTION_KINDS).toEqual(["click", "fill", "waitFor"]);
+    expect(capture.LOCATOR_KINDS).toEqual(["role", "testId"]);
+    expect(capture.WAIT_STATES).toEqual(["visible", "hidden"]);
+    // The negative half, on the vocabulary itself: a scripting kind is not an option this page can be
+    // asked to render, and it is not something the list can grow later without a doc change.
+    expect(capture.isBrowserActionKind("evaluate")).toBe(false);
+    expect(capture.isBrowserActionKind("click")).toBe(true);
+    expect(capture.isLocatorKind("css")).toBe(false);
+    expect(capture.isLocatorKind("testId")).toBe(true);
+    expect(capture.isWaitState("attached")).toBe(false);
+    expect(capture.isWaitState("hidden")).toBe(true);
+  });
+
   it("keeps one owner of the inspect scope and target kind vocabularies", () => {
     const tasks = readFileSync(path.join(ROOT, "packages/contracts/tasks.ts"), "utf8");
     expect(tasks).toContain('export { INSPECT_SCOPES as inspectScopes, isInspectScope } from "../domain/inspect.ts";');

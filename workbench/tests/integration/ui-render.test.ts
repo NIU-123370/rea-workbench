@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { WorkbenchColumns } from "../../apps/web/ui/panels.tsx";
-import { buildMiddlePanel, buildRightTabs, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { buildMiddlePanel, buildRightTabs, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
 import { Workbench } from "../../apps/web/app/client/workbench.tsx";
 import { ProjectList } from "../../apps/web/app/client/project-list.tsx";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
@@ -287,8 +287,8 @@ describe("the directed-inspect panel before any read has happened", () => {
     expect(html).toContain('data-panel="directed-inspect"');
     expect(html).toContain('data-inspect-subject="blocked"');
     expect(html).toContain(INSPECT_GRAPH_UNREAD_LINE);
-    // The half this page cannot ask for is said on the panel, not left for the operator to discover as
-    // a 400 - and it is said before any read, because it is a fact about the build.
+    // The two halves of one door are two sections, and the panel says so before any read happens: an
+    // operator who wants a new capture must know which boxes to fill, not discover it as a 400.
     expect(html).toContain(INSPECT_CAPTURE_NOTE);
     // The scope control exists and is unchosen: no option is marked selected, because picking one for
     // the operator is §10's prohibition.
@@ -306,5 +306,48 @@ describe("the directed-inspect panel before any read has happened", () => {
     expect(html).not.toContain("本地排队，尚未提交");
     expect(html).not.toContain("已排入定向调查");
     expect(html).toContain("还没有点过任何格子");
+  });
+
+  it("names which of its own reads is missing, and offers one blank action row rather than a promise", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toContain('data-panel="capture-compose"');
+    // A capture needs a target, its kind, the concurrency token and a profile list, and none of those
+    // have been read at first paint. The sentence is the subject gate's own - the same value a submit
+    // would refuse with - so the heading cannot advertise a form its gate is about to reject.
+    expect(html).toContain('data-capture-subject="blocked"');
+    expect(html).toContain(CAPTURE_NO_TARGET_LINE);
+    // The profile control is the §10 case: a name the page invented would pick a sandbox for the
+    // operator, so the select is empty, unchosen, and disabled until health answers.
+    expect(html).toContain('data-capture-profile="unreadable"');
+    expect(html).toContain("<select id=\"capture-profile\" data-capture-profile=\"unreadable\" disabled=\"\">");
+    expect(html).toContain('<option value="" selected="">（还没有选：这一格没有默认值）</option>');
+    expect(html).toContain(CAPTURE_PROFILES_UNREADABLE_LINE);
+
+    // One row, because a capture without actions is still a capture (visit this address, record what
+    // it exchanges) - and the row shows only what its own kind can carry: `click` has no value to fill,
+    // a `role` locator has no testId, and no wait state is being asked for yet.
+    expect(html).toContain('data-capture-rows="1"');
+    expect(html).toContain('data-capture-row="0" data-capture-kind="click" data-capture-locator="role"');
+    expect(html).toContain('data-capture-role="0"');
+    expect(html).toContain('data-capture-name="0"');
+    expect(html).not.toContain("data-capture-testid=");
+    expect(html).not.toContain("data-capture-value=");
+    expect(html).not.toContain("data-capture-wait=");
+
+    // Read from the actual markup rather than from the JSX: an unchecked box renders no `checked`, and
+    // an all-false network block is a decision the note next to it explains.
+    expect(html).toContain('<input id="capture-request-body" data-capture-request-body="true" type="checkbox"/>');
+    expect(html).toContain('<input id="capture-response-body" data-capture-response-body="true" type="checkbox"/>');
+    expect(html).toContain('<input id="capture-header-values" data-capture-header-values="true" type="checkbox"/>');
+    expect(html).toContain(CAPTURE_NETWORK_NOTE);
+    // The field that may carry a secret asks the browser not to remember it. Pinned from the markup the
+    // harness really produces (it keeps the JSX's `autoComplete` spelling) rather than from a guess.
+    expect(html).toContain('<input id="capture-sensitive" data-capture-sensitive="true" type="text" autoComplete="off" value=""/>');
+
+    // Nothing here is a receipt: the sentence a 202 earns has not been printed, and neither half of the
+    // door's output is promised by a heading.
+    expect(html).not.toContain("已排入采集");
+    expect(html).not.toContain("本地排队，尚未提交");
+    expect(html).toContain("尚未发起：这一发只会排一个采集作业，不会给出结论。");
   });
 });

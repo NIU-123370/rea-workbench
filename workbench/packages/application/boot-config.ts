@@ -327,13 +327,29 @@ export class ProfileRegistry {
     return { ok: true, value: entry.profile };
   }
 
+  // The body `GET /health` publishes for each profile: §14's resolved declaration minus the two things
+  // the document keeps off this channel — `reaContainerEntrypoint` (a host absolute path) and the
+  // Builder's repair budget, which is a worker policy knob the broker never receives — plus the probe's
+  // answer. The limits are written out one by one rather than passed through, because this view is the
+  // same seven-number shape the sandbox descriptor carries: a profile field that the screen has no name
+  // for must not become a key the health contract has never seen (and did, until the capture composer
+  // read this list for profile names - every `GET /health` was a 503 `health-shape`).
   healthView(): JsonValue[] {
     return [...this.entries.values()].map((entry) => ({
       id: entry.profile.id,
+      schemaVersion: entry.profile.schemaVersion,
       reaPackageDigest: entry.profile.reaPackageDigest,
       browserImageDigest: entry.profile.browserImageDigest,
       browserVersion: entry.profile.browserVersion,
-      limits: entry.profile.limits,
+      limits: {
+        cpuCores: entry.profile.limits.cpuCores,
+        memoryBytes: entry.profile.limits.memoryBytes,
+        pids: entry.profile.limits.pids,
+        diskBytes: entry.profile.limits.diskBytes,
+        maxExpandedBytes: entry.profile.limits.maxExpandedBytes,
+        queueWaitMs: entry.profile.limits.queueWaitMs,
+        timeoutMs: entry.profile.limits.timeoutMs,
+      },
       networkPolicyId: entry.profile.networkPolicyId,
       available: entry.available,
       unavailableReasons: entry.unavailableReasons,

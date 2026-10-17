@@ -76,19 +76,10 @@ export const profileSchema = z.strictObject({
 export type ProfileLimitsWire = z.infer<typeof profileLimitsSchema>;
 export type ProfileWire = z.infer<typeof profileSchema>;
 
-export const healthProfileSchema = z.strictObject({
-  id: profileSchema.shape.id,
-  reaPackageDigest: profileSchema.shape.reaPackageDigest,
-  browserImageDigest: profileSchema.shape.browserImageDigest,
-  browserVersion: profileSchema.shape.browserVersion,
-  limits: profileLimitsSchema,
-  networkPolicyId: profileSchema.shape.networkPolicyId,
-  available: z.boolean(),
-  // Named, safe reasons: never a host path, never the whole configuration.
-  unavailableReasons: z.array(z.string().min(1)),
-});
-
-export type HealthProfile = z.infer<typeof healthProfileSchema>;
+// No `healthProfileSchema` here. The health body's profile projection is `effectiveProfileSchema` in
+// `health.ts`, and it is the one the route parses - a second declaration beside the one it projects from
+// was already disagreeing about two fields when the capture composer read health and every answer was a
+// 503. One owner per projection, and the producer is the side that has to satisfy it.
 
 // The socket the worker listens on, named once (§14: the API only ever holds the RPC,
 // it never mounts the data directory). It is a file *inside* WB_DATA_DIR, so the two

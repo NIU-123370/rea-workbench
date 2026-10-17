@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { HTTP_STATUS_BY_ERROR_CODE, NAMED_ERROR_CODES, SAFE_DETAIL_KEYS, apiErrorBodySchema, makeApiError, safeFailureDetails } from "../../packages/contracts/errors.ts";
 
 import { jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { EVENT_TYPES, committedEventSchema, eventPayloadSchema } from "../../packages/contracts/events.ts";
 import { healthResponseSchema, effectiveProfileSchema } from "../../packages/contracts/health.ts";
-import { captureTaskSchema, inspectTaskSchema, locatorSchema } from "../../packages/contracts/tasks.ts";
+import { browserActionKinds, browserActionSchema, captureTaskSchema, inspectTaskSchema, locatorKinds, locatorSchema, waitStates } from "../../packages/contracts/tasks.ts";
 import { bootstrapExchangeSchema, currentSessionSchema } from "../../packages/contracts/session.ts";
 import { createUrlTargetRequestSchema, importFieldsSchema, pendingTargetSchema, pagedSchema, projectSummarySchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
@@ -33,6 +34,21 @@ function accepts(schema: Parameters<typeof parseStrict>[0], input: unknown): voi
   const result = parseStrict(schema, input);
   if (!result.ok) throw new Error(JSON.stringify(result.error));
   expect(result.ok).toBe(true);
+}
+
+// A vocabulary can be checked against a union in one direction only by parsing samples, which cannot
+// see a branch nobody listed. The union's published JSON Schema lists every branch, so reading the
+// discriminators from it compares the two sets as sets - and is the only form that goes red when the
+// contract grows a kind the composer has no row for.
+function branchKind(branch: unknown): unknown {
+  return (branch as { properties?: { kind?: { const?: unknown } } }).properties?.kind?.const;
+}
+function kindNames(branches: unknown[]): string[] {
+  return branches.map(branchKind).map((kind) => String(kind));
+}
+function enumOf(branch: unknown, key: string): string[] {
+  const values = (branch as { properties?: { [name: string]: { enum?: unknown } | undefined } }).properties?.[key]?.enum;
+  return Array.isArray(values) ? values.map((value) => String(value)) : [];
 }
 
 describe("strict parsing (DESIGN §4, §8)", () => {
@@ -185,6 +201,19 @@ describe("task instruction surface (DESIGN §8)", () => {
       scenario: { startUrl: "not-a-url", actions: [] },
       network: { requestBody: false, responseBody: false, headerValues: false },
     });
+  });
+
+  // The two vocabularies the composer renders rows from and the two the union accepts have to be one
+  // set, in both directions. Asserting only "each listed kind parses" would leave a branch the domain
+  // does not list alive on the wire - which is the drift §3 forbids, and the page would then be able to
+  // send a kind it can never show. So the comparison is by value against the union's own discriminators.
+  it("accepts exactly the action and locator kinds the domain lists (§8 白名单, #58)", () => {
+    expect(kindNames(z.toJSONSchema(browserActionSchema, { io: "input" }).oneOf ?? [])).toEqual([...browserActionKinds]);
+    expect(kindNames(z.toJSONSchema(locatorSchema, { io: "input" }).oneOf ?? [])).toEqual([...locatorKinds]);
+    // `waitFor`'s observed state is the third vocabulary. It lives inside one branch rather than as a
+    // discriminator, so it is read from the same projection rather than trusted from the enum object.
+    const waitForBranch = (z.toJSONSchema(browserActionSchema, { io: "input" }).oneOf ?? []).find((branch) => branchKind(branch) === "waitFor");
+    expect(enumOf(waitForBranch, "state")).toEqual([...waitStates]);
   });
 
   it("keeps inspect scopes and claim references narrow", () => {

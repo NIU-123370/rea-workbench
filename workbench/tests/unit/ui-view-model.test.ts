@@ -14,9 +14,10 @@ import {
   blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, importReceiptLine, NO_SESSION_LINE, projectDraftOf, PROJECT_NAME_EMPTY_LINE, projectCreateLine, sessionGate, uploadDraftOf, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, jobUpdateSignalOf, STREAM_LINE, streamLineOf, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, UPLOAD_NO_FILE_LINE, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
   COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
   inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, inspectClaimsNoteFor,
-  INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES,
+  INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES, INSPECT_CAPTURE_NOTE,
+  captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
 } from "../../apps/web/ui/view-model.ts";
-import type { GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
+import type { CaptureActionRow, CaptureProfileOption, GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
 
 // The three-column surface's own rules (PRD F04 / DESIGN §6, issue #18).
 // Colour is never the only channel, an edge is judged by its own claim, a list view
@@ -1125,7 +1126,7 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
       task: { kind: "inspect", claimIds: [claimA, claimB], question: "这个响应在什么条件下会缺字段", scope: "captured-runtime" },
     });
     // Nothing here is a `capture` field: profileId, scenario, network and sensitiveValues belong to the
-    // other half of the union, which this page cannot build (and must not half-build).
+    // other half of the union, and the two sections that build them must not merge into one body.
     expect(JSON.stringify(draft.body)).not.toContain("sensitiveValues");
     expect(JSON.stringify(draft.body)).not.toContain("profileId");
   });
@@ -1145,7 +1146,12 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
     expect(kinds).toEqual(["capture-new", "inspect-runtime", "read-evidence", "review-claim"]);
     expect(new Set(Object.values(INQUIRY_KIND_LINES)).size).toBe(4);
     expect(INQUIRY_KIND_LINES["inspect-runtime"]).toContain("line 275");
-    expect(INQUIRY_KIND_LINES["capture-new"]).toContain("发不出");
+    // Both sendable kinds now point at a section that exists, and say which: §8 line 310 makes an
+    // active capture its own CaptureTask, so the queue entry has to name where that is composed.
+    expect(INQUIRY_KIND_LINES["capture-new"]).toContain("line 310");
+    expect(INQUIRY_KIND_LINES["capture-new"]).toContain("发起一次采集");
+    expect(INQUIRY_KIND_LINES["capture-new"]).not.toContain("发不出");
+    expect(INSPECT_CAPTURE_NOTE).toContain("发起一次采集");
 
     const line = inquiryQueueLine({
       kind: "inspect-runtime",
@@ -1160,5 +1166,338 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
     // The queue used to print `JSON.stringify(inquiry)`: a wire-shaped blob for a request nobody sent.
     expect(line).not.toContain("{");
     expect(inquiryQueueLine({ kind: "review-claim", subjectId: "cell-9", gaps: [], request: {} })).toContain("（无）");
+  });
+});
+
+// The capture half of §8 line 275 (issue #58's last handle). Three rules decide the shape of these
+// tests: nothing crosses the socket until every name the door requires has an answer (§10 forbids the
+// page guessing a profile), an operator reads a failure as "第 2 行缺 name" and not as a union that did
+// not parse, and every value in the body is one the composer was actually given - no defaults, because
+// a default here would be the page choosing a sandbox or a recording breadth nobody asked for.
+describe("capture composer (DESIGN §8 line 275's CaptureTask)", () => {
+  const profileList = {
+    effectiveProfiles: [
+      { id: "web-fixture", available: true, browserVersion: "1.55.0", unavailableReasons: [] },
+      { id: "linux-x64-chrome", available: false, browserVersion: "1.54.0", unavailableReasons: ["host-executable-missing"] },
+      // A third, also available: with one of each the two counts the subject line publishes are the
+      // same number, and an inverted `available` filter would still read correctly - which is how a
+      // symmetric fixture hides its own assertion.
+      { id: "web-fixture-arm64", available: true, browserVersion: "1.55.0", unavailableReasons: [] },
+    ],
+  };
+
+  const row = (overrides: Partial<CaptureActionRow> = {}): CaptureActionRow => ({
+    kind: "click",
+    locatorKind: "testId",
+    role: "",
+    name: "",
+    testId: "checkout",
+    value: "",
+    waitState: "",
+    ...overrides,
+  });
+
+  // Named rather than inferred: a union of these object literals is what TS builds when the list is
+  // inline, and a union with `?: never` markers is not assignable to the gate's parameter under
+  // `exactOptionalPropertyTypes` - so the shape the two functions take is written once, here.
+  type SubjectGaps = readonly Partial<{ targetId: string | null; target: InspectTargetRead | null; graphRevision: number | null; profiles: CaptureProfileOption[] | null }>[];
+
+  function captureInput(
+    overrides: Partial<{ csrf: string; targetId: string | null; target: InspectTargetRead | null; graphRevision: number | null; profiles: CaptureProfileOption[] | null; profileId: string; startUrl: string; rows: readonly CaptureActionRow[]; requestBody: boolean; responseBody: boolean; headerValues: boolean; timeoutMs: string; sensitiveValues: string }> = {},
+  ) {
+    return {
+      csrf: "token-1234567890",
+      targetId: "22222222-2222-4222-8222-222222222222",
+      target: { ok: true, kind: "url" } as const,
+      graphRevision: 0,
+      profiles: captureProfileOptionsOf(profileList),
+      profileId: "web-fixture",
+      startUrl: "http://127.0.0.1:4110/checkout",
+      rows: [row()],
+      requestBody: false,
+      responseBody: false,
+      headerValues: false,
+      timeoutMs: "",
+      sensitiveValues: "",
+      ...overrides,
+    };
+  }
+
+  it("states its subject once, and the submit refuses exactly what that sentence says is missing", () => {
+    const subjectOf = (overrides: Partial<{ targetId: string | null; target: InspectTargetRead | null; graphRevision: number | null; profiles: CaptureProfileOption[] | null }>) =>
+      captureSubjectOf({ targetId: "22222222-2222-4222-8222-222222222222", target: { ok: true, kind: "url" }, graphRevision: 3, profiles: captureProfileOptionsOf(profileList), ...overrides });
+
+    const ready = subjectOf({});
+    expect(ready.ok).toBe(true);
+    if (!ready.ok) return;
+    // Read back by value: the id and the token the request will carry are the ones the reads gave, and a
+    // `graphRevision: 0` is a real token rather than an absence.
+    expect(ready).toEqual({ ok: true, targetId: "22222222-2222-4222-8222-222222222222", graphRevision: 3, profiles: captureProfileOptionsOf(profileList) });
+    const line = captureSubjectLine(ready);
+    expect(line).toContain("22222222-2222-4222-8222-222222222222");
+    expect(line).toContain("图修订 3");
+    // Both counts, because they are two different facts: an unavailable profile is still a name the
+    // operator may choose, and the door's refusal is what settles it - the panel only says how many
+    // this host can run.
+    expect(line).toContain("2 个可用，清单共 3 个");
+    expect(captureSubjectLine(subjectOf({ graphRevision: 0 }))).toContain("图修订 0");
+
+    // The reconciliation this section lives on: for every subject-level gap, the sentence under the
+    // heading and the reason a submit refuses are the same string. A gate duplicated between the two,
+    // or a branch added to only one of them, breaks here rather than on the screen.
+    const gaps: SubjectGaps = [
+      { targetId: null },
+      { target: null },
+      { target: { ok: false, line: "目标行读到的形状不对" } },
+      { target: { ok: true, kind: "har" } },
+      { graphRevision: null },
+      { profiles: null },
+      { profiles: [] },
+    ];
+    for (const overrides of gaps) {
+      const subject = subjectOf(overrides);
+      expect(subject.ok).toBe(false);
+      if (subject.ok) return;
+      expect(captureSubjectLine(subject)).toBe(subject.line);
+      expect(captureDraftOf(captureInput(overrides))).toEqual({ ok: false, line: subject.line });
+    }
+
+    // Answered fields are *not* subject facts: the panel says nothing about an empty startUrl before the
+    // operator has had the chance to type one, while the gate refuses. That asymmetry is the reason the
+    // two functions are two functions.
+    expect(captureDraftOf(captureInput({ startUrl: "" })).ok).toBe(false);
+  });
+
+  it("offers exactly the names the contract takes, in the order the domain lists them", () => {
+    // The screen's option lists are the closed set, so a fourth action the worker would refuse (or a
+    // third wait state nobody can observe) cannot appear as a choice - and a kind the union has cannot
+    // go missing from the row editor.
+    expect(CAPTURE_ACTION_OPTIONS.map((option) => option.value)).toEqual(["click", "fill", "waitFor"]);
+    expect(CAPTURE_LOCATOR_OPTIONS.map((option) => option.value)).toEqual(["role", "testId"]);
+    expect(CAPTURE_WAIT_STATE_OPTIONS.map((option) => option.value)).toEqual(["visible", "hidden"]);
+    // Every option says what it does in the operator's language: an untranslated key is a control whose
+    // label comes from the wire, and `undefined` is what a missing phrase would print.
+    for (const options of [CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS]) {
+      for (const option of options) {
+        expect(option.label.length).toBeGreaterThan(0);
+        expect(option.label).not.toContain("undefined");
+      }
+    }
+    expect(CAPTURE_ACTION_OPTIONS.map((option) => option.label)).toEqual(["点击（click）", "填入（fill）", "等待状态（waitFor）"]);
+  });
+
+  it("builds one row at a time and blames the row, not the union", () => {
+    expect(captureActionOf(row(), 0)).toEqual({
+      ok: true,
+      action: { kind: "click", locator: { kind: "testId", value: "checkout" } },
+    });
+    // Trimmed on the way out: the door's `nonEmptyString` would accept " Admin ", and a locator with
+    // padding matches no element - the mistake is invisible unless the value is normalised here.
+    expect(captureActionOf(row({ locatorKind: "role", role: " button ", name: " Checkout ", testId: "ignored" }), 1)).toEqual({
+      ok: true,
+      action: { kind: "click", locator: { kind: "role", role: "button", name: "Checkout" } },
+    });
+    // `fill` with an empty value is how you clear a box, and §8 types it as `string`, so the composer
+    // must not add a non-empty rule the contract does not have.
+    expect(captureActionOf(row({ kind: "fill", testId: "qty", value: "" }), 2)).toEqual({
+      ok: true,
+      action: { kind: "fill", locator: { kind: "testId", value: "qty" }, value: "" },
+    });
+    expect(captureActionOf(row({ kind: "waitFor", testId: "receipt", waitState: "hidden" }), 0)).toEqual({
+      ok: true,
+      action: { kind: "waitFor", locator: { kind: "testId", value: "receipt" }, state: "hidden" },
+    });
+
+    const failures = [
+      [row({ kind: "evaluate" }), 0, "不在 §8 的三个里"],
+      [row({ kind: "click", locatorKind: "css" }), 0, "不在 §8 的两个里"],
+      [row({ locatorKind: "role", role: "", name: "Checkout" }), 1, "第 2 行缺角色名"],
+      [row({ locatorKind: "role", role: "button", name: "  " }), 0, "缺名称（name）"],
+      [row({ locatorKind: "testId", testId: " " }), 2, "第 3 行缺 testId"],
+      [row({ kind: "waitFor", waitState: "" }), 0, "没说要等到什么状态"],
+      [row({ kind: "waitFor", waitState: "networkidle" }), 0, "没说要等到什么状态"],
+    ] as const;
+    for (const [badRow, index, fragment] of failures) {
+      const built = captureActionOf(badRow, index);
+      expect(built.ok).toBe(false);
+      if (built.ok) return;
+      expect(built.failure.index).toBe(index);
+      expect(built.failure.line).toContain(fragment);
+    }
+
+    // An action kind outside the closed list is refused *without echoing it* - the same §12.1 rule the
+    // target-kind read follows, because this is a field whose value already failed a closed vocabulary.
+    const hostile = captureActionOf(row({ kind: "eval`; require('child_process')" }), 0);
+    expect(hostile.ok).toBe(false);
+    if (hostile.ok) return;
+    expect(hostile.failure.line).not.toContain("child_process");
+    expect(hostile.failure.line).not.toContain("eval");
+  });
+
+  it("reads profile names only from the health payload, and drops the whole list when a row is half-formed", () => {
+    const options = captureProfileOptionsOf(profileList);
+    expect(options).not.toBeNull();
+    if (options === null) return;
+    expect(options.map((option) => option.id)).toEqual(["web-fixture", "linux-x64-chrome", "web-fixture-arm64"]);
+    expect(options[0]?.available).toBe(true);
+    expect(options[0]?.label).toContain("web-fixture");
+    expect(options[0]?.label).toContain("1.55.0");
+    expect(options[0]?.label).toContain("可用");
+    // An unavailable profile is still listed, with its reason: hiding it would leave the operator
+    // choosing a name the door refuses, and a list without the reason is a mystery rather than a fact.
+    expect(options[1]?.label).toContain("本机不可用");
+    expect(options[1]?.label).toContain("host-executable-missing");
+
+    // Half-parsed is not half-offered: one row whose id or availability is missing takes the list down
+    // to "unreadable", which the composer answers with its own sentence.
+    expect(captureProfileOptionsOf(null)).toBeNull();
+    expect(captureProfileOptionsOf({})).toBeNull();
+    expect(captureProfileOptionsOf({ effectiveProfiles: {} })).toBeNull();
+    expect(captureProfileOptionsOf({ effectiveProfiles: [{ available: true }] })).toBeNull();
+    expect(captureProfileOptionsOf({ effectiveProfiles: [{ id: "p", available: "yes" }] })).toBeNull();
+    expect(captureProfileOptionsOf({ effectiveProfiles: [{ id: "", available: true }] })).toBeNull();
+    // An empty list is a *read* answer ("this build has no profile") and stays a list, so the composer
+    // can say 一个 profile 都没有 instead of the vaguer 读不到.
+    expect(captureProfileOptionsOf({ effectiveProfiles: [] })).toEqual([]);
+    // A profile that does not name its browser version says so, rather than printing a blank.
+    const noVersion = captureProfileOptionsOf({ effectiveProfiles: [{ id: "p", available: true }] });
+    expect(noVersion?.[0]?.label).toContain("版本未知");
+    // Nor does one that claims to be unavailable while naming nothing.
+    const noReason = captureProfileOptionsOf({ effectiveProfiles: [{ id: "p", available: false, unavailableReasons: [] }] });
+    expect(noReason?.[0]?.label).toContain("未具名");
+  });
+
+  it("refuses before anything crosses the socket, one named cause at a time, in read order", () => {
+    const lineOf = (input: Parameters<typeof captureDraftOf>[0]) => {
+      const draft = captureDraftOf(input);
+      return draft.ok ? "ready" : draft.line;
+    };
+    // Every precondition broken at once and the session sentence still wins.
+    expect(
+      lineOf(
+        captureInput({
+          csrf: "",
+          targetId: null,
+          target: null,
+          graphRevision: null,
+          profiles: null,
+          profileId: "",
+          startUrl: "",
+          rows: [row({ testId: "" })],
+        }),
+      ),
+    ).toBe(NO_SESSION_LINE);
+
+    // Pinned by identity and by position: two of these sentences swapped would tell the operator to go
+    // fix something that is already fine.
+    expect(
+      [
+        lineOf(captureInput({ targetId: null })),
+        lineOf(captureInput({ target: null })),
+        lineOf(captureInput({ target: { ok: false, line: "目标行读到的形状不对" } })),
+        lineOf(captureInput({ target: { ok: true, kind: "har" } })),
+        lineOf(captureInput({ graphRevision: null })),
+        lineOf(captureInput({ profiles: null })),
+        lineOf(captureInput({ profiles: [] })),
+        lineOf(captureInput({ profileId: "" })),
+        lineOf(captureInput({ profileId: "made-up-profile" })),
+        lineOf(captureInput({ startUrl: "   " })),
+        lineOf(captureInput({ startUrl: "ftp://127.0.0.1/x" })),
+        lineOf(captureInput({ startUrl: "http://user:hunter2@127.0.0.1/x" })),
+        lineOf(captureInput({ startUrl: "http://127.0.0.1/x#frag" })),
+        lineOf(captureInput({ rows: [row(), row({ kind: "waitFor" })] })),
+        lineOf(captureInput({ timeoutMs: "0" })),
+        lineOf(captureInput({ timeoutMs: "1.5" })),
+        lineOf(captureInput({ timeoutMs: "soon" })),
+      ]
+    ).toEqual([
+      CAPTURE_NO_TARGET_LINE,
+      CAPTURE_TARGET_UNREADABLE_LINE,
+      "目标行读到的形状不对",
+      CAPTURE_TARGET_NOT_URL_LINE,
+      INSPECT_REVISION_UNREAD_LINE,
+      CAPTURE_PROFILES_UNREADABLE_LINE,
+      CAPTURE_PROFILES_EMPTY_LINE,
+      CAPTURE_PROFILE_UNSELECTED_LINE,
+      `${CAPTURE_PROFILE_UNSELECTED_LINE}（要的那一个不在健康回包给的清单里：made-up-profile）`,
+      CAPTURE_START_URL_EMPTY_LINE,
+      "startUrl 不能用作采集起点：url-scheme-not-http:ftp",
+      "startUrl 不能用作采集起点：url-credentials-forbidden",
+      "startUrl 不能用作采集起点：url-fragment-forbidden",
+      "第 2 行没说要等到什么状态（visible / hidden 两档之一）",
+      CAPTURE_TIMEOUT_LINE,
+      CAPTURE_TIMEOUT_LINE,
+      CAPTURE_TIMEOUT_LINE,
+    ]);
+
+    // The credential-bearing address is refused for the *rule*, not by echoing what was typed: a
+    // startUrl can carry a password, and §12.1 publishes names rather than values.
+    const secret = captureDraftOf(captureInput({ startUrl: "http://user:hunter2@127.0.0.1/x" }));
+    expect(secret.ok).toBe(false);
+    if (secret.ok) return;
+    expect(secret.line).not.toContain("hunter2");
+    expect(secret.line).not.toContain("user:");
+  });
+
+  it("sends exactly the fields §8 line 306 names, and only the ones that were answered", () => {
+    const draft = captureDraftOf(captureInput());
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+    expect(Object.keys(draft.body).sort()).toEqual(["expectedGraphRevision", "targetId", "task"]);
+    expect(draft.body).toEqual({
+      targetId: "22222222-2222-4222-8222-222222222222",
+      expectedGraphRevision: 0,
+      task: {
+        kind: "capture",
+        profileId: "web-fixture",
+        scenario: { startUrl: "http://127.0.0.1:4110/checkout", actions: [{ kind: "click", locator: { kind: "testId", value: "checkout" } }] },
+        network: { requestBody: false, responseBody: false, headerValues: false },
+      },
+    });
+    // `graphRevision: 0` is a real token, not an absence: a fresh project's revision is 0 and a
+    // truthiness check here would make the first capture of every new target unsendable.
+    expect(captureDraftOf(captureInput({ graphRevision: 0 })).ok).toBe(true);
+    expect(Object.keys(draft.body.task).sort()).toEqual(["kind", "network", "profileId", "scenario"]);
+
+    // Optional fields travel only when answered. `0` would mean "no runtime limit is 0ms" and an empty
+    // `sensitiveValues` array would be a declaration of something the operator did not declare.
+    const answered = captureDraftOf(captureInput({ timeoutMs: " 45000 ", sensitiveValues: "hunter2, , sesame" }));
+    expect(answered.ok).toBe(true);
+    if (!answered.ok) return;
+    expect(answered.body.task.timeoutMs).toBe(45000);
+    expect(answered.body.task.sensitiveValues).toEqual(["hunter2", "sesame"]);
+    expect(Object.keys(answered.body.task).sort()).toEqual(["kind", "network", "profileId", "scenario", "sensitiveValues", "timeoutMs"]);
+
+    // An action list may be empty: visiting the start address and recording what it exchanges is a
+    // capture, and §8 puts no floor on `actions`.
+    const bare = captureDraftOf(captureInput({ rows: [] }));
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.body.task.scenario).toEqual({ startUrl: "http://127.0.0.1:4110/checkout", actions: [] });
+
+    // Rows keep the order they were written in - a capture is a sequence, and sorting it would run a
+    // waitFor before the click it waits for.
+    const sequence = captureDraftOf(
+      captureInput({
+        rows: [
+          row({ kind: "fill", testId: "qty", value: "2" }),
+          row({ kind: "waitFor", testId: "receipt", waitState: "visible" }),
+          row({ kind: "click", locatorKind: "role", role: "button", name: "Pay" }),
+        ],
+      }),
+    );
+    expect(sequence.ok).toBe(true);
+    if (!sequence.ok) return;
+    const actions = (sequence.body.task.scenario as { actions: { kind: string }[] }).actions;
+    expect(actions.map((action) => action.kind)).toEqual(["fill", "waitFor", "click"]);
+
+    // The network block is whatever was ticked, all-false included - the note is what makes that
+    // readable, so it has to say the same thing the body does instead of promising a default.
+    const allThree = captureDraftOf(captureInput({ requestBody: true, responseBody: true, headerValues: true }));
+    expect(allThree.ok).toBe(true);
+    if (!allThree.ok) return;
+    expect(allThree.body.task.network).toEqual({ requestBody: true, responseBody: true, headerValues: true });
+    expect(CAPTURE_NETWORK_NOTE).toContain("全不勾");
+    expect(CAPTURE_NETWORK_NOTE).toContain("骨架");
   });
 });

@@ -16,7 +16,7 @@ import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 // The page's own draft builders, driven from real replies: a test of the door alone cannot show that
 // what this UI would send is something the door accepts, and a unit test of the builders alone cannot
 // show that the three reads they consume say what the page assumes they say.
-import { inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, relayData } from "../../apps/web/ui/view-model.ts";
+import { CAPTURE_TARGET_NOT_URL_LINE, captureDraftOf, captureProfileOptionsOf, inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, relayData } from "../../apps/web/ui/view-model.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectPageSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
@@ -4266,6 +4266,139 @@ describe("the job request door (§8 line 275 / issue #58)", () => {
     }, "job-key-page-url-target");
     expect(asked.status, asked.text).toBe(400);
     expect(errorOf(asked.text).details["reason"]).toBe("inspect-needs-file-target");
+  });
+
+  // The capture half of the same reconciliation (issue #58's last handle): the composer's body is built
+  // from the three reads the page really makes - health for the profile name, the project row for the
+  // target id and concurrency token, the target row for its kind - and what comes out has to be the
+  // body this door takes. A composer whose output the door refuses is a control that can only ever be
+  // refused, which is the thing these two sections keep getting told about.
+  it("accepts the capture body the composer builds from the reads the page makes", async () => {
+    const fix = await rig("job-door-page-capture");
+    const healthRead = await call("GET", `${API_PREFIX}/health`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(healthRead.status, healthRead.text).toBe(200);
+    const targetRead = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/targets/${String(fix.targetId)}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(targetRead.status, targetRead.text).toBe(200);
+
+    // Read back through the page's own owners: the health list has to actually name the profile this rig
+    // installs, and the row has to say `url`, or the draft below is being asked to accept a state the
+    // composer would never see.
+    const profiles = captureProfileOptionsOf(relayData(JSON.parse(healthRead.text) as JsonValue));
+    expect(profiles?.map((option) => option.id)).toContain("har-capture");
+    const target = inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, fix.targetId);
+    expect(target).toEqual({ ok: true, kind: "url" });
+    if (profiles === null) throw new Error(healthRead.text);
+
+    const draft = captureDraftOf({
+      csrf: fix.session.csrf,
+      targetId: fix.targetId,
+      target,
+      graphRevision: 0,
+      profiles,
+      profileId: "har-capture",
+      startUrl: "https://shop.example/cart",
+      rows: [
+        { kind: "click", locatorKind: "testId", role: "", name: "", testId: "add-to-cart", value: "", waitState: "" },
+        { kind: "waitFor", locatorKind: "role", role: "status", name: "购物车", testId: "", value: "", waitState: "visible" },
+      ],
+      requestBody: true,
+      responseBody: false,
+      headerValues: false,
+      timeoutMs: "45000",
+      sensitiveValues: "hunter2",
+    });
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+
+    const asked = await post(fix.session, fix.path, draft.body as unknown as Record<string, JsonValue>, "job-key-page-capture");
+    expect(asked.status, asked.text).toBe(202);
+    const record = jobRecordSchema.safeParse(relayData(JSON.parse(asked.text) as JsonValue));
+    if (!record.success) throw new Error(asked.text);
+    expect(record.data.kind).toBe("capture");
+    expect(record.data.state).toBe("queued");
+
+    // The row carries the sequence and the profile the operator chose - the door did not reinterpret the
+    // body it was given.
+    const row = queuedJob(fix.projectId, asId(record.data.id));
+    expect(JSON.stringify(row?.inputJson)).toContain("add-to-cart");
+    expect(JSON.stringify(row?.inputJson)).toContain("购物车");
+    expect(JSON.stringify(row?.inputJson)).toContain("har-capture");
+  });
+
+  // The one rule the composer deliberately does **not** own: §8 says the start address must match the
+  // target's authorised scope, and `GET /projects/:p/targets/:t` carries no locator to compare against,
+  // so the page cannot honestly decide it and a guess would be a rule with no owner. The door answers
+  // with the named reason, and the two together are what makes the split sayable rather than silent.
+  it("lets the door own the scope rule the page has no read for", async () => {
+    const fix = await rig("job-door-page-capture-scope");
+    const healthRead = await call("GET", `${API_PREFIX}/health`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(healthRead.status, healthRead.text).toBe(200);
+    const profiles = captureProfileOptionsOf(relayData(JSON.parse(healthRead.text) as JsonValue));
+    if (profiles === null) throw new Error(healthRead.text);
+
+    const draft = captureDraftOf({
+      csrf: fix.session.csrf,
+      targetId: fix.targetId,
+      target: { ok: true, kind: "url" },
+      graphRevision: 0,
+      profiles,
+      profileId: "har-capture",
+      // The same well-formed, credential-free, fragment-free address - on a host the target does not name.
+      startUrl: "https://other.example/cart",
+      rows: [],
+      requestBody: false,
+      responseBody: false,
+      headerValues: false,
+      timeoutMs: "",
+      sensitiveValues: "",
+    });
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+
+    const asked = await post(fix.session, fix.path, draft.body as unknown as Record<string, JsonValue>, "job-key-page-capture-scope");
+    expect(asked.status, asked.text).toBe(403);
+    expect(errorOf(asked.text).details["reason"]).toBe("start-url-outside-target-scope");
+  });
+
+  // And the disagreement the page *can* see: a capture against imported bytes has no address to visit,
+  // so the composer refuses before the socket and the door refuses with its own name for the same rule.
+  it("refuses a capture against a file target with the same rule on both sides", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "job-door-page-capture-file");
+    const file = fileTarget(projectId);
+    const targetRead = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/targets/${String(file)}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(targetRead.status, targetRead.text).toBe(200);
+    const healthRead = await call("GET", `${API_PREFIX}/health`, { headers: { host: host(), cookie: session.cookie } });
+    expect(healthRead.status, healthRead.text).toBe(200);
+    const profiles = captureProfileOptionsOf(relayData(JSON.parse(healthRead.text) as JsonValue));
+    if (profiles === null) throw new Error("health lost its profile list");
+
+    const draft = captureDraftOf({
+      csrf: session.csrf,
+      targetId: file,
+      target: inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, file),
+      graphRevision: 0,
+      profiles,
+      profileId: "har-capture",
+      startUrl: "https://shop.example/cart",
+      rows: [],
+      requestBody: false,
+      responseBody: false,
+      headerValues: false,
+      timeoutMs: "",
+      sensitiveValues: "",
+    });
+    expect(draft.ok).toBe(false);
+    if (draft.ok) return;
+    expect(draft.line).toBe(CAPTURE_TARGET_NOT_URL_LINE);
+
+    const asked = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs`, {
+      targetId: file,
+      expectedGraphRevision: 0,
+      task: captureTask(),
+    }, "job-key-page-capture-file");
+    expect(asked.status, asked.text).toBe(400);
+    expect(errorOf(asked.text).details["reason"]).toBe("capture-needs-url-target");
   });
 });
 

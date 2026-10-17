@@ -2,10 +2,16 @@ import { z } from "zod";
 
 import { idSchema, nonEmptyString } from "./primitives.ts";
 import { INSPECT_SCOPES } from "../domain/inspect.ts";
+import { WAIT_STATES } from "../domain/capture.ts";
 
 // Job inputs (DESIGN §8). These unions are the whole instruction surface a
 // target may receive: no JavaScript, no shell, no arbitrary Playwright
 // expression, no arbitrary file access.
+
+// Both vocabularies come from `domain/capture.ts` (see the comment there): the page renders a row per
+// action kind and per locator kind, and re-exports below keep one owner of each name.
+export { BROWSER_ACTION_KINDS as browserActionKinds, LOCATOR_KINDS as locatorKinds, WAIT_STATES as waitStates } from "../domain/capture.ts";
+export type { BrowserActionKind, LocatorKind, WaitState } from "../domain/capture.ts";
 
 export const locatorSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("role"), role: nonEmptyString, name: nonEmptyString }),
@@ -18,7 +24,7 @@ export const browserActionSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("waitFor"),
     locator: locatorSchema,
-    state: z.enum(["visible", "hidden"]),
+    state: z.enum(WAIT_STATES),
   }),
 ]);
 

@@ -707,6 +707,63 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件�
   **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
   蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
 
+浏览器实测·第十四轮（2026-10-18 00:20–00:26 UTC，三个真进程：worker（数据目录 `/private/tmp/wb-rig-1018/data`，
+profile `har-capture`、`queueWaitMs:30000`、`maxGenerationAttempts:3`）＋web(127.0.0.1:4310)＋`next dev apps/web -p 4496`
+（`WB_UI_ORIGIN=http://localhost:4496`）；这一轮测的是**页面最后一把手**：§8 line 275 的 capture 半边，
+`data-panel="capture-compose"` 那一节（issue #58 的账到这里只剩三扇创建门，采集编排已经不是账了）：
+
+- 落地页配对 → 新建项目 `browser-round-14-capture`（id `5be90c73…`）→ 用同源 `fetch` 打 §8 line 273 声明 URL 目标
+  （201，`identityReason=url-declared-not-captured`，日志 seq 2 只记 `host:"shop.example"`）。**这一发是页面还没有把手的那扇门**，
+  所以下面所有读数里 `targetId` 都来自这一次声明。
+- **`GET /api/v1/health` 第一次在真页面上答 200**（本轮之前它只能是 503，见下面的"这一轮抓到的一条真缺陷"）。
+  网络面板三条 `GET /health [200]`（每次 load 一条，dev 的 StrictMode 让 effect 跑两遍所以清单类 GET 成对出现），
+  回包里的 profile 是 `har-capture｜available=false｜141.0.7390.107｜limits 7 个数`。
+- 首屏（还没点任何东西）：标题下的主题行逐字「目标 a97af19b-6467-49dd-ad9c-a8bd77472584（声明出来的 URL）｜图修订 0｜profile 0 个可用，清单共 1 个」，
+  `data-capture-subject="ready"`；profile 下拉两个 option——`（还没有选：这一格没有默认值）` 与
+  `har-capture｜浏览器 141.0.7390.107｜本机不可用：host-platform-unverified-for-sandbox、host-cannot-enforce-sandbox、rea-package-digest-mismatch`；
+  动作表 1 行、`data-capture-kind="click"`、`data-capture-locator="role"`，因此页面上只有 role/name 两个框，
+  `data-capture-testid`/`data-capture-value`/`data-capture-wait` 三个选择器各 0 个命中；三个网络勾选框全 `checked=false`；
+  回执格是「尚未发起：这一发只会排一个采集作业，不会给出结论。」。
+- **空着点「发起采集」** → 回执逐字「还没有选 profile：它固定的是沙箱、镜像摘要与限额，§10 不许页面替你挑一个。」，
+  而且**没有 POST 出去**：网络面板里 74→75 之间一条请求都没有（`/jobs` 只有 `?limit=50` 的两条 GET）。
+- **填好再点**（profile `har-capture`、startUrl `https://shop.example/cart`、第 1 行 role=button/name=加入购物车、
+  点「加一行动作」后第 2 行改成 waitFor＋testId=receipt＋visible、勾 requestBody） → 一次 `POST /jobs [202]`，
+  请求体逐字（433 字节）`{"targetId":"a97af19b…","expectedGraphRevision":0,"task":{"kind":"capture","profileId":"har-capture",
+  "scenario":{"startUrl":"https://shop.example/cart","actions":[{"kind":"click","locator":{"kind":"role","role":"button","name":"加入购物车"}},
+  {"kind":"waitFor","locator":{"kind":"testId","value":"receipt"},"state":"visible"}]},"network":{"requestBody":true,"responseBody":false,"headerValues":false}}}`
+  ——**没有 `timeoutMs`、没有 `sensitiveValues`**，因为那两格空着；`Idempotency-Key: e0a9ddcd-5153-47e3-9180-c2a69c099916` 是这一次点击自己的。
+  回执「已排入采集：作业 37c09a0c-514b-4b40-87b4-d29ee5a85119（queued）」，作业面板当场多出一行。
+- 数据库里那一行（只读连接查 `workbench.db`）：`kind=capture state=queued cleanup_state=pending
+  deadline_at=2026-10-17T16:24:15.653Z`——**请求里没写 deadlineAt**，这个时刻是 profile 的 `queueWaitMs` 30 秒加上去的（§11/§14）；
+  `input_json` 与发出去的体一致（两个动作、`requestBody:true`），`request_digest=148925e5…`。日志 seq 3 是
+  `job.request|allow|job-queued|{"taskKind":"capture"}`。
+- **门口那一发被页面上的规则先挡住**：把 startUrl 换成 `http://user:hunter2@shop.example/cart` 再点，
+  回执逐字「startUrl 不能用作采集起点：url-credentials-forbidden」，句子里**没有** `hunter2` 也没有用户名（§12.1 只发名字），
+  并且**依旧没有 POST**——网络面板从头到尾只有两条 `POST /jobs`，第三条点击没有产生请求。
+- **两格可选项答了才走**：startUrl 改 `https://shop.example/checkout`、timeoutMs 填 45000、敏感值填 `sesame-secret-value`
+  → 第二条 `POST /jobs [202]`（497 字节，体里多出的正是 `"timeoutMs":45000,"sensitiveValues":["sesame-secret-value"]`），
+  作业 `80be0166…`。**存下来的那一行里没有那个秘密**：`input_json` 只到 `"timeoutMs":45000` 为止，
+  两条 capture 行的 `input_json`＋`request_digest`＋`audit` 全库扫一遍含 `sesame-secret-value` 的行数 = **0**（§8 line 308 与 §12.1 在真页面上对上了）。
+- 取消把手对这一发同样有效：点旧作业的「请求取消」→ 页面上那行落定 `data-job-state="cancelled"`，按钮只剩「重排清理」，
+  句子是「这一行已是终态 cancelled：§11 不让终态复活，取消只会返回现状」。
+- 重载整页：主题行重新由三条读算出来（还是 ready），五个输入格全部回空、profile 回到 `""`、动作表 1 行 `click`、
+  回执回到「尚未发起…」——**页面上没有任何一处把上一次的编排留在内存之外**。
+- console 全程 2 条（`[Fast Refresh] rebuilding` / `done in 146ms`，那正是这一轮新代码被 dev 编译的那两行），**0 条报错**。
+- **这一轮抓到的一条真缺陷（同一笔里修掉了）**：编排控件要读 health 拿 profile 名字，而 `GET /health` 在本仓**从来没能答出 200**——
+  路由挂着，但它 `parseStrict(healthResponseSchema, …)` 的那一步必红：`ProfileRegistry.healthView()` 交出的体里
+  少了契约要的 `schemaVersion`，而 `limits` 是整个 `profile.limits` 直接透传、多了契约没点的 `maxGenerationAttempts`
+  （strictObject 认多余键就是 `unrecognized_keys`）⇒ 每一次 `GET /health` 都是 503 `health-shape`。
+  之所以十三轮之前没人发现：**页面上没有任何一处读 health**，而 `tests/integration/web-api.test.ts` 里唯一那条 health 用例
+  断的是"没会话时拒"，红在这一步之前。现在两侧各有一道守卫：`healthView()` 的输出被 `effectiveProfileSchema` 逐字段解析
+  （`tests/unit/boot-and-profiles.test.ts`，含 limits 七个键名的清单），加上本轮三条集成用例真的 `GET /health` 并要 200。
+  同一笔里还删了 `contracts/boot.ts` 的 `healthProfileSchema`/`HealthProfile`：零调用方，而且它和活的 `effectiveProfileSchema`
+  对 `schemaVersion` 的说法**相反**（一个不收这个键，一个必填）——两个持有者迟早让投影跟自己不一致。
+  **一处仍要与文档对质**（已开 issue）：§14 line 475 的 limits 清单只有 7 个数，而 `contracts/boot.ts` 的 profile 声明要求
+  第 8 个 `maxGenerationAttempts`（§7.3 的修复次数预算）；文档没点名的这个字段现在只活在配置侧，health 与 broker 描述符都不带它。
+- 这一轮**没验到的**：真浏览器里截图（工具的路径白名单既不收 `/tmp` 也不收工作区，所以读数全部来自 a11y 快照、DOM 查询与网络面板）；
+  `localhost:4496` 之外没有第二个 origin 的对照；一次真采集的执行（runner 仍然只认 `build`，`capture` 作业停在 `queued` ——
+  与 `verify` 同一条已声明的缺席，见 #75/#79）；`vector.create`、`contract`、`plan.build`、`POST /projects/:p/targets` 四扇门仍没有把手。
+
 浏览器实测·第十三轮（2026-10-17 11:33–11:45 UTC，同一套三个真进程：worker（数据目录 `rea-rig-s9/data`）＋
 web(127.0.0.1:4310)＋`next dev` 在 4496（`WB_UI_ORIGIN=http://localhost:4496`）；这一轮测的是 §8 line 275
 的 **inspect 把手**，issue #58 剩下的最后一格页面动作）：
@@ -928,9 +985,9 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 
 明确**未实现 / 未验证**的范围：
 
-- 页面上的写控件现在覆盖到「建项目 → 上传采集 → 批 → 冻 → 生成」以及作业的两扇门（第九、十轮有浏览器
-  读数）：**有**按钮的是落地清单、新建项目、配对表单、采集上传、样本决定、作业取消、清理重排、验证请求、
-  蓝图冻结、发起生成；**没有**控件的是 `vector.create`、`contract`(草稿) 与 `plan.build` 三扇创建门——
+- 页面上的写控件现在覆盖到「建项目 → 声明 URL 目标 → 上传采集 → 采集编排 → 定向调查 → 批 → 冻 → 生成」以及作业的两扇门（第九、十轮有浏览器
+  读数）：**有**按钮的是落地清单、新建项目、配对表单、采集上传、**发起一次采集（第十四轮的编排控件）**、**定向调查**、样本决定、作业取消、清理重排、验证请求、
+  蓝图冻结、发起生成；**没有**控件的是 `vector.create`、`contract`(草稿) 与 `plan.build` 三扇创建门、以及 §8 line 273 的声明 URL 目标（第十四轮仍用同源 `fetch` 打的）——
   它们的必填输入要从证据正文里派生（record ordinal、schema 体、requiredCases 联集），页面上做一个能填的
   表就等于做一个会猜的表，所以这三扇仍靠 `fetch` 驱动，是 issue #58 剩下的账。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
@@ -975,10 +1032,12 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   一处既有的顺序值得知道：报告的 artifact 正文是在事务**之前**发布的（publish-then-commit），所以
   "回执被门拒了"会留下一份没被任何行引用的正文——这不是这一笔引入的（drift 那条拒绝早就是同一个形状），
   记在这里是因为我新加的拒绝让这条路更容易被读到。
-- §8 line 275 的**页面把手现在只缺一半，缺的是 capture 那一半**：页面没有任何东西能生成一份
-  `BrowserAction` 序列（`click/fill/waitFor` + `Locator`），硬塞一个输入框等于把 §8 的具名动作序列降级成
-  自由文本，正是 `tasks.ts` 那份联合要避免的形状——所以那一半在页面上是一句具名说明，不是一个只会吃 400 的按钮。
-  inspect 那一半已经做出来了（issue #58 的最后一格把手，第十三轮）：目标取图读自己给的 `targetId`，
+- §8 line 275 的**两半把手现在都在页面上**（第十四轮补的是 capture 那一半，第十三轮补的是 inspect 那一半）：
+  编排控件不按自由文本收动作——`packages/domain/capture.ts` 一份具名清单同时喂给页面与契约（第十四轮的守卫用例把
+  三者按值钉在一起），所以"能填的表"与"能收的体"不可能各长一份。剩下的账不在这一道上，在下面三条里：
+  `vector.create`、`contract`(草稿)、`plan.build` 三扇创建门的必填输入要从证据正文派生，页面还没有把手，
+  §8 line 273 的声明 URL 目标同样只有门、没有把手（第十四轮的读数是用同源 `fetch` 打的）。
+  inspect 那一半的做法是：目标取图读自己给的 `targetId`，
   类型由 `GET /projects/:p/targets/:t` 读回来（页面不再猜 `kind`），主张清单取同一张图读的 `claims[]`，
   并发令牌取项目行的 `graphRevision`——操作者只回答两件事：问什么、勾选哪几条。
   两件事都没答之前不发请求（口径不默认任何一档，§10）；`claimIds` 为空只在"这一格图还没有主张"时允许，

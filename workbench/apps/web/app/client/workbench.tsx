@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, CaptureActionRow, CaptureProfileOption, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -267,6 +267,12 @@ export function PairingForm(props: { onPaired: () => void }): React.ReactElement
   );
 }
 
+// A new action row starts with the two selects on their first legal option and every text box empty.
+// The kind and locator are not security postures - they are what a row *is* - while the address, the
+// locator's designator and the wait state are the operator's answer, and an unanswered one is refused
+// by name (`captureActionOf`), not silently filled in.
+const EMPTY_CAPTURE_ROW: CaptureActionRow = { kind: "click", locatorKind: "role", role: "", name: "", testId: "", value: "", waitState: "" };
+
 export function Workbench(props: { projectId: string }): React.ReactElement {
   const [graph, setGraph] = useState<GraphViewPayload | null>(null);
   const [jobs, setJobs] = useState<JobsPagePayload | null>(null);
@@ -313,6 +319,21 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [inspectQuestion, setInspectQuestion] = useState("");
   const [inspectScope, setInspectScope] = useState("");
   const [inspectNotice, setInspectNotice] = useState<string | null>(null);
+  // §8 line 275's capture half (issue #58's last handle). Three of these are reads rather than inputs:
+  // the profile names come from health (§14's registry, the same one the door resolves against), the
+  // target id from the project row, and its kind from that target's own row. Everything the operator
+  // types is an address, a locator designator, a value, a timeout, a declared secret.
+  const [captureProfiles, setCaptureProfiles] = useState<CaptureProfileOption[] | null>(null);
+  const [captureTarget, setCaptureTarget] = useState<{ id: string; read: InspectTargetRead | null } | null>(null);
+  const [captureProfileId, setCaptureProfileId] = useState("");
+  const [captureStartUrl, setCaptureStartUrl] = useState("");
+  const [captureRows, setCaptureRows] = useState<CaptureActionRow[]>([EMPTY_CAPTURE_ROW]);
+  const [captureRequestBody, setCaptureRequestBody] = useState(false);
+  const [captureResponseBody, setCaptureResponseBody] = useState(false);
+  const [captureHeaderValues, setCaptureHeaderValues] = useState(false);
+  const [captureTimeout, setCaptureTimeout] = useState("");
+  const [captureSensitive, setCaptureSensitive] = useState("");
+  const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -327,6 +348,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       setComparators(null);
       setInspectTarget(null);
       setGraphRevision(null);
+      setCaptureProfiles(null);
+      setCaptureTarget(null);
       return;
     }
     const issued = relayData(health.value) as { csrfToken?: string } | null;
@@ -336,6 +359,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     // a name the door will refuse.
     const policies = await getJson("/api/v1/comparator-policies");
     setComparators(policies.ok ? comparatorOptionsOf(relayData(policies.value)) : null);
+    // The capture composer's profile names come from the same place the door resolves them (§14: health
+    // publishes the effective profiles). A refusal leaves the list `null` - "read failed" - which is a
+    // different sentence from "this build has no profile", and the panel keeps them apart.
+    const profiles = await getJson("/api/v1/health");
+    setCaptureProfiles(profiles.ok ? captureProfileOptionsOf(relayData(profiles.value)) : null);
     // The inventory is indexed per target (§5), so the page asks the project which targets it
     // has rather than guessing one from a graph node.
     const project = await getJson(`/api/v1/projects/${props.projectId}`);
@@ -345,11 +373,21 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       // same read that lists the targets rather than a second one.
       setGraphRevision(typeof view.graphRevision === "number" ? view.graphRevision : null);
       const first = view.targetIds?.[0];
+      // `targetIds` is the project's own newest-first list (§8 line 271), so `first` is "the target this
+      // project last gained" - the one the 样本 inventory is indexed under and the one a capture would
+      // visit. Two sections, one read, one value: a second way to pick a target would be a second owner
+      // of the same fact, and the two would eventually disagree about which row the page is about.
       if (first === undefined) {
         setSamples(null);
         setSamplesNotice(SAMPLES_EMPTY_LINE["no-target"]);
+        setCaptureTarget(null);
       } else {
         setSamplesTarget(first);
+        // §8 line 306 makes the target's kind part of what a capture may be asked for (主动采集 must hit a
+        // URL target), and only the row itself carries it - so the composer's subject is this id plus
+        // this read, and a row that will not parse leaves `read` null rather than guessed.
+        const row = await getJson(`/api/v1/projects/${props.projectId}/targets/${first}`);
+        setCaptureTarget({ id: first, read: row.ok ? inspectTargetReadOf(row.value, first) : null });
         const page = await getJson(`/api/v1/projects/${props.projectId}/vectors?targetId=${first}`);
         if (page.ok) {
           const listed = samplesPageOf(page.value);
@@ -365,6 +403,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       // concurrency token is a request the door cannot check — so the form says which read is missing
       // rather than carrying on with the number it saw last visit.
       setGraphRevision(null);
+      setCaptureTarget(null);
     }
     const view = await getJson(`/api/v1/projects/${props.projectId}/graph`);
     if (!view.ok) {
@@ -555,6 +594,14 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // or a project with no target shows nothing rather than an answered-looking line.
   const claimsNote = inspectClaimsNoteFor(inspectGraph);
 
+  // The capture panel's subject, from the same function the submit's gate calls, so the line under the
+  // heading and the reason a click refuses are one value: which row this capture would visit, at which
+  // revision, and how many profiles the health read named.
+  const captureSubject = useMemo(
+    () => captureSubjectOf({ targetId: captureTarget?.id ?? null, target: captureTarget?.read ?? null, graphRevision, profiles: captureProfiles }),
+    [captureProfiles, captureTarget, graphRevision],
+  );
+
   // §8 line 275's inspect half from the browser. Nothing about the request is typed by the operator
   // except the question and the checks: the target comes from the graph read, its kind from the target
   // row, and the concurrency token from the project row — so a moved graph is the door's 409 naming
@@ -586,6 +633,63 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
     if (page.ok) setJobs(page.value as JobsPagePayload);
   }, [csrf, graphRevision, inspectChosen, inspectGraph, inspectQuestion, inspectScope, inspectTarget, props.projectId]);
+
+  // One row of the action list, patched in place. `map` by position rather than by value: two rows can
+  // legitimately be identical (click the same button twice), so a value-keyed patch would edit both.
+  const patchCaptureRow = useCallback((index: number, patch: Partial<CaptureActionRow>) => {
+    setCaptureRows((previous) => previous.map((entry, position) => (position === index ? { ...entry, ...patch } : entry)));
+  }, []);
+
+  // §8 line 275's capture half from the browser. Same rule as the inspect half above: the profile, the
+  // target and the concurrency token are all read, so what the operator types is the address, the
+  // locators, the values and the optional two fields - and `captureDraftOf` refuses before the socket
+  // when any name the door requires has no answer. The key is per click (§8 line 261), and the job list
+  // is re-read afterwards because the row the door wrote is the answer, not a prediction of it.
+  const requestCapture = useCallback(async () => {
+    const draft = captureDraftOf({
+      csrf,
+      targetId: captureTarget?.id ?? null,
+      target: captureTarget?.read ?? null,
+      graphRevision,
+      profiles: captureProfiles,
+      profileId: captureProfileId,
+      startUrl: captureStartUrl,
+      rows: captureRows,
+      requestBody: captureRequestBody,
+      responseBody: captureResponseBody,
+      headerValues: captureHeaderValues,
+      timeoutMs: captureTimeout,
+      sensitiveValues: captureSensitive,
+    });
+    if (!draft.ok) {
+      setCaptureNotice(draft.line);
+      return;
+    }
+    const got = await postJson(`/api/v1/projects/${props.projectId}/jobs`, draft.body, csrf, crypto.randomUUID());
+    if (!got.ok) {
+      setCaptureNotice(refusalLine("采集请求被拒", got.reason, got.facts));
+      return;
+    }
+    setCaptureNotice(
+      queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "capture", done: "已排入采集" }),
+    );
+    const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+    if (page.ok) setJobs(page.value as JobsPagePayload);
+  }, [
+    captureHeaderValues,
+    captureProfileId,
+    captureProfiles,
+    captureRequestBody,
+    captureResponseBody,
+    captureRows,
+    captureSensitive,
+    captureStartUrl,
+    captureTarget,
+    captureTimeout,
+    csrf,
+    graphRevision,
+    props.projectId,
+  ]);
 
   // §8 line 272 from the browser: the file goes out as the multipart part the door names, with the
   // four fields it lists and nothing else. No client-side size or type gate is added on top - the
@@ -1075,6 +1179,118 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         ) : (
           <ul>{inquiries.map((inquiry, index) => <li key={`${String(inquiry.kind)}-${String(index)}`} data-inquiry={String(inquiry.kind)}>{inquiryQueueLine(inquiry)}</li>)}</ul>
         )}
+      </section>
+      <section aria-label="发起一次采集" data-panel="capture-compose">
+        <h2>发起一次采集（§8 line 275 的 capture 半边：同样只排作业，不给结论）</h2>
+        <p data-capture-subject={captureSubject.ok ? "ready" : "blocked"}>{captureSubjectLine(captureSubject)}</p>
+        <label htmlFor="capture-profile">生效 profile（§14：它固定沙箱、镜像摘要与限额，名单由 health 答，页面不替你挑）</label>
+        <select
+          id="capture-profile"
+          data-capture-profile={captureProfiles === null ? "unreadable" : captureProfiles.length === 0 ? "empty" : "ready"}
+          value={captureProfileId}
+          disabled={captureProfiles === null || captureProfiles.length === 0}
+          onChange={(event) => setCaptureProfileId(event.target.value)}
+        >
+          <option value="">（还没有选：这一格没有默认值）</option>
+          {(captureProfiles ?? []).map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        {captureProfiles === null ? (
+          <span data-capture-profile-notice>{CAPTURE_PROFILES_UNREADABLE_LINE}</span>
+        ) : captureProfiles.length === 0 ? (
+          <span data-capture-profile-notice>{CAPTURE_PROFILES_EMPTY_LINE}</span>
+        ) : null}
+        <label htmlFor="capture-start-url">起点地址（startUrl：要访问的站点，§8 要求落在所选目标的授权范围内）</label>
+        <input id="capture-start-url" data-capture-start-url type="text" value={captureStartUrl} onChange={(event) => setCaptureStartUrl(event.target.value)} />
+        <h3>动作序列（§8 只收 click / fill / waitFor，定位只收 role 与 testId；不收 JS、shell、任意 Playwright 表达式）</h3>
+        <ol data-capture-rows={captureRows.length}>
+          {captureRows.map((entry, index) => (
+            <li key={index} data-capture-row={index} data-capture-kind={entry.kind} data-capture-locator={entry.locatorKind}>
+              <label htmlFor={`capture-kind-${String(index)}`}>动作</label>
+              <select id={`capture-kind-${String(index)}`} value={entry.kind} onChange={(event) => patchCaptureRow(index, { kind: event.target.value })}>
+                {CAPTURE_ACTION_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <label htmlFor={`capture-locator-${String(index)}`}>定位方式</label>
+              <select id={`capture-locator-${String(index)}`} value={entry.locatorKind} onChange={(event) => patchCaptureRow(index, { locatorKind: event.target.value })}>
+                {CAPTURE_LOCATOR_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {entry.locatorKind === "role" ? (
+                <>
+                  <label htmlFor={`capture-role-${String(index)}`}>角色（role）</label>
+                  <input id={`capture-role-${String(index)}`} data-capture-role={index} type="text" value={entry.role} onChange={(event) => patchCaptureRow(index, { role: event.target.value })} />
+                  <label htmlFor={`capture-name-${String(index)}`}>名称（name）</label>
+                  <input id={`capture-name-${String(index)}`} data-capture-name={index} type="text" value={entry.name} onChange={(event) => patchCaptureRow(index, { name: event.target.value })} />
+                </>
+              ) : (
+                <>
+                  <label htmlFor={`capture-testid-${String(index)}`}>testId</label>
+                  <input id={`capture-testid-${String(index)}`} data-capture-testid={index} type="text" value={entry.testId} onChange={(event) => patchCaptureRow(index, { testId: event.target.value })} />
+                </>
+              )}
+              {/* The two fields that exist only for one kind each: a `click` has no value to fill, and a
+                  `waitFor` without a stated state is an unanswered question - so the row shows what its
+                  own kind can carry and nothing else. */}
+              {entry.kind === "fill" ? (
+                <>
+                  <label htmlFor={`capture-value-${String(index)}`}>填入值（value：留空就是把这一格清空）</label>
+                  <input id={`capture-value-${String(index)}`} data-capture-value={index} type="text" value={entry.value} onChange={(event) => patchCaptureRow(index, { value: event.target.value })} />
+                </>
+              ) : null}
+              {entry.kind === "waitFor" ? (
+                <>
+                  <label htmlFor={`capture-wait-${String(index)}`}>等到</label>
+                  <select id={`capture-wait-${String(index)}`} data-capture-wait={index} value={entry.waitState} onChange={(event) => patchCaptureRow(index, { waitState: event.target.value })}>
+                    <option value="">（还没有选：等到哪一种状态也是这一发要说的）</option>
+                    {CAPTURE_WAIT_STATE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : null}
+              <button type="button" data-capture-row-remove={index} onClick={() => setCaptureRows((previous) => previous.filter((_, position) => position !== index))}>
+                删掉这一行
+              </button>
+            </li>
+          ))}
+        </ol>
+        <button type="button" data-capture-row-add onClick={() => setCaptureRows((previous) => [...previous, EMPTY_CAPTURE_ROW])}>
+          加一行动作
+        </button>
+        <h3>网络正文要记哪几格</h3>
+        <p data-capture-network-note>{CAPTURE_NETWORK_NOTE}</p>
+        <label htmlFor="capture-request-body">
+          <input id="capture-request-body" data-capture-request-body type="checkbox" checked={captureRequestBody} onChange={(event) => setCaptureRequestBody(event.target.checked)} />
+          请求正文（requestBody）
+        </label>
+        <label htmlFor="capture-response-body">
+          <input id="capture-response-body" data-capture-response-body type="checkbox" checked={captureResponseBody} onChange={(event) => setCaptureResponseBody(event.target.checked)} />
+          响应正文（responseBody）
+        </label>
+        <label htmlFor="capture-header-values">
+          <input id="capture-header-values" data-capture-header-values type="checkbox" checked={captureHeaderValues} onChange={(event) => setCaptureHeaderValues(event.target.checked)} />
+          header 值（headerValues）
+        </label>
+        <label htmlFor="capture-timeout">运行时长上限（timeoutMs 毫秒，可空）</label>
+        <input id="capture-timeout" data-capture-timeout type="text" value={captureTimeout} onChange={(event) => setCaptureTimeout(event.target.value)} />
+        <label htmlFor="capture-sensitive">短期敏感值（逗号分隔，可空：只在这一次任务里存在，不落库、不进请求摘要）</label>
+        <input id="capture-sensitive" data-capture-sensitive type="text" autoComplete="off" value={captureSensitive} onChange={(event) => setCaptureSensitive(event.target.value)} />
+        <button type="button" data-capture-submit onClick={() => void requestCapture()}>
+          发起采集
+        </button>
+        <span data-capture-notice>{captureNotice ?? "尚未发起：这一发只会排一个采集作业，不会给出结论。"}</span>
       </section>
     </div>
   );

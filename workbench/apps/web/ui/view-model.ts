@@ -4,7 +4,7 @@ import type { Id } from "../../../packages/domain/identity.ts";
 // `id.ts` rather than `identity.ts`: this module is reached from the browser bundle, and the
 // identity module owns `newId()`, which imports `node:crypto`.
 import { isId } from "../../../packages/domain/id.ts";
-import type { JsonValue } from "../../../packages/domain/json-value.ts";
+import type { JsonObject, JsonValue } from "../../../packages/domain/json-value.ts";
 // The §11 vocabulary comes from the node-free owner (`domain/job-states.ts`) rather than from the
 // contract that re-exports it: reaching it through `contracts/primitives.ts` would pull
 // `node:crypto` into the browser bundle, which is the same reason this file imports `id.ts`
@@ -24,6 +24,15 @@ import type { ComparatorNormalization } from "../../../packages/domain/comparato
 import { INSPECT_SCOPES, isInspectScope } from "../../../packages/domain/inspect.ts";
 import type { InspectScope } from "../../../packages/domain/inspect.ts";
 import { isTargetKind } from "../../../packages/domain/target.ts";
+// The capture instruction vocabulary, from the same node-free owners: the page builds a row per action
+// kind, so a scripted kind could not appear here even if somebody added one to the contract - the
+// contract re-exports this list (`domain-index.test.ts` guards that, and guards the absence of an
+// `evaluate`-shaped option).
+import { BROWSER_ACTION_KINDS, isBrowserActionKind, isLocatorKind, isWaitState, LOCATOR_KINDS, WAIT_STATES } from "../../../packages/domain/capture.ts";
+import type { BrowserActionKind, LocatorKind, WaitState } from "../../../packages/domain/capture.ts";
+// §8 line 273's URL rules, so this bundle asks the same owner whether a startUrl may be stored rather
+// than writing a second, weaker version of them.
+import { urlLocatorDefects } from "../../../packages/domain/target.ts";
 import type { TargetKind } from "../../../packages/domain/target.ts";
 
 // The three-column workbench surface (PRD F04, DESIGN §6, issue #18).
@@ -997,17 +1006,17 @@ export const INSPECT_CHOICE_UNLISTED_LINE = "勾选的主张不在这页读到�
 // not a control the operator forgot, and §8 allows exactly this one empty case.
 export const INSPECT_FIRST_ANALYSIS_NOTE = "本目标还没有任何主张：这一发只能是首次分析（§8 允许 claimIds 为空的那一种），勾选处保持空即可。";
 
-// The capture half of the same door stays out of reach for a stated reason, and the reason is on the
-// panel rather than in a PR: `CaptureTask` needs `scenario.actions` built out of locators, which is a
-// thing an operator assembles, not a thing this page has a control for. Showing the door as
-// half-usable is honest; showing it as usable would be a button that can only ever be refused.
-export const INSPECT_CAPTURE_NOTE = "同一道门的 capture 半边本页发不出去：CaptureTask 要 scenario.actions 的编排控件（locator + 动作），本页没有它，所以也不会摆一个只会吃 400 的按钮。";
+// The two halves of §8 line 275 are now both reachable from this page, but from two sections: this one
+// carries claims and a question, the capture section below carries a profile, a start address and an
+// action list. The sentence stays on the panel because a reader who wants a new capture must know which
+// set of boxes to fill, and one section's submit button cannot answer for the other's fields.
+export const INSPECT_CAPTURE_NOTE = "同一道门的 capture 半边在下面那节「发起一次采集」：它要 profile、起点地址与动作行，这一节只带主张与问题，两节各发各的 202。";
 
 // What the four inquiry kinds can become on this page. A cell's gap is recorded whether or not it is
 // sendable, and the line says which of the two it is, so a queue entry never reads as a request.
 export const INQUIRY_KIND_LINES: Record<InquiryKind, string> = {
   "inspect-runtime": "这一类可由本页发起：填下面的表单走 §8 line 275 的 inspect。",
-  "capture-new": "这一类本页发不出：需要 capture 的动作编排，见上面那句说明。",
+  "capture-new": "这一类可由本页发起：§8 line 310 说主动采集要单独的 CaptureTask，就在下面「发起一次采集」那一节编排。",
   "read-evidence": "这一类不发请求：读来源是 GET（§8 line 281），点那一列的来源就能读。",
   "review-claim": "这一类没有对应的门：§8 的三条审阅门是样本、契约与计划，主张本身没有复核路由。",
 };
@@ -1135,3 +1144,216 @@ export function inspectDraftOf(input: {
     },
   };
 }
+
+// --- §8 line 275 的 capture 半边：一次定向采集怎么在这一页组出来（issue #58 的最后一格把手） ----------
+//
+// The inspect half answers "which claims are you asking about". This half answers "which page, doing
+// what" - and the two share the reason they existed: the door has been mounted since issue #58, the
+// canvas has been naming `capture-new` gaps since S19, and the section that collected those notes
+// printed them as JSON under a heading admitting nothing was ever sent.
+//
+// What is **not** here, and why, is part of the shape:
+//   * no scripting kind. §8's union is closed precisely so a form cannot author arbitrary JavaScript;
+//     `capture.ts` owns the three action kinds and the guard test refuses a fourth in the contract.
+//   * no startUrl-vs-target host check. `GET /projects/:p/targets/:t` does not carry the target's
+//     locator (§8's row for it does not name that field), so this page cannot honestly compare hosts -
+//     and a guess would be a rule with no owner. The door owns it and answers
+//     `start-url-outside-target-scope`, naming nothing but the rule.
+//   * no default profile and no pre-ticked network cell. §14 makes the profile the thing that fixes the
+//     sandbox, the image and the limits, so picking one silently would be the page choosing a security
+//     posture; an all-false `network` block is legal and means "record the request/response skeleton
+//     only", which is a decision, not an oversight - so it is said in a sentence instead of hidden.
+
+export const CAPTURE_ACTION_PHRASES: Record<BrowserActionKind, string> = {
+  click: "点击（click）",
+  fill: "填入（fill）",
+  waitFor: "等待状态（waitFor）",
+};
+
+export const CAPTURE_LOCATOR_PHRASES: Record<LocatorKind, string> = {
+  role: "按角色与名称（role + name）",
+  testId: "按 testId",
+};
+
+export const CAPTURE_WAIT_STATE_PHRASES: Record<WaitState, string> = {
+  visible: "可见（visible）",
+  hidden: "消失（hidden）",
+};
+
+export const CAPTURE_ACTION_OPTIONS = BROWSER_ACTION_KINDS.map((kind) => ({ value: kind, label: CAPTURE_ACTION_PHRASES[kind] }));
+export const CAPTURE_LOCATOR_OPTIONS = LOCATOR_KINDS.map((kind) => ({ value: kind, label: CAPTURE_LOCATOR_PHRASES[kind] }));
+export const CAPTURE_WAIT_STATE_OPTIONS = WAIT_STATES.map((state) => ({ value: state, label: CAPTURE_WAIT_STATE_PHRASES[state] }));
+
+export const CAPTURE_NO_TARGET_LINE = "项目行读没有给出 targetId：一次采集也要有一个目标作为访问对象，而本项目当前的视图里没有这个格位。";
+export const CAPTURE_TARGET_UNREADABLE_LINE = "目标行没有读到：capture 打的是声明出来的 URL 目标，而类型只有那一行知道，页面不带着猜测去撞门口。";
+export const CAPTURE_TARGET_NOT_URL_LINE = "这个目标不是声明的 URL 目标：capture 要去访问一个站点，而已导入的字节没有可访问的地址（§8 会把这一发拒成 capture-needs-url-target）。";
+export const CAPTURE_PROFILES_UNREADABLE_LINE = "生效 profile 清单读不到：`profileId` 是这道门要的名字，而名字只由 §14 的 ProfileRegistry 给，页面不自己编一个。";
+export const CAPTURE_PROFILES_EMPTY_LINE = "这份 build 一个 profile 都没有：任何采集请求都会在门口被具名拒收，先装一份 profile。";
+export const CAPTURE_PROFILE_UNSELECTED_LINE = "还没有选 profile：它固定的是沙箱、镜像摘要与限额，§10 不许页面替你挑一个。";
+export const CAPTURE_START_URL_EMPTY_LINE = "startUrl 还空着：采集要知道从哪个地址开始，这一格没有默认值也不该有。";
+export const CAPTURE_TIMEOUT_LINE = "超时那一格要么留空、要么是正整数毫秒：留空＝这一发不单独收紧，跑多久由所选 profile 的 §14 限额说了算；§11 的 deadlineAt 管的是最晚什么时候必须启动，跟它不是一回事。";
+
+export type CaptureActionRow = {
+  kind: string;
+  locatorKind: string;
+  role: string;
+  name: string;
+  testId: string;
+  value: string;
+  waitState: string;
+};
+
+export type CaptureActionFailure = { index: number; line: string };
+
+// One row at a time, because an operator reads "第 2 行缺 name" and not "the union did not parse".
+// `fill` is the one field whose value may be empty: filling an empty string is how you clear a box,
+// and `tasks.ts` types it as `z.string()` for exactly that reason - so this function must not add a
+// non-empty rule the contract does not have.
+export function captureActionOf(row: CaptureActionRow, index: number): { ok: true; action: JsonObject } | { ok: false; failure: CaptureActionFailure } {
+  const fail = (line: string): { ok: false; failure: CaptureActionFailure } => ({ ok: false, failure: { index, line } });
+  if (!isBrowserActionKind(row.kind)) return fail(`第 ${String(index + 1)} 行的动作种类不在 §8 的三个里（click / fill / waitFor）`);
+  if (!isLocatorKind(row.locatorKind)) return fail(`第 ${String(index + 1)} 行的定位方式不在 §8 的两个里（role / testId）`);
+  const designator = row.locatorKind === "role" ? row.role.trim() : row.testId.trim();
+  if (designator === "") {
+    return fail(row.locatorKind === "role" ? `第 ${String(index + 1)} 行缺角色名（role 与 name 两格都要填，§8 的 Locator 两者皆非空）` : `第 ${String(index + 1)} 行缺 testId`);
+  }
+  if (row.locatorKind === "role" && row.name.trim() === "") return fail(`第 ${String(index + 1)} 行缺名称（name）：按角色定位需要角色与名称两个值`);
+  const locator: JsonObject =
+    row.locatorKind === "role" ? { kind: "role", role: row.role.trim(), name: row.name.trim() } : { kind: "testId", value: row.testId.trim() };
+  if (row.kind === "click") return { ok: true, action: { kind: "click", locator } };
+  if (row.kind === "fill") return { ok: true, action: { kind: "fill", locator, value: row.value } };
+  if (!isWaitState(row.waitState)) return fail(`第 ${String(index + 1)} 行没说要等到什么状态（visible / hidden 两档之一）`);
+  return { ok: true, action: { kind: "waitFor", locator, state: row.waitState } };
+}
+
+export type CaptureProfileOption = { id: string; label: string; available: boolean };
+
+// The health payload is this page's only source of profile names (§14: health publishes the effective
+// profiles, and the door resolves against the same registry). A row whose id is missing, or whose
+// availability is not a boolean, drops the **whole list** to "unreadable" rather than being rendered
+// half-parsed: offering a name the door would refuse is the mistake this control exists to prevent.
+export function captureProfileOptionsOf(value: unknown): CaptureProfileOption[] | null {
+  const profiles = (value as { effectiveProfiles?: unknown } | null)?.effectiveProfiles;
+  if (!Array.isArray(profiles)) return null;
+  const options: CaptureProfileOption[] = [];
+  for (const entry of profiles) {
+    const row = (entry ?? {}) as { id?: unknown; available?: unknown; browserVersion?: unknown; unavailableReasons?: unknown };
+    if (typeof row.id !== "string" || row.id === "") return null;
+    if (typeof row.available !== "boolean") return null;
+    const version = typeof row.browserVersion === "string" ? row.browserVersion : "版本未知";
+    const reasons = Array.isArray(row.unavailableReasons) ? row.unavailableReasons.filter((reason): reason is string => typeof reason === "string") : [];
+    options.push({
+      id: row.id,
+      available: row.available,
+      label: `${row.id}｜浏览器 ${version}｜${row.available ? "可用" : `本机不可用：${reasons.join("、") || "未具名"}`}`,
+    });
+  }
+  return options;
+}
+
+export type CaptureDraft =
+  | { ok: true; body: { targetId: string; expectedGraphRevision: number; task: JsonObject } }
+  | { ok: false; line: string };
+
+export type CaptureSubject =
+  | { ok: true; targetId: string; graphRevision: number; profiles: readonly CaptureProfileOption[] }
+  | { ok: false; line: string };
+
+// The four things a capture needs **before the operator has answered anything**: a target to visit, that
+// target's kind, the concurrency token, and a profile list that is not empty. Computed once by the page
+// and reused by the gate in front of the POST, so the sentence under the heading and the reason a submit
+// refuses are literally the same value - a panel saying 可发起 while its own submit refuses is the
+// divergence this file keeps getting told about.
+export function captureSubjectOf(input: {
+  targetId: string | null;
+  target: InspectTargetRead | null;
+  graphRevision: number | null;
+  profiles: CaptureProfileOption[] | null;
+}): CaptureSubject {
+  if (input.targetId === null) return { ok: false, line: CAPTURE_NO_TARGET_LINE };
+  if (input.target === null) return { ok: false, line: CAPTURE_TARGET_UNREADABLE_LINE };
+  // The row read's own sentence wins over a canned one: "this row is not one of the three kinds" is a
+  // different operator's problem than "this row is a HAR", and only the first is fixed by declaring
+  // a target.
+  if (!input.target.ok) return { ok: false, line: input.target.line };
+  if (input.target.kind !== "url") return { ok: false, line: CAPTURE_TARGET_NOT_URL_LINE };
+  if (input.graphRevision === null) return { ok: false, line: INSPECT_REVISION_UNREAD_LINE };
+  if (input.profiles === null) return { ok: false, line: CAPTURE_PROFILES_UNREADABLE_LINE };
+  if (input.profiles.length === 0) return { ok: false, line: CAPTURE_PROFILES_EMPTY_LINE };
+  return { ok: true, targetId: input.targetId, graphRevision: input.graphRevision, profiles: input.profiles };
+}
+
+// A ready subject is stated with the id, because a 409 from the door is only explainable if the page said
+// which row it was asking about - and with the profile counts, because `available: false` is still a name
+// the operator may pick, and the door's refusal is what settles it (§14 owns that decision, not this page).
+export function captureSubjectLine(subject: CaptureSubject): string {
+  if (!subject.ok) return subject.line;
+  const available = subject.profiles.filter((option) => option.available).length;
+  return `目标 ${subject.targetId}（声明出来的 URL）｜图修订 ${String(subject.graphRevision)}｜profile ${String(available)} 个可用，清单共 ${String(subject.profiles.length)} 个`;
+}
+
+export function captureDraftOf(input: {
+  csrf: string;
+  targetId: string | null;
+  target: InspectTargetRead | null;
+  graphRevision: number | null;
+  profiles: CaptureProfileOption[] | null;
+  profileId: string;
+  startUrl: string;
+  rows: readonly CaptureActionRow[];
+  requestBody: boolean;
+  responseBody: boolean;
+  headerValues: boolean;
+  timeoutMs: string;
+  sensitiveValues: string;
+}): CaptureDraft {
+  const gate = sessionGate(input.csrf);
+  if (!gate.ok) return { ok: false, line: gate.line };
+  const subject = captureSubjectOf({ targetId: input.targetId, target: input.target, graphRevision: input.graphRevision, profiles: input.profiles });
+  if (!subject.ok) return { ok: false, line: subject.line };
+  if (input.profileId === "") return { ok: false, line: CAPTURE_PROFILE_UNSELECTED_LINE };
+  if (!subject.profiles.some((option) => option.id === input.profileId)) {
+    return { ok: false, line: `${CAPTURE_PROFILE_UNSELECTED_LINE}（要的那一个不在健康回包给的清单里：${input.profileId}）` };
+  }
+  const startUrl = input.startUrl.trim();
+  if (startUrl === "") return { ok: false, line: CAPTURE_START_URL_EMPTY_LINE };
+  // §8 line 273's rules, asked of their one owner: userinfo, a fragment, a non-http scheme, a length
+  // past the cap. A typed address with any of them is refused here with the same reasons the declare
+  // door would give, because a capture start URL becomes the thing the workbench visits.
+  const urlDefects = urlLocatorDefects(startUrl);
+  if (urlDefects.length > 0) return { ok: false, line: `startUrl 不能用作采集起点：${urlDefects.join("、")}` };
+  const actions: JsonObject[] = [];
+  for (const [index, row] of input.rows.entries()) {
+    const built = captureActionOf(row, index);
+    if (!built.ok) return { ok: false, line: built.failure.line };
+    actions.push(built.action);
+  }
+  let timeoutMs: number | null = null;
+  if (input.timeoutMs.trim() !== "") {
+    const parsed = Number(input.timeoutMs.trim());
+    if (!Number.isInteger(parsed) || parsed <= 0) return { ok: false, line: CAPTURE_TIMEOUT_LINE };
+    timeoutMs = parsed;
+  }
+  const declared = input.sensitiveValues
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  const task: JsonObject = {
+    kind: "capture",
+    profileId: input.profileId,
+    scenario: { startUrl, actions },
+    network: { requestBody: input.requestBody, responseBody: input.responseBody, headerValues: input.headerValues },
+  };
+  // Optional fields are added only when answered, so an empty timeout never travels as `0` or `null`,
+  // and an empty declaration list never becomes `sensitiveValues: []` beside a request that named none.
+  if (timeoutMs !== null) task.timeoutMs = timeoutMs;
+  if (declared.length > 0) task.sensitiveValues = declared;
+  return {
+    ok: true,
+    body: { targetId: subject.targetId, expectedGraphRevision: subject.graphRevision, task },
+  };
+}
+
+// The capture half is now a real control, so the sentence the inspect section carried has to say what
+// the pair of them can and cannot do, in the same voice.
+export const CAPTURE_NETWORK_NOTE = "网络三格全不勾也是合法的一次采集：那只记录请求与响应的骨架（URL、方法、状态行），正文与 header 值都不落。要哪一格就勾哪一格。";

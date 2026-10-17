@@ -7,6 +7,7 @@ import {
 } from "../../packages/application/boot-config.ts";
 import type { ConfigInput } from "../../packages/application/boot-config.ts";
 import { runDoctor } from "../../packages/application/doctor.ts";
+import { effectiveProfileSchema } from "../../packages/contracts/health.ts";
 import { ownershipProvable } from "../../packages/application/recovery.ts";
 import { Terminal } from "../../apps/worker/terminal.ts";
 import type { LeaseRow } from "../../packages/application/ports.ts";
@@ -284,6 +285,47 @@ describe("ProfileRegistry (§14)", () => {
     expect(view).not.toContain("/var/lib");
     expect(view).toContain("deny-egress");
     expect(view).toContain("\"pids\":128");
+  });
+
+  // The guard that was missing when `GET /health` could only ever answer 503: this view is not "a list
+  // of things about profiles", it is the body the route publishes through `effectiveProfileSchema`, and
+  // a field the contract requires and the producer does not write is a door nobody can open. Reading the
+  // entry's own name back out is what makes the assertion about the *pair* rather than about either half.
+  it("publishes exactly the profile body the health route's contract takes (§8 line 265)", () => {
+    const registry = new ProfileRegistry([{ label: "har-capture", json: profileJson() }], linuxHost);
+    const view = registry.healthView();
+    expect(view).toHaveLength(1);
+    const parsed = effectiveProfileSchema.safeParse(view[0]);
+    if (!parsed.success) throw new Error(JSON.stringify(parsed.error.issues));
+    expect(parsed.data.id).toBe("har-capture");
+    expect(parsed.data.schemaVersion).toBe(1);
+    expect(parsed.data.limits.pids).toBe(128);
+    // §14: the container entrypoint is a host absolute path and belongs on no screen the target can read.
+    expect(JSON.stringify(view)).not.toContain("reaContainerEntrypoint");
+    // Nor is the Builder's repair budget: the seven numbers below are the ones the health contract and
+    // the broker's descriptor share, and a pass-through of `profile.limits` would put an eighth key into
+    // a body a strict schema rejects - which is precisely how every `GET /health` became a 503.
+    expect(JSON.stringify(view)).not.toContain("maxGenerationAttempts");
+    expect(Object.keys((view[0] as { limits: Record<string, unknown> }).limits).sort()).toEqual([
+      "cpuCores",
+      "diskBytes",
+      "maxExpandedBytes",
+      "memoryBytes",
+      "pids",
+      "queueWaitMs",
+      "timeoutMs",
+    ]);
+    expect(Object.keys(view[0] as Record<string, unknown>).sort()).toEqual([
+      "available",
+      "browserImageDigest",
+      "browserVersion",
+      "id",
+      "limits",
+      "networkPolicyId",
+      "reaPackageDigest",
+      "schemaVersion",
+      "unavailableReasons",
+    ]);
   });
 
   it("an uninstalled profile id is a stated refusal, not a default profile", () => {
