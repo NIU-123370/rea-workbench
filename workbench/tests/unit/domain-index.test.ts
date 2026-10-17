@@ -14,6 +14,7 @@ import * as openApi from "../../packages/domain/openapi.ts";
 import * as plan from "../../packages/domain/plan.ts";
 import * as target from "../../packages/domain/target.ts";
 import * as inventory from "../../packages/domain/inventory.ts";
+import * as jobStates from "../../packages/domain/job-states.ts";
 import * as jsonValue from "../../packages/domain/json-value.ts";
 import * as report from "../../packages/domain/report.ts";
 import * as result from "../../packages/domain/result.ts";
@@ -40,6 +41,7 @@ const MODULES: Record<string, unknown> = {
   "plan.ts": plan,
   "target.ts": target,
   "inventory.ts": inventory,
+  "job-states.ts": jobStates,
   "json-value.ts": jsonValue,
   "report.ts": report,
   "result.ts": result,
@@ -71,6 +73,8 @@ const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["evidence.ts", "blocksStrictBlueprint"],
   ["inventory.ts", "inventoryCounts"],
   ["inventory.ts", "planCounts"],
+  ["job-states.ts", "isTerminalJobState"],
+  ["job-states.ts", "canTransitionJob"],
   ["report.ts", "determineResult"],
   ["report.ts", "passRate"],
   ["report.ts", "staleReasons"],

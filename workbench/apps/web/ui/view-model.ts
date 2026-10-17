@@ -6,6 +6,12 @@ import type { Id } from "../../../packages/domain/identity.ts";
 import { isId } from "../../../packages/domain/id.ts";
 import type { Digest } from "../../../packages/domain/canonical-json.ts";
 import type { JsonValue } from "../../../packages/domain/json-value.ts";
+// The §11 vocabulary comes from the node-free owner (`domain/job-states.ts`) rather than from the
+// contract that re-exports it: reaching it through `contracts/primitives.ts` would pull
+// `node:crypto` into the browser bundle, which is the same reason this file imports `id.ts`
+// instead of `identity.ts`.
+import { JOB_STATES, isTerminalJobState } from "../../../packages/domain/job-states.ts";
+import type { JobState } from "../../../packages/domain/job-states.ts";
 
 // The three-column workbench surface (PRD F04, DESIGN §6, issue #18).
 //
@@ -462,8 +468,156 @@ export function samplesPageOf(payload: unknown): SamplesPage {
 // A refusal on this tab names the facts the server published with it (§8's ApiError.details,
 // issue #59): `expected` and `actual` are the difference between "somebody decided first" and
 // "this page held a stale revision", and those are different things to do about.
-export function samplesRefusalLine(kind: "read" | "decision", reason: string, facts: Record<string, number | boolean>): string {
+// A refusal the page shows: the reason the server named, plus whatever numbers it published with
+// it (§8's ApiError.details, issue #59). One owner, because four panels each writing
+// `reason（facts）` is four chances to disagree about what a refusal looks like - and the facts are
+// the difference between "somebody decided first" and "this page held a stale revision".
+export function refusalLine(head: string, reason: string, facts: Record<string, number | boolean>): string {
   const published = refusalFactsLine(facts);
-  const head = kind === "read" ? "库存读取被拒" : "决定被拒";
   return published === null ? `${head}：${reason}` : `${head}：${reason}（${published}）`;
+}
+
+export function samplesRefusalLine(kind: "read" | "decision", reason: string, facts: Record<string, number | boolean>): string {
+  return refusalLine(kind === "read" ? "库存读取被拒" : "决定被拒", reason, facts);
+}
+
+// --- The 作业 rows and the doors the page can honestly offer --------------------------------
+//
+// Three §8 routes became doors in earlier rounds (`POST /jobs/:j/cancel`,
+// `POST /jobs/:j/cleanup-retry`, `POST /verifications`) with no control on the page that calls
+// them, and one (`GET /projects`) that the landing page could not use to answer the only question
+// an operator arriving fresh has: which projects are here. What follows is the whole of the
+// judgement for those controls - which row may be asked, and what the answer means - so the
+// browser island renders a decision this file can be tested on rather than inventing one inline.
+
+// The state table and the terminal set are imported, not restated: §11's machine has one owner
+// (`contracts/jobs.ts`), and a page-level copy would be a second list that can drift from the
+// transitions the worker will actually accept.
+
+export type LifecycleAction = "cancel" | "cleanup-retry";
+
+export type JobLifecycleRow = { id: string; kind: string; state: string; cleanupState: string };
+
+export type JobActions = {
+  cancel: boolean;
+  cleanupRetry: boolean;
+  cancelNote: string | null;
+  cleanupRetryNote: string | null;
+};
+
+// `cancel` is offered to a non-terminal row because §11 gives a terminal state no outgoing edge:
+// the door would answer 202 with the state it is already in, so a button there would be asking the
+// operator to click something whose outcome is fixed.
+//
+// `cleanup-retry` is *not* narrowed to rows whose `cleanupState` is `failed`, even though that is
+// the common case: the door re-schedules the leases it can prove it minted (§5), and §11 keeps a
+// job's cleanup state and its leases' states independent. The page cannot see the leases, so the
+// only thing it may claim is what its own row says - and what the answer then reports is the truth.
+export function jobActions(row: JobLifecycleRow): JobActions {
+  // A state this page cannot name is treated like a terminal one: no button. That is the same rule
+  // the 样本 tab follows for an unrecognised review status - the page does not guess at the state a
+  // row "should" have had.
+  const recognised = (JOB_STATES as readonly string[]).includes(row.state);
+  const terminal = !recognised || isTerminalJobState(row.state as JobState);
+  return {
+    cancel: !terminal,
+    cleanupRetry: row.cleanupState !== "complete",
+    cancelNote: !recognised
+      ? `这一行的状态「${row.state}」不在 §11 的作业状态表里，页面不认识它就不给按钮`
+      : terminal
+        ? `这一行已是终态 ${row.state}：§11 不让终态复活，取消只会返回现状`
+        : null,
+    cleanupRetryNote: row.cleanupState === "complete" ? "作业行的清理状态是 complete，没有要重排的清理" : null,
+  };
+}
+
+// What each of the two doors answered, in the words the reply supports. An empty `leaseIds` is a
+// real answer and has to read as one - "nothing of mine was unfinished" is not a failure, and
+// dressing it up as one would teach the operator to distrust the button.
+export function jobActionLine(action: LifecycleAction, record: { state?: unknown; cleanupState?: unknown; leaseIds?: unknown }): string {
+  const state = typeof record.state === "string" ? record.state : null;
+  const cleanupState = typeof record.cleanupState === "string" ? record.cleanupState : null;
+  if (action === "cancel") {
+    return state === null ? "取消已被接受，但回包没带状态" : `已请求取消，现在这一行是 ${state}`;
+  }
+  const leaseIds = Array.isArray(record.leaseIds) ? record.leaseIds : null;
+  if (leaseIds === null) {
+    return cleanupState === null ? "清理重排已被接受，但回包既没有 lease 清单也没有清理状态" : `已请求重排清理，现在这一行是 ${cleanupState}`;
+  }
+  if (leaseIds.length === 0) {
+    return "已请求重排清理：没有可重排的清理（这扇门只回收自己发过的 staging，§5）";
+  }
+  return `已重排 ${String(leaseIds.length)} 个 lease${cleanupState === null ? "" : `，清理状态 ${cleanupState}`}`;
+}
+
+// The 202 body of §8 line 297 is a JobRecord, and the one thing worth saying about it is that
+// this is work, not a verdict: naming the job and its state keeps the page from reading the
+// success as a result.
+export function verificationRequestLine(record: { id?: unknown; state?: unknown; kind?: unknown }): string {
+  const id = typeof record.id === "string" ? record.id : null;
+  const state = typeof record.state === "string" ? record.state : null;
+  const kind = typeof record.kind === "string" ? record.kind : null;
+  if (id === null) return "请求已被接受，但回包没带作业 id";
+  if (kind !== null && kind !== "verify") return `回包的作业类型是 ${kind}，不是 verify——这一行没按 §8 line 297 回答`;
+  return `已排入验证队列：作业 ${id}${state === null ? "" : `（${state}）`}`;
+}
+
+export type ProjectRow = { id: string; name: string; graphRevision: number; inventoryRevision: number };
+
+// The landing page's list, read once per visit: the relay wraps the worker's reply in `{data: …}`,
+// and `nextCursor` is the *server's* cursor, so a page that built one from the last row it saw
+// would be minting a token it was never given.
+export function projectsPageOf(payload: unknown): { rows: ProjectRow[]; nextCursor: string | null } {
+  const listed = relayData(payload) as { items?: unknown[]; nextCursor?: unknown } | null;
+  // A row that cannot be named is dropped rather than rendered with a guessed id: the only thing
+  // the page does with one is turn it into a link, and a link to nowhere reads as a project that
+  // exists.
+  const rows = (Array.isArray(listed?.items) ? listed.items : []).flatMap((entry) => {
+    const row = (entry ?? {}) as { id?: unknown; name?: unknown; graphRevision?: unknown; inventoryRevision?: unknown };
+    if (typeof row.id !== "string" || typeof row.name !== "string") return [];
+    return [{
+      id: row.id,
+      name: row.name,
+      graphRevision: typeof row.graphRevision === "number" ? row.graphRevision : 0,
+      inventoryRevision: typeof row.inventoryRevision === "number" ? row.inventoryRevision : 0,
+    }];
+  });
+  return { rows, nextCursor: typeof listed?.nextCursor === "string" ? listed.nextCursor : null };
+}
+
+export function projectLine(row: ProjectRow): string {
+  return `${row.name}｜图 ${String(row.graphRevision)}｜库存 ${String(row.inventoryRevision)}`;
+}
+
+// The two ways this list can legitimately be empty are different operator problems: no session
+// means nothing was read, while a session with no rows means the workbench has no projects yet -
+// and the second one has an action (import or declare a target), the first does not.
+export const PROJECTS_EMPTY_LINE: Record<"no-session" | "empty-page", string> = {
+  "no-session": "还没有会话：项目清单要配对之后才读得到，用终端里打印的配对码建立会话。",
+  "empty-page": "这台工作台还没有项目：先导入一次采集，或为一个 URL 建目标。",
+};
+
+export function projectsRefusalLine(reason: string, facts: Record<string, number | boolean>): string {
+  return refusalLine("项目清单读取被拒", reason, facts);
+}
+
+// Which of the list's states to show. The two session reasons are not read failures but the absence
+// of the thing that reads, so they show the pairing instruction rather than a refusal that looks
+// like a bug (`cookie-absent` is §14's pipeline answering before the worker is asked, and
+// `session-unknown` is the same answer one hop later - after a worker restart, which is when an
+// operator most needs to be told to pair again).
+export const SESSION_REASONS: readonly string[] = ["cookie-absent", "session-unknown"];
+
+// The predicate, not the list, is what callers use. The landing page asks this before it decides
+// whether to show the pairing form, and the notice below asks it before it decides whether to show
+// a refusal - two places that read the same list would be two places that can disagree about
+// whether a given reason means "go pair".
+export function isSessionReason(reason: string): boolean {
+  return SESSION_REASONS.includes(reason);
+}
+
+export function projectsNotice(refusal: { reason: string; facts: Record<string, number | boolean> } | null, rowCount: number): string {
+  if (refusal === null) return rowCount === 0 ? PROJECTS_EMPTY_LINE["empty-page"] : "";
+  if (isSessionReason(refusal.reason)) return PROJECTS_EMPTY_LINE["no-session"];
+  return projectsRefusalLine(refusal.reason, refusal.facts);
 }

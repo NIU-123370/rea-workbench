@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { WorkbenchColumns } from "../../apps/web/ui/panels.tsx";
-import { buildMiddlePanel, buildRightTabs, listView } from "../../apps/web/ui/view-model.ts";
+import { buildMiddlePanel, buildRightTabs, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { ProjectList } from "../../apps/web/app/client/project-list.tsx";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
 import { newId } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
@@ -235,5 +236,22 @@ describe("the 样本 tab in the rendered shell (issue #58)", () => {
     );
     expect(builder).toContain('data-tab="samples"');
     expect(builder).toContain("builder-may-not-decide-samples");
+  });
+});
+
+
+// The landing page's first paint (issue #58's project list).
+describe("the landing list before any read has happened", () => {
+  it("asks for a pairing rather than spinning", () => {
+    const html = renderToStaticMarkup(createElement(ProjectList));
+    // This is the exact failure the 样本 tab was caught at in a real browser: a panel that says
+    // 正在读取 while the session is what makes the read possible. The static render has run no
+    // effect at all, so what this proves is the *initial* state and nothing else - the read that
+    // follows it is recorded from the browser pass.
+    expect(html).not.toContain("正在读取");
+    expect(html).toContain(PROJECTS_EMPTY_LINE["no-session"]);
+    expect(html).toContain('data-panel="project-list"');
+    // No link is rendered to a project nobody has read yet.
+    expect(html).not.toContain("/project/");
   });
 });

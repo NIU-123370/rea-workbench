@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, listView, pickCandidateSource, refusalFactsLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine } from "../../ui/view-model.ts";
+import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, jobActionLine, jobActions, listView, pickCandidateSource, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, verificationRequestLine } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, LeftPanel, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -58,7 +58,9 @@ export type CandidatePayload = {
 // type test is the parse, not a defence against the server.
 type RefusalBody = { error?: { code?: string; message?: string; details?: Record<string, unknown> } };
 
-async function getJson(
+// Exported for the landing page's list: the same read path, so a second copy of the parse - and a
+// second idea of what a refusal looks like - cannot appear beside this one.
+export async function getJson(
   path: string,
 ): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
   const response = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
@@ -90,11 +92,20 @@ async function postJson(
   path: string,
   body: unknown,
   csrf: string,
+  // §8 line 261's keyed creations need an Idempotency-Key and the unkeyed ones must not send one:
+  // a cancel's repeat-safety comes from §11's state machine, not from a journal. `null` therefore
+  // means "no header", not "empty header".
+  key: string | null = null,
 ): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
   const response = await fetch(path, {
     method: "POST",
     credentials: "same-origin",
-    headers: { "content-type": "application/json", "x-csrf-token": csrf, accept: "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-csrf-token": csrf,
+      accept: "application/json",
+      ...(key === null ? {} : { "idempotency-key": key }),
+    },
     body: JSON.stringify(body),
   });
   const payload: unknown = await response.json().catch(() => null);
@@ -246,6 +257,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [samples, setSamples] = useState<{ rows: SampleRow[]; inventoryRevision: number } | null>(null);
   const [samplesNotice, setSamplesNotice] = useState<string | null>(null);
   const [csrf, setCsrf] = useState("");
+  const [jobsNotice, setJobsNotice] = useState<string | null>(null);
+  const [verifyNotice, setVerifyNotice] = useState<string | null>(null);
+  const [comparator, setComparator] = useState("");
   const [inquiries, setInquiries] = useState<DirectedInquiry[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -345,6 +359,66 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       }
     },
     [csrf, props.projectId, samples, samplesTarget],
+  );
+
+  // §8 lines 278-279: the two lifecycle doors, asked about one row at a time.
+  //
+  // Which row may be asked is `jobActions`' decision (the same function the tests pin), and what
+  // the answer means is `jobActionLine`'s - including the case where the door says nothing was
+  // re-scheduled, which is a real answer rather than a failure. Then the row is re-read from the
+  // server: a page that kept showing 运行中 after the worker answered `cancelling` would be
+  // displaying a state it never received.
+  const runJobAction = useCallback(
+    async (row: JobLifecycleRow, action: LifecycleAction) => {
+      if (csrf === "") {
+        setJobsNotice("还没有可用的会话令牌，先完成配对。");
+        return;
+      }
+      // The cleanup retry is keyed per click (§8 line 279), so a second click on a row whose first
+      // attempt was refused replays that answer instead of scheduling a second cleanup. A cancel
+      // carries no key: its repeat-safety is §11's state machine.
+      const key = action === "cleanup-retry" ? crypto.randomUUID() : null;
+      const got = await postJson(
+        `/api/v1/projects/${props.projectId}/jobs/${row.id}/${action === "cancel" ? "cancel" : "cleanup-retry"}`,
+        {},
+        csrf,
+        key,
+      );
+      if (!got.ok) {
+        setJobsNotice(refusalLine(action === "cancel" ? "取消请求被拒" : "清理重排被拒", got.reason, got.facts));
+        return;
+      }
+      setJobsNotice(jobActionLine(action, (relayData(got.value) as Record<string, unknown> | null) ?? {}));
+      const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+      if (page.ok) setJobs(page.value as JobsPagePayload);
+    },
+    [csrf, props.projectId],
+  );
+
+  // §8 line 297 from the browser. The comparator is typed by the operator because no door lists
+  // the installed names (recorded on issue #58): the page deliberately does not guess one, and a
+  // wrong name comes back as `comparator-policy-not-installed` with how many this build installs.
+  const requestVerification = useCallback(
+    async (candidateId: string) => {
+      if (csrf === "") {
+        setVerifyNotice("还没有可用的会话令牌，先完成配对。");
+        return;
+      }
+      const got = await postJson(
+        `/api/v1/projects/${props.projectId}/verifications`,
+        { candidateId, comparatorPolicyId: comparator },
+        csrf,
+        crypto.randomUUID(),
+      );
+      if (!got.ok) {
+        setVerifyNotice(refusalLine("验证请求被拒", got.reason, got.facts));
+        return;
+      }
+      setVerifyNotice(verificationRequestLine((relayData(got.value) as Record<string, unknown> | null) ?? {}));
+      const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+      if (page.ok) setJobs(page.value as JobsPagePayload);
+    },
+    [comparator, csrf, props.projectId],
   );
 
   const openFile = useCallback(
@@ -542,6 +616,22 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                   </li>
                 ))}
               </ul>
+              <div data-verification-request>
+                <label htmlFor="comparator-policy">比较器策略名（§8 line 297 只收已安装的具名版本，不收代码）</label>
+                <input
+                  id="comparator-policy"
+                  type="text"
+                  autoComplete="off"
+                  value={comparator}
+                  onChange={(event) => setComparator(event.target.value)}
+                />
+                <button type="button" data-verify-request={candidate.id} onClick={() => void requestVerification(candidate.id)}>
+                  发起验证
+                </button>
+                <span data-verify-empty={candidate.files.length === 0 ? "no-files" : "has-files"}>
+                  {verifyNotice ?? "尚未发起验证：这道门只会排一个作业，不会给出结论。"}
+                </span>
+              </div>
               {codeNotice === null ? null : <p data-code-notice>{codeNotice}</p>}
               {source === null ? (
                 <p data-code-note>选择一个文件读取正文。</p>
@@ -553,6 +643,38 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
             </div>
           )
         ) : null}
+      </section>
+      <section aria-label="作业与清理" data-panel="jobs">
+        <h2>作业（§8 line 277 的清单；每行按 §11 的状态决定给不给按钮）</h2>
+        {jobs === null ? (
+          <p data-jobs-empty>{jobsNotice ?? "正在读取作业清单…"}</p>
+        ) : (
+          <ul>
+            {jobs.items.map((job) => {
+              const actions = jobActions(job);
+              return (
+                <li key={job.id} data-job={job.id} data-job-state={job.state} data-job-cleanup={job.cleanupState}>
+                  <span>{`${job.kind}｜${job.state}｜清理 ${job.cleanupState}`}</span>
+                  {actions.cancel ? (
+                    <button type="button" data-job-cancel={job.id} onClick={() => void runJobAction(job, "cancel")}>
+                      请求取消
+                    </button>
+                  ) : (
+                    <span data-job-cancel-note={job.id}>{actions.cancelNote}</span>
+                  )}
+                  {actions.cleanupRetry ? (
+                    <button type="button" data-job-cleanup-retry={job.id} onClick={() => void runJobAction(job, "cleanup-retry")}>
+                      重排清理
+                    </button>
+                  ) : (
+                    <span data-job-cleanup-note={job.id}>{actions.cleanupRetryNote}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {jobsNotice === null || jobs === null ? null : <p data-jobs-line>{jobsNotice}</p>}
       </section>
       {mode === "list" ? (
         <table data-panel="list-view">
