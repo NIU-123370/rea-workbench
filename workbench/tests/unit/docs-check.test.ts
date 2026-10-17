@@ -8,6 +8,7 @@ import {
   checkSourceReferences,
   findIdReferences,
   parseAcceptanceRows,
+  parseDecisionRows,
   parseTestCaseRows,
   reconcile,
 } from "../../infra/release/docs-check.mjs";
@@ -85,8 +86,16 @@ describe("the matrix reconciles with the acceptance table", () => {
   });
 });
 
-describe("a source file may only name an id the two tables declare", () => {
-  const declared = { cases: ["T01", "T16"], accepts: ["A05", "A12"] };
+describe("the decision list is read from the document that owns it", () => {
+  it("reads decisions as the bullets DECISIONS.md writes, not as a table", () => {
+    const markdown = "# 技术决策记录\n\n- D01｜选了：甲；为什么：乙\n- D02｜选了：丙\n\n段落里那条形状不同的行不会被读成决策。\n";
+    expect(parseDecisionRows(markdown)).toEqual(["D01", "D02"]);
+    expect(parseDecisionRows("什么都没有")).toEqual([]);
+  });
+});
+
+describe("a source file may only name an id the three tables declare", () => {
+  const declared = { cases: ["T01", "T16"], accepts: ["A05", "A12"], decisions: ["D05", "D23"] };
 
   it("reads a citation but not a timestamp, a digest or an identifier", () => {
     const source = [
@@ -97,18 +106,19 @@ describe("a source file may only name an id the two tables declare", () => {
       `const advisory = "until TESTPLAN T07/T14 isolation acceptance has run";`,
     ].join("\n");
     const refs = findIdReferences("apps/worker/restore.ts", source).map((ref) => `${ref.ref}@${String(ref.line)}`);
-    expect(refs).toEqual(["A12@1", "T16@1", "T07@5", "T14@5"]);
+    expect(refs).toEqual(["D23@1", "A12@1", "T16@1", "T07@5", "T14@5"]);
   });
 
   it("honours an inline opt-out so a fixture can name the id it refuses", () => {
     expect(findIdReferences("tests/unit/a.test.ts", `const invented = "A14"; // docs-check-ignore: this case asserts A14 is refused`)).toEqual([]);
   });
 
-  // Three ids the tables never declared. They live here as named constants with the opt-out
-  // marker, so the invented id appears at one marked site instead of on every assertion line.
+  // One id per family that no table declares, as named constants carrying the opt-out marker,
+  // so an invented id appears at one marked site instead of on every assertion line.
   const inventedCase = "T19"; // docs-check-ignore: the fixture is about refusing an undeclared case id
   const inventedAcceptance = "A16"; // docs-check-ignore: ditto, acceptance family
   const otherInventedCase = "T40"; // docs-check-ignore: ditto
+  const inventedDecision = "D33"; // docs-check-ignore: ditto, decision family (DECISIONS ends at D32)
 
   it("names the site of a reference the tables do not declare, by family", () => {
     const refs = findIdReferences("packages/contracts/sandbox.ts", `const advisory = "until ${inventedCase} isolation acceptance has run";`);
@@ -118,16 +128,18 @@ describe("a source file may only name an id the two tables declare", () => {
     ]);
     expect(checkSourceReferences(refs, { ...declared, cases: [...declared.cases, inventedCase] })).toEqual([]);
 
-    const both = findIdReferences("apps/worker/restore.ts", `// PRD ${inventedAcceptance} and TESTPLAN ${otherInventedCase}`);
-    expect(checkSourceReferences(both, declared)).toEqual([
+    const every = findIdReferences("apps/worker/restore.ts", `// PRD ${inventedAcceptance}, TESTPLAN ${otherInventedCase}, DECISIONS ${inventedDecision}`);
+    expect(checkSourceReferences(every, declared)).toEqual([
       `acceptance-ref-undeclared:${inventedAcceptance}(apps/worker/restore.ts:1)`,
       `test-case-ref-undeclared:${otherInventedCase}(apps/worker/restore.ts:1)`,
+      `decision-ref-undeclared:${inventedDecision}(apps/worker/restore.ts:1)`,
     ]);
 
-    // Both tables are consulted. A checker that read only the case list still passes every
-    // assertion above, because that fixture holds no accepted criterion — the mutation that
-    // taught me that was killed only by the tree-level case, so the claim gets named here too.
-    expect(checkSourceReferences(findIdReferences("f.ts", "// A05 and T01"), declared)).toEqual([]);
+    // All three tables are consulted. A checker that read only the case list still passes the
+    // assertions above, because that fixture holds no accepted id of the other two families —
+    // the mutation that taught me that was killed only by the tree-level case, so the claim
+    // gets named per family here too.
+    expect(checkSourceReferences(findIdReferences("f.ts", "// A05 and T01 and D05"), declared)).toEqual([]);
   });
 });
 
@@ -139,8 +151,11 @@ describe("the committed documents pass the gate they describe", () => {
     // 17 cases and 13 criteria is what the documents declare today; a different count means
     // the checker stopped reading a table, not that the project changed.
     expect(output).toContain("用例 17 条 / 验收 13 条");
+    expect(output).toContain("决策 32 条");
     expect(output).not.toContain("- acceptance-");
     expect(output).not.toContain("- test-case-");
+    expect(output).not.toContain("- decision-");
+    expect(output).not.toContain("decisions-table-unreadable");
     expect(output).not.toContain("source-root-missing");
     // The scan size is part of the contract: a walk that read nothing (renamed root, wrong
     // root directory) prints an otherwise identical clean line, so the count is pinned to a
