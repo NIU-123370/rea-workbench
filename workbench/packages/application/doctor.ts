@@ -16,7 +16,11 @@ export type CheckName =
   | "network-lockdown"
   | "storage-layout"
   | "worker-lock"
-  | "limits";
+  | "limits"
+  // §10's trusted evaluator is a separate process this build does not ship, so a queued `verify`
+  // job has no executor here. The doctor is the surface that says "this capability is absent" out
+  // loud, which is what keeps `queued` from reading as "someone is working on it" (issue #75).
+  | "verification-executor";
 
 export type CheckOutcome =
   | { state: "ok"; facts: JsonValue }
