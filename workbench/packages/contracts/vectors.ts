@@ -140,6 +140,16 @@ export const vectorCreateRequestSchema = z.strictObject({
   replacesId: idSchema.nullable(),
 });
 
+// §8 line 282's body, which offers one name the create request does not carry: `sensitiveValues?`.
+// §12.1 line 441 types that list as the operation's exclusion context - shared spelling with the
+// contract draft and the blueprint freeze, and the same reason - so the door takes it and forwards it
+// beside the request instead of inside it. Nothing here stores it: the sample's digest is computed
+// over what the sample is, never over what a caller asked to be hidden.
+export const vectorCreateHttpRequestSchema = z.strictObject({
+  ...vectorCreateRequestSchema.shape,
+  sensitiveValues: z.array(nonEmptyString).optional(),
+});
+
 // The reviewer names the digest they looked at, so approving a vector that was
 // replaced underneath the review is a conflict rather than a silent pass.
 export const vectorReviewRequestSchema = z.strictObject({

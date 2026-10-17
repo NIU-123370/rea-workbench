@@ -1459,6 +1459,47 @@ runner 的，见下文"这轮没做浏览器"）：
 （现读 `grep -rn "lastErrorJson: [^n]" packages apps` **0 命中**），所以它是"字段存在、生产者缺席"，
 既不勾也不假装修。
 
+发布门禁·第廿八轮（2026-10-18 05:14–05:16，**#125 的第 1、2 格：契约正文与蓝图 payload 各有了一道出门前的门**）：
+
+- §12.1 line 441 那句话点着名说「ContractService 在保存正文、schema、示例前调用 DiagnosticsSanitizer 的
+  严格 payload 检查；handoff owner 对允许列表序列化后的完整蓝图再次检查，**通过后才计算 blueprintDigest**」，
+  而 `assertPayloadClean` 在两个服务里**零调用点**（现读 `grep -rn "assertPayloadClean" packages/application`
+  只命中 idempotency／har-ingestion／vector-service／sandbox-service）。这一轮把这两面补上，
+  并让 §8 点着名的那个字段真的能送进来（见下条）。
+- **门放在哪儿＝这条能不能被证**。契约那道放在 `contractDigestInput(content)` 上、`contractDigest` 之前：
+  那个对象就是 `contracts.payload_json` 里要落盘的字节，所以命中＝什么都没写、什么摘要都没铸——
+  不是「写了再于门口过滤」。蓝图那道放在 `buildBlueprintPayload(...)` 之后、`blueprintDigestOf` 之前，
+  于是 §12.1「不许静默改写一份已带摘要的正文」这条不需要承诺，它没有可改的摘要。
+  `leakReasons` 那道门管的是 holdout 引用，不是声明值——两个 owner，不重叠，也不互相替代。
+- **声明从哪来**：上一轮结尾留的「契约正文／蓝图 payload 要用哪一份声明」这一问，这轮按文档裁决掉了——
+  §12.1 line 441 自己写了「向量、契约和蓝图创建接口的 `sensitiveValues` 仅是操作上下文」，
+  §8 的三行请求字段（282／286／292）也各自列了 `sensitiveValues?:string[]`。所以它就是**这一次操作自带的列表**，
+  骑在帧上、与 `request` 平级，不进主体、不进摘要、不进幂等 journal 的那半。
+  由此**#58 记的一条偏离在本轮闭合**：三道创建门原本把 `sensitiveValues` **具名拒收**，现在是收下并转发；
+  `expectedGraphRevision`（plan／contract）仍是具名拒收，那条偏离不动。
+- **前面一条陈述要更正的地方**：本文在 §8 line 272 那道导入门那一节里记的「一支活下来的变异 A17——不把 `sensitiveValues` 交给 worker，
+  88 条测试仍全绿」**在本轮不再成立**。它当时活着的理由是「HTTP 侧的幂等摘要守卫先把这件事挡在命令之前，
+  两个 owner 重叠」；这轮把摘要的那半明确切成「不含声明的那半 body」，于是门与 journal 各管一件事，
+  worker 有没有被喂到值第一次变成可观测的。M3／M6（worker 侧把列表换成空）与 M7（门不转发）现在都是红的。
+- 新增用例五条：契约两道（声明值在 `limitations` 里→ 422 且**行数为原值**、`payload_json` 全库 LIKE 扫 0 命中、
+  deny 审计点名 `declared-value-present`、被拒那次**不占 revision**——下一次草稿仍拿 1；
+  `inputSchema` 里一段 `{name:"Authorization",value:...}`→ `transport-auth-structure`，什么都没声明也拒）；
+  蓝图一道（契约起草时不声明→过；冻结时声明该串→ 422、`blueprints` 行数不变、审计点名；
+  同一 plan 不声明仍冻结成功，证明门属于声明、不是对这份正文的常设禁令）；
+  门上一道契约（`sensitiveValues` 命中→422、正文里读不回 `sensitiveValues` 也不读回值）与一道向量
+  （原「具名拒收」那条改写成「命中→422／不命中→201 且样本读不回声明」）、一道冻结
+  （两份不同声明同一键→ **同一个 201 回包＋审计里只有一条 allow**，这就是「摘要不含声明」的读数）。
+- 变异 **7 支全红**：M1 删契约那道门（2 条用例红）、M2 删蓝图那道门、M3 契约的 worker 处理把列表写死成空、
+  M4 契约的门不转发声明、M5 冻结的 journal 改回整份 body（含声明）、M6 冻结的 worker 处理把列表写死成空、
+  M7 向量的门不转发声明。**本轮没有存活的变异**；本轮也没新增守卫型断言——上一族「增量是可读性不是红绿」
+  的账没有再欠一次。
+- 一个**按构造而非读数**的边界要说清：门的三个 reason 里 `declaration-context-unavailable` 在生产路径上
+  今天**不可达**（组合层缺字段时给的是空列表，与 `vector.create` 从 #15 起的同一待遇），它只在
+  `assertPayloadClean(_, null)` 与单测里成立。#125 第 3、4、6 格（导出、diff 归属、
+  `resource_leases.last_error_json` 的「字段存在、生产者缺席」）本轮不碰。
+- 末态闸门：typecheck 0／lint **208 文件 0 条**／`test:unit` **689/39**／`test:integration`
+  **521 passed + 6 skipped / 26 files**／`docs:check` exit 0（源码引用 270 处／201 个文件、设计锚点 379 处）。
+
 
 ## 还没有的东西
 

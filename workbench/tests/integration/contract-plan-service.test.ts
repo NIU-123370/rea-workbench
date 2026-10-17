@@ -27,6 +27,11 @@ import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { ClaimRow, EvidenceRow, JobRow, TargetRow, VectorRow } from "../../packages/application/ports.ts";
 import type { Result } from "../../packages/domain/result.ts";
 
+// §12.1 line 441: the filter's exclusion list is this operation's context. These cases declare
+// nothing - the value an operator has nothing to hide is an empty list - except the refusal
+// cases, which name a value and expect the write to be stopped.
+const undisclosedDeclaration = { sensitive: { declaredValues: [] as string[] } };
+
 // ContractService and PlanService against a real SQLite file (DESIGN §7.2, §7.4,
 // D27, issue #12). Each of the issue's three checkboxes is pinned by a case that
 // would fail if the rule were only documented: a build request with no field to
@@ -391,22 +396,79 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
   let emptyContract: { contractId: Id; digest: Digest };
 
   it("assigns the revision number itself", () => {
-    const first = unwrap(contracts.createDraft(projectId, inspector, contractRequest()));
+    const first = unwrap(contracts.createDraft(projectId, inspector, contractRequest(), undisclosedDeclaration));
     expect(first.revision).toBe(1);
     emptyContract = { contractId: first.contractId, digest: first.digest };
-    const second = unwrap(contracts.createDraft(projectId, inspector, contractRequest()));
+    const second = unwrap(contracts.createDraft(projectId, inspector, contractRequest(), undisclosedDeclaration));
     expect(second.revision).toBe(2);
     expect(second.contractId).not.toBe(first.contractId);
   });
 
+  it("refuses a contract body carrying a value the operation declared sensitive (DESIGN §12.1, D28)", () => {
+    const SECRET = "hunter2-session-token";
+    const declared = { sensitive: { declaredValues: [SECRET] } };
+    const rows = () =>
+      (db.prepare("SELECT count(*) AS n FROM contract_revisions WHERE project_id = ?").get(String(projectId)) as { n: number }).n;
+    const before = rows();
+
+    const refusal = errorOf(
+      contracts.createDraft(
+        projectId,
+        inspector,
+        contractRequest({ limitations: [`replay the cart with ${SECRET}`] }),
+        declared,
+      ),
+    );
+    expect(refusal.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refusal.reason).toBe("declared-value-present");
+    // The message is the door's own sentence: §12.1 never lets the excluded value, or a
+    // hash of it, travel out as the explanation.
+    expect(refusal.message).not.toContain(SECRET);
+
+    // Nothing is written and then filtered on the way out: the row count is the count it
+    // was before the call, and no stored payload mentions the value.
+    expect(rows()).toBe(before);
+    const smuggled = db.prepare(
+      "SELECT count(*) AS n FROM contract_revisions WHERE project_id = ? AND payload_json LIKE ?",
+    ).get(String(projectId), `%${SECRET}%`) as { n: number };
+    expect(smuggled.n).toBe(0);
+
+    const journal = db.prepare(
+      "SELECT reason_code FROM audit_entries WHERE action = 'contract.create' AND decision = 'deny' AND reason_code = 'declared-value-present'",
+    ).all();
+    expect(journal).toHaveLength(1);
+
+    // The next draft of the same key still gets the revision this refusal did not take.
+    const following = unwrap(contracts.createDraft(projectId, inspector, contractRequest(), undisclosedDeclaration));
+    expect(following.revision).toBe(before + 1);
+  });
+
+  it("refuses a contract body shaped like a transport authentication header (DESIGN §12.1)", () => {
+    const refusal = errorOf(
+      contracts.createDraft(
+        projectId,
+        inspector,
+        contractRequest({
+          // Nothing was declared here: the structure itself is the reason, which is why the
+          // filter never relies on a name like `token` to decide what to drop.
+          inputSchema: { $schema: DIALECT, type: "object", headers: [{ name: "Authorization", value: "Bearer any" }] },
+        }),
+        undisclosedDeclaration,
+      ),
+    );
+    expect(refusal.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refusal.reason).toBe("transport-auth-structure");
+  });
+
   it("refuses a claim the contract does not own, and one from another target", () => {
+
     const outside = errorOf(
       contracts.createDraft(
         projectId,
         inspector,
         contractRequest({
           requiredCases: [{ caseKey: "x", claimId: inferredClaimId, kind: "edge", vectorIds: [] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     expect(outside.reason).toBe("required-case-claim-outside-source");
@@ -418,7 +480,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
         contractRequest({
           sourceClaimIds: [foreignClaimId],
           requiredCases: [{ caseKey: "x", claimId: foreignClaimId, kind: "edge", vectorIds: [] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     expect(foreign.reason).toBe("source-claim-target-mismatch");
@@ -429,7 +491,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
       contracts.createDraft(
         projectId,
         inspector,
-        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [newId()] }] }),
+        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [newId()] }] }), undisclosedDeclaration,
       ),
     );
     expect(unknown.reason).toBe("required-vector-unknown");
@@ -445,7 +507,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
             { caseKey: "cart-ok", claimId, kind: "success", vectorIds: [] },
             { caseKey: "cart-ok", claimId, kind: "error", vectorIds: [] },
           ],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     expect(failure.reason).toBe("duplicate-case-key");
@@ -458,7 +520,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
         inspector,
         contractRequest({
           scope: { snapshotDigest: OTHER_SNAPSHOT, operationIds: ["getCart"], excludedBehaviors: [] },
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     expect(failure.reason).toBe("scope-snapshot-mismatch");
@@ -495,7 +557,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
       contracts.createDraft(
         projectId,
         inspector,
-        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [vector.id] }] }),
+        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [vector.id] }] }), undisclosedDeclaration,
       ),
     );
     const committed = unwrap(
@@ -551,7 +613,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
       contracts.createDraft(
         projectId,
         inspector,
-        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [vector.id] }] }),
+        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [vector.id] }] }), undisclosedDeclaration,
       ),
     );
     const failure = errorOf(
@@ -579,7 +641,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
       contracts.createDraft(
         projectId,
         inspector,
-        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [draftVector.id] }] }),
+        contractRequest({ requiredCases: [{ caseKey: "cart-ok", claimId, kind: "success", vectorIds: [draftVector.id] }] }), undisclosedDeclaration,
       ),
     );
     const approved = unwrap(
@@ -594,7 +656,7 @@ describe("ContractService revisions (DESIGN §7.2)", () => {
   });
 
   it("gives Builder no contract endpoint", () => {
-    expect(errorOf(contracts.createDraft(projectId, builder, contractRequest())).code).toBe("ACCESS_DENIED");
+    expect(errorOf(contracts.createDraft(projectId, builder, contractRequest(), undisclosedDeclaration)).code).toBe("ACCESS_DENIED");
     expect(errorOf(contracts.read(projectId, builder, emptyContract.contractId)).code).toBe("ACCESS_DENIED");
     expect(journal("contract.create", "deny")).toContain("builder-has-no-contract-permission");
   });
@@ -712,7 +774,7 @@ describe("PlanService frozen denominator (DESIGN §7.4)", () => {
           contractKey: "frozen-api",
           sourceClaimIds: [planClaimId],
           requiredCases: [scopeCase(requiredVector.id)],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -871,7 +933,7 @@ describe("PlanService frozen denominator (DESIGN §7.4)", () => {
           contractKey: "draft-api",
           sourceClaimIds: [planClaimId],
           requiredCases: [scopeCase(requiredVector.id)],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     const failure = errorOf(plans.build(projectId, inspector, buildRequest({ contractIds: [draftContract.contractId] })));
@@ -915,7 +977,7 @@ describe("PlanService frozen denominator (DESIGN §7.4)", () => {
           contractKey: "frozen-api",
           sourceClaimIds: [planClaimId],
           requiredCases: [scopeCase(leafVector.id)],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     expect(created.revision).toBe(2);

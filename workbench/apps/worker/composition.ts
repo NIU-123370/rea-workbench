@@ -891,7 +891,18 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
         }),
       );
     },
-    "contract.create": (payload, actor) => relay(contracts.createDraft(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
+    // §12.1 line 441 gives the contract body to the same filter that gates every emitted face, and
+    // types `sensitiveValues` as this operation's context rather than a field of the contract. So it
+    // arrives beside `request` and never inside it: the service digests and persists what the request
+    // names, and uses this list only to decide whether that body may exist at all.
+    "contract.create": (payload, actor) => {
+      const fields = asRecord(payload);
+      return relay(
+        contracts.createDraft(projectIdOr(payload), actor, fields["request"] ?? {}, {
+          sensitive: { declaredValues: stringList(fields["sensitiveValues"]) },
+        }),
+      );
+    },
     "contract.review": async (payload, actor) => {
       const contractId = pickId(payload, "contractId");
       const refused = missing(contractId);
@@ -955,8 +966,18 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     // state machine all live behind the single writer.
     "verification.claim": (payload, actor) =>
       relay(verifications.claim(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
-    "blueprint.freeze": async (payload, actor) =>
-      relay(await blueprints.freeze(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
+    // The freeze's exclusion context is read the same way `vector.create` and `contract.create` read
+    // theirs: beside the request, over the frame the handoff owner sees. §12.1 puts the door on the
+    // allowlisted payload before the digest, and this is the only place a caller can say what that
+    // payload must not contain.
+    "blueprint.freeze": async (payload, actor) => {
+      const fields = asRecord(payload);
+      return relay(
+        await blueprints.freeze(projectIdOr(payload), actor, fields["request"] ?? {}, {
+          sensitive: { declaredValues: stringList(fields["sensitiveValues"]) },
+        }),
+      );
+    },
     "blueprint.read": async (payload, actor) => {
       const blueprintId = pickId(payload, "blueprintId");
       const refused = missing(blueprintId);
