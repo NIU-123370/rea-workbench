@@ -732,6 +732,59 @@ describe("named commands and the local RPC (§14)", () => {
     expect(JSON.stringify(extra.error.details)).toContain("nonsense");
   });
 
+  // The completion's exclusion context arrives on the frame beside `request` (§12.1 line 441 asks the
+  // caller of a later operation to supply it again rather than defaulting a lost one to nothing). This
+  // is the case that makes that read load-bearing: the same transcript is refused for one caller and
+  // accepted-for-a-different-reason by the next, and the ids in it are unknown either way, so a worker
+  // that ignored the frame list could not produce this refusal order.
+  it("runs the declared exclusion over a completion that arrives on the socket (§12.1, issue #125)", async () => {
+    const created = unwrap(await request("project.create", { name: "complete-filter" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const SECRET = "sesame-secret-value";
+    const transcript = {
+      candidateId: newId(),
+      jobId: newId(),
+      blueprintId: newId(),
+      planId: newId(),
+      comparatorPolicyId: "exact-http-v1",
+      runnerImageDigest: "1".repeat(64),
+      observations: [
+        {
+          vectorId: newId(),
+          requestObserved: true,
+          requestMatches: true,
+          decodedMatches: true,
+          outcome: { kind: "return", value: { items: [SECRET] } },
+          expectedOutcomeObserved: true,
+          nondeterministic: false,
+          safeDiff: { expected: SECRET },
+        },
+      ],
+      reportStagingId: "12345678-1234-1234-1234-123456789012",
+      reportSha256: "2".repeat(64),
+      limitations: [],
+    };
+
+    const filtered = await request(
+      "verification.complete",
+      { projectId, request: transcript, sensitiveValues: [SECRET] },
+      evaluator,
+    );
+    expect(filtered.ok).toBe(false);
+    if (filtered.ok) return;
+    expect(filtered.error.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(filtered.error.reason).toBe("declared-value-present");
+    expect(JSON.stringify(filtered.error)).not.toContain(SECRET);
+
+    // Same bytes, nothing declared: the filter is not a standing ban on this transcript, and the next
+    // refusal the worker has to explain is its own row lookup - which is the point that proves the
+    // two answers come from different rules.
+    const unfiltered = await request("verification.complete", { projectId, request: transcript }, evaluator);
+    expect(unfiltered.ok).toBe(false);
+    if (unfiltered.ok) return;
+    expect(unfiltered.error.reason).not.toBe("declared-value-present");
+  });
+
   // The absence this issue is about has to be sayable: a `verify` row sits in the queue and nothing
   // in this build takes it (the runner's kind list is deliberately `build` only). The doctor is the
   // surface for "this capability is not here", and it must not warn about work nobody is waiting on.

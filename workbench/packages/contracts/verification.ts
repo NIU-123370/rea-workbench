@@ -94,9 +94,11 @@ export const evaluatorCaseObservationSchema = z.strictObject({
   ]),
   expectedOutcomeObserved: z.boolean(),
   nondeterministic: z.boolean(),
-  // Already filtered by the only filter owner before it arrives here; the schema
-  // cannot tell a raw holdout value from a redacted one, so the service also
-  // refuses any holdout entry that carries one (domain/report.ts holdoutExposureDefects).
+  // The claim in the first line is now enforced, not assumed: `VerificationService.complete` runs
+  // this transcript through the filter owner before any row is read (§12.1's safeDiff face,
+  // issue #125). The schema still cannot tell a raw holdout value from a redacted one, so the
+  // service separately refuses any holdout entry that carries one
+  // (domain/report.ts holdoutExposureDefects).
   safeDiff: z.json().nullable(),
 });
 

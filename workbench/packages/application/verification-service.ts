@@ -17,6 +17,7 @@ import type { VerificationWorkWire } from "../contracts/verification.ts";
 import { findComparatorPolicy } from "../contracts/verification.ts";
 import type { JobRecord } from "../contracts/jobs.ts";
 import { decideStart, jobErrorFromFailure, projectJobRecord, transition } from "./job-queue.ts";
+import { assertPayloadClean, type OperationFilterContext } from "./sanitizer.ts";
 import type { EventDraft, JobRow } from "./ports.ts";
 import type {
   ArtifactPort,
@@ -175,6 +176,7 @@ export class VerificationService {
     projectId: Id,
     actor: Actor,
     payload: unknown,
+    context: OperationFilterContext,
   ): Promise<Result<VerificationCommit, GateFailure>> {
     if (actor.actorKind !== "evaluator") {
       const reason = isBuilder(actor)
@@ -208,6 +210,31 @@ export class VerificationService {
       runnerImageDigest: asDigest(parsed.data.runnerImageDigest),
       reportSha256: asDigest(parsed.data.reportSha256),
     };
+
+    // §12.1 names safeDiff as one of the faces the single filter owner covers, and this transcript is
+    // the only place a safeDiff is ever written: the comparator's own output, arriving as arbitrary
+    // JSON from a trusted process and going into a report row that a package later ships. The door
+    // runs on the evaluator's submitted bytes, before the staging read, the row binding or a digest -
+    // so a refusal writes nothing and, like `vector.create`'s caller-payload check, it refuses what the
+    // caller sent rather than what this service happened to keep. `report.ts`'s holdout guard is a
+    // different owner: it asks "is this diff for a holdout sample", not "does this carry what the
+    // operation declared".
+    const transcriptCheck = assertPayloadClean(
+      { observations: completion.observations, limitations: completion.limitations } as unknown as JsonValue,
+      context.sensitive,
+    );
+    if (!transcriptCheck.ok) {
+      return this.denied(
+        projectId,
+        actor,
+        null,
+        gateFail(
+          "SENSITIVE_CONTENT_BLOCKED",
+          transcriptCheck.reason,
+          "the completion transcript is refused by the diagnostic filter",
+        ),
+      );
+    }
 
     const policy = findComparatorPolicy(completion.comparatorPolicyId);
     if (policy === null) {
