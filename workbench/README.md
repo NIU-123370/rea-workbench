@@ -1215,6 +1215,60 @@ runner 的，见下文"这轮没做浏览器"）：
 今天仍只有单测调用方（这是 #56/#107/#108 同一类，规模小于它们，下一步补）。
 大文件仍是 #77（本笔不动协议：HTTP 侧还是 5 MiB 一条路）。
 
+浏览器实测·第廿一轮（2026-10-18 07:15–07:17，真 Chrome ＋ **生产构建**（`next build` + `next start -p 4499`，
+`WB_API_ORIGIN=http://127.0.0.1:4312`／`WB_UI_ORIGIN=http://localhost:4499`）；这一轮读的是
+**第三十一轮那条 DOM 断言在真页面上到底应不应**（#59 第三格），以及那两条同源资源的另一半）：
+
+- **rig 是四个进程位，不是三个**：`npm run broker` 在本机**起不来**——现读 `broker-refused:no-known-container-engine`
+  ＋ `broker-refused:host-platform-unverified-for-sandbox:darwin/arm64` ＋ `required:linux/x64`
+  （`apps/broker/main.ts:75-85` 在 `isSupportedSandboxHost` 为假时拒绝监听，`contracts/sandbox.ts:65-73` 钉住 linux/x64），
+  而 `boot-config.ts:166-173` 要求 `WB_BROKER_SOCKET` 指向一个**存在的 socket**。本轮用一个只监听该路径的
+  socket-holder 顶住这个前提（与 `tests/integration/web-api.test.ts` 的 `holdSocket` 同一手法），
+  worker 的 doctor 因此如实报 `degraded / broker-socket-not-answering-the-protocol`——**它没有假装 broker 活着**。
+- **本仓不带任何已安装 profile**：现读 `ls infra/profiles` → **No such file or directory**。rig 因此把
+  `node apps/worker/main.ts` 的第一个**位置参数**（`main.ts:64` 的 packageRoot 覆盖）指向 scratch 目录，
+  并在那里写了一份 `har-capture.json`（`limits.maxGenerationAttempts: 1`，形状按 `contracts/boot.ts:47-74` 的
+  strictObject，`networkPolicyId` 是必填项）。**换句话说：今天 clone 完直接 `npm run worker`，生成那一面会被具名拒绝
+  （`generation-budget-unknown` ⇒ `CAPABILITY_UNAVAILABLE`）**，这是新开的条目，不是本轮该顺手改的产品决定。
+- **配对是页面自己完成的**：落地页空态文案「还没有会话：项目清单要配对之后才读得到…」→ 真填配对码（43 字符）
+  → 真点「配对」→ 同一格变成 `browser-rig-b59｜图 0｜库存 2` ＋「没有更多项目了」。
+  in-app 浏览器 viewport 仍是 **0×0**，`click`/`screenshot` 两次都被拒（与前几轮同一限制），
+  所以动作是**在真页面里派发真 DOM 事件、由真 React 处理**，读数来自 a11y 快照、DOM 查询与网络面板，**没有截图**。
+- **两次真点击，一个成功一个被拒**（蓝图 `f071732c…` 的「为该蓝图发起一次生成」）：
+  第一次回执逐字「已排队生成：作业 `2f28c1b2…`（queued）」，worker 端 `runner succeeded job=2f28c1b2… candidate=f0c03116… attempt=1`，
+  代码页随后自己读到那个候选（`GET …/candidates/f0c03116… → 200`）；
+  第二次回执同样是「已排队生成：作业 `4d808c63…`（queued）」——**这道门只排作业，不在 HTTP 上拒绝**（§8 line 294 那一格），
+  拒绝落在作业行里：`data-job="4d808c63…" data-job-state="failed"`，worker 端 `runner failed job=4d808c63… reason=generation-budget-exhausted`。
+- **第三十一轮欠的那一步，逐字应了**：左栏那个 `dl` 四项 `任务／清理／被拒／画面`，
+  `任务` ＝ `4d808c63-de43-41fb-b00d-9eed288151b3`（**与那条 failed 行的 id 一致**，所以这句话属于这一行而不是别的行），
+  `清理` ＝ `pending`，
+  **`被拒` ＝ 「本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 2 · maxAttempts 1）」**，
+  `画面` 仍是「无画面：本次导入只带请求与响应，没有预览帧」（#79 未动）。⇒ #59 第三格里
+  `generation-budget-exhausted` 那一族的两个数字**在真页面上可见**了，不再是 `renderToStaticMarkup` 的断言。
+- **同一族另外两条的读数分成两半**：在页面里对同源 API 发一次 `GET …/jobs?limit=999` ⇒ **413** ＋
+  `details {limit:999, maxLimit:200, reason:"jobs-limit"}`——「**回包里可见**」这一半在真浏览器会话里成立；
+  但**页面永远只请求 `limit=50`**，所以没有任何控件能把这条拒绝走到屏幕上。那一半不是缺门，是缺一个
+  能提出越限请求的控件（要不要加，等你点）。`evidence-over-inline-limit` 那条本轮**没读到**。
+- **网络面板给的权威路由清单**（90 条请求里 API 面 12 个不同端点，全部 200/202/413 如实）：
+  `GET session`、`GET comparator-policies`、`GET health`、`GET projects/:p`、`GET projects/:p/targets/:t`、
+  `GET projects/:p/vectors?targetId=…`、`GET projects/:p/graph`、`GET projects/:p/audit?limit=100`、
+  `GET projects/:p/jobs?limit=50`、`GET projects/:p/candidates/:c`、`POST projects/:p/candidates`（×2 ⇒ 202）、
+  `GET projects/:p/events`（`text/event-stream`，事件源类型）。
+  `POST /session` 与 `GET /projects` **不在**这份清单里——缓冲区从进入项目页开始计数——那两条的读数来自 DOM 变化本身。
+  这一页今天真实读到的门因此给 #58 第 4 框添了 12 个端点的浏览器读数。
+- **本轮顺手撞到的一条真缺口**（不是本轮引入，也不是本轮该修的）：对**播种出来的**那份蓝图（`615c62e9…`）
+  `GET …/blueprints/:b` 答 **503 `REA_CONTRACT_MISMATCH / blueprint-digest-drift`**——`blueprint-service.ts:695-707`
+  重算域摘要，而 support helper 写进行里的摘要是 `hex("blueprint-<name>")`（`tests/support/blueprint-seed.ts`），
+  两者必然不等；生成路径只自查 payload-vs-row，所以作业照样跑。⇒ `tests/support` 造的蓝图与读门**不同源**，
+  这句话记在这里，不当已交付。
+- console **0 条**（error/warning/issue 全空，含 React DevTools 提示也没有——生产构建没有 HMR 那条）。
+- rig 收尾：`kill -TERM` worker 收 `worker stopped`，`worker.lock` 与 `worker.rpc.sock` 自己消失
+  （#72 那条反面证据又应一次），4499／4312 现读端口已 free。
+
+**这轮仍然没做的**：#59 第三格的另外两条 RESOURCE_LIMIT 只在**回包**里成立、没在页面上显示（`jobs-limit` 缺一个能请求越限页的控件；
+`evidence-over-inline-limit` 本轮没有读数）；broker 本体在 Linux x64 之外的宿主上仍然起不来（#23/#121 那一片）；
+本仓不带已安装 profile 这件事本轮只记不修；截图仍不可得（0×0 viewport），所有页面动作都是派发真 DOM 事件而不是真指针。
+
 发布门禁·第廿一轮（2026-10-18 03:15–03:28，**源码里点名的验收编号第一次有了对账方**）：
 
 - **缺陷形状**：`packages/contracts/sandbox.ts` 的 `SANDBOX_HOST_REQUIREMENTS.advisory` 是**会过线的字段**
@@ -1735,6 +1789,12 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 （四条命令里没有"报告宿主能力"那一格，闭合命令表里也没有沙箱名字——见本轮末尾「这轮仍然没做的」）。
 本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
 
+同族另一条空缺是**已安装的 profile 本身**：仓里不带 `infra/profiles/`（第廿一轮现读 `ls` → 目录不存在），
+所以 clone 完直接 `npm run worker` 时，生成那一面会被具名拒绝（`generation-budget-unknown` ⇒ `CAPABILITY_UNAVAILABLE`）。
+那一轮的 rig 因此用 `apps/worker/main.ts` 的第一个位置参数把 packageRoot 指到 scratch 目录，自带一份
+`maxGenerationAttempts: 1` 的 `har-capture.json`。带不带默认 profile、以什么形状带，属 §14 名录的决定（与 #99
+那条「第八条 limits 没有文档归属」连在一起），本轮只记不修。
+
 明确**未实现 / 未验证**的范围：
 
 - 页面上的写控件现在覆盖到「建项目 → 声明 URL 目标 → 上传采集 → 采集编排 → 定向调查 → 批 → 冻 → 生成」以及作业的两扇门（第九、十轮有浏览器
@@ -1744,6 +1804,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   表就等于做一个会猜的表，所以这三扇仍靠 `fetch` 驱动，是 issue #58 剩下的账。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
   读不到日志就说读不到（`FREEZE_EMPTY_LINE` 的三种空态各有自己的句子）。
+- 「被拒」那一格有一条真浏览器读数了（第廿一轮）：一次预算耗尽的生成在左栏逐字显示
+  「本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 2 · maxAttempts 1）」，且同一格 `任务`
+  显示的就是那条 `failed` 行的 id。同族另两条只完成一半：`jobs-limit` 的 `{limit:999, maxLimit:200}` 在页面同源
+  `fetch` 的 **413 回包**里读到，但页面永远请求 `limit=50`，所以**没有任何控件会把它显示出来**——那一半要的是
+  一个页大小控件，不是又一扇门；`evidence-over-inline-limit` 的 `{byteLength, limit}` 本轮**没有**浏览器读数。
 - 上传之后那条链还欠两次真门读数（issue #108 文末同段）：**HTTP 门到 runner 的端到端一条用例**——
   `POST /projects/:p/imports` 经 Next 中继进来、runner 把它跑到 `succeeded`、再 `GET .../evidence/:e` 回 200，
   这条今天是由 `worker.dispatch`（命令门）证的，不是由那道 HTTP 门；以及**页面里点出「来源 N」**的读数——
