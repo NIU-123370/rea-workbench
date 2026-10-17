@@ -654,6 +654,50 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件�
   **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
   蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
 
+浏览器实测·第十一轮（2026-10-17 09:15–09:27 UTC，同一套三个真进程；这一轮是**页面第一次订阅 §13 的
+`job.updated`**（issue #85），所以读的全部是「不重载时屏幕会不会自己动」）：
+
+- rig 的两处自伤记录，都值一行：worker 的 `WB_REA_ENTRYPOINT` 必须是**存在的文件**（本轮用仓库自己的
+  `tests/fixtures/rea-mcp-fixture.mjs`），而那个位置参数是**包目录**（`rea-rig-s9/pkg`）——把它指到仓库根
+  得到的是一格 `check limits=failed limits-unknown-no-profile`，随后生成门按 `generation-budget-unknown`
+  拒；两处都是"报错在别处"的形状，不写下来下一轮还会撞。配对码是一次性的，且会话只活在那个 worker 进程的
+  记忆里（§14），所以每重启一次 worker 浏览器就得重新配对。
+- 配对完成后 **400ms 内**面板就是「作业状态由 §13 的 job.updated 推送。」。这一句在修之前永远停在
+  「正在接 §13 的事件流，还没有连上。」，对照读数是同一次打开的两条路：直连 API 的响应头 `+6ms`，
+  经中继的响应头 `+1267ms`——`+1267` 恰好等于第一条事件落地的时刻，即**中继在第一个字节之前不发响应头**，
+  于是空闲的流在浏览器看来还没连上。补的东西是流上的第一帧 `: stream-open`（SSE 的注释行，客户端按规范必须
+  忽略），它不携带任何状态，只证明字节在动。
+- **点「为该蓝图发起一次生成」** → 回执「已排队生成：作业 17bd0cac-…（queued）」；同一页面**不重载**，
+  约 1.6 秒后面板尾部的 seq 从 25 跳到 28、第一行成为 `build｜failed`，worker 那边同一件是
+  `runner failed job=17bd0cac… reason=generation-budget-exhausted`。中间那格 `running` 落在两次采样之间，
+  读到的是"三次推送都到了、行自己动了"，不是一屏抓到全部三个状态。
+- 按 queued 的 verify 行的「请求取消」→ 1.3 秒内该行 `cancelled/pending`。**但这一句当时是点击自己的重读
+  带来的**：面板 seq 仍停在 28——取消门改了作业行却没写事件。本轮补两处写者（`job-lifecycle.ts` 的 cancel
+  与 `recovery.ts` 的 interrupted），并由新测试钉住两面：同一件第二次取消（行没动）→ 开着的流 600ms 静默，
+  而第一次取消 → 帧里 `aggregateId=jobId`、payload 逐字 `{resourceIds:[jobId],state:"cancelled"}`。
+  `job.cleanup-retry` 仍**不写事件**，因为 §11 没让作业行动、它只重排租约——给没动的行发状态才是撒谎。
+- 停进程的读数：**0.236 秒**（同一改动落地前的另一版实测 0.462 秒，都是页面还订阅着的时候），web 进程自己
+  走干净并打出 `web stopped`。这是本轮改出来的行为——订阅之前不会遇到（空闲流当场结束），加了泵循环之后
+  第一次停就是停不掉：老进程挂在 `server.close()` 上等一个没有理由关闭的标签页，只能 SIGKILL（那一笔真的
+  发生在这轮的中途，读数就是 `kill -TERM` 之后进程仍在）。现在 `startWebServer` 自己收尾：停泵、结束响应，
+  再关监听；`ends a live stream when the process is stopped` 就是这条的回归测试。
+- 断开的这句话**多久**出现：页面先读到「作业状态由 §13 的 job.updated 推送。」，`kill -TERM` 之后
+  **23ms** 的那一次采样就已经是「事件流已断开：下面这些行是上一次读到的快照，不是现在的状态。」
+  （上一版同一件事实测 0.84 秒；更早一次在一个 EventSource 建在改动之前的旧页面上要二十多秒）。
+  这三档差值都来自浏览器自己的重连判定，不是页面的判定，所以这条只作为"会说谎的那一格被堵住"的证据，
+  不作为延迟指标。
+- 变异：`mutate14.py` 十条（前导帧、泵的空转不结束、停止时不收流、两处 `job.updated` 写者与它们的
+  反例）**8 杀 2 存**，两条存下来的都是 `writableEnded` 上的守卫——按"杀不掉且因检查无可观察差别就改语义"
+  处理：`take()` 改成**先看关闭再看队列**（旧顺序会把已排队的帧交给一个已被停止结束的响应），两处守卫收敛成
+  一处并把写帧的循环抽成 `writeStreamFrames`，新增 `tests/unit/web-server-frames.test.ts` 三条把它钉住；
+  复跑 `mutate15.py` 五条，N1-N4 全杀，**N5 仍存**（`stopStream` 里不调 `pump.close()`：差别只在尾还会
+  多轮询一次，没有任何测试能读到），留着是因为流的拥有者该由打开它的地方关。两批跑完都逐字节核对还原
+  （`identical=True`）并现跑三支测试 `rc=0`。
+- 这一轮**没验到的**：截图与真指针点击仍拿不到（viewport 0×0），以上都是真页面里派发真 DOM 事件；
+  **两个标签页互相看见**没测——本轮只证明了一个订阅者收得到，多标签的扇出靠的是同一份 outbox，没读；
+  `graph.updated`／`evidence.committed`／`report.stale` 这些别的事件名页面**不监听**（只有 `job.updated`
+  会让面板重读），这是选择不是遗漏：其余面板各有各的门。
+
 浏览器实测·第十轮（2026-10-17 08:39–08:40 UTC，同一套三个真进程；这一轮加的是**页面上剩下的两把手**：
 落地页的「创建项目」（§8 的 `POST /projects`）与样本 tab 的「上传采集」（line 272 的 multipart 门），
 顺带把六个写控件共用的两句"能不能发"收成一处）：
@@ -768,9 +812,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   仍未裁决的两点留在 #75：提交的字节走 staging 还是 RPC body（现在按 `evaluatorCompletionSchema` 的
   `reportStagingId + reportSha256`，即前者），以及谁把 `queued` 变 `running`（本 build 的答案是"没人"，
   所以才有上面那格报警）。
-- 页面**没有订阅 §13 的 `job.updated`**：作业面板只在一次门答完之后重读清单，所以 worker 泵循环推进的行
-  不会自己刷新（第九轮读到过一屏 `queued` 与四个 `succeeded` 并存——那是上一次的快照，不是服务在骗人）。
-  事件流与 SSE 门本身是通的（`tests/unit/web-proxy-route.test.ts` 把「不缓冲」钉住了），缺的是这个页面用它。
+- 页面**已订阅 §13 的 `job.updated`**（issue #85，第十一轮读到的是不重载就翻页）：一帧到达就是"整页重读"，
+  面板不由事件自己拼状态，读门仍是页面唯一的来源；断开时那一行改说「下面这些行是上一次读到的快照，不是现在的
+  状态」。仍然留着的两格边界：`job.cleanup-retry` 只重排租约、不改作业行，所以它**不产生**事件（写了就是
+  给没动的行编状态）；别的事件名（`graph.updated`／`evidence.committed`／`report.stale`）页面不监听，
+  多标签页之间的扇出没在真浏览器里读过。
 - 作业失败的原因现在**只有一个写者**：`packages/application/job-queue.ts` 的 `jobErrorFromFailure`，
   执行者与 HAR 导入两处都走它。此前导入那两处写的是 `{code, reason}`——`JobRecord.error` 按 §8 是
   `ApiError`，于是一个失败行不是「一行失败」，而是让那个项目**每一页作业都读不出来**；本轮由 V17 变异钉住

@@ -99,7 +99,10 @@ export function createJobRunner(deps: {
         projectId: job.projectId,
         type: "job.updated",
         aggregateId: job.id,
-        payloadJson: { resourceIds: [job.id], state: to, reason: failure.reason },
+        // `reasonCode`, not `reason`: §8.1's payload contract is a strict object, so a key it does
+        // not name does not merely go undelivered - it makes `GET /events` refuse the whole backlog
+        // for that project forever, which is one failed job killing the stream for every later one.
+        payloadJson: { resourceIds: [job.id], state: to, reasonCode: failure.reason },
         createdAt: deps.now(),
       } satisfies EventDraft);
       return to;
