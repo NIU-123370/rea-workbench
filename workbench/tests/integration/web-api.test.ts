@@ -380,7 +380,17 @@ describe("pairing a local session (DESIGN §14, D30)", () => {
       body: JSON.stringify({ bootstrapToken: `deadbeef-no-such-code` }),
       headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
     });
-    expect(refused.status).toBe(401);
+    // The query name alone ends the request now (§14's ban on a token in a URL is enforced at the edge
+    // as "this route takes no query", which refuses before the body is read at all). The body's own
+    // bogus code still gets its 401 further down, and neither path may spend the live code or print it.
+    expect(refused.status).toBe(400);
+    expect(refused.text).toContain("query-not-accepted");
+    expect(refused.text).not.toContain(live.token);
+    const bodyOnly = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: "deadbeef-no-such-code" }),
+      headers: { host: `127.0.0.1:${String(address.port)}`, origin: `http://127.0.0.1:${String(address.port)}` },
+    });
+    expect(bodyOnly.status).toBe(401);
     expect(access.lines.slice(linesBefore).join("\n")).not.toContain(live.token);
     expect(access.lines.join("\n")).not.toContain("bootstrapToken=");
     // The live code is still live: nothing in the query spent it.
@@ -4314,5 +4324,116 @@ describe("the comparator policy read (issue #82)", () => {
     // What it reports is this build, so two sessions must not be able to read two answers - and the
     // route takes no project segment, which is why no project's data can ride along with it.
     expect(second.text).toBe(first.text);
+  });
+});
+
+// The query surface (§8's rows, issue #63). What the table names is what a route takes: a name it does
+// not implement is refused by name instead of being dropped on the way to a full answer, because an
+// unanswered filter that reads as an answered one is the same mistake §14 already forbids for
+// `limit=1.5`. Values never come back - only the offending names and a count.
+describe("the query surface takes what §8 names and nothing else (issue #63)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+
+  async function pair(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    return {
+      cookie: (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "",
+      csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "",
+    };
+  }
+
+  async function project(session: { cookie: string; csrf: string }, name: string): Promise<string> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `query-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return (body.data?.id ?? body.id) as string;
+  }
+
+  const get = (path: string, session: { cookie: string }) =>
+    call("GET", path, { headers: { host: host(), cookie: session.cookie } });
+
+  it("refuses a filter §8 does not give the vectors page a slot for", async () => {
+    const session = await pair();
+    const projectId = await project(session, "query-vectors");
+    const allowed = await get(`${API_PREFIX}/projects/${projectId}/vectors?targetId=${String(newId())}`, session);
+    expect(allowed.status, allowed.text).toBe(200);
+
+    const invented = await get(`${API_PREFIX}/projects/${projectId}/vectors?targetId=${String(newId())}&visibility=holdout-SECRET-VALUE`, session);
+    expect(invented.status).toBe(400);
+    const refusal = (JSON.parse(invented.text) as { error: { details: Record<string, unknown> } }).error.details;
+    expect(refusal["reason"]).toBe("vectors-query-unknown");
+    expect(JSON.stringify(refusal)).toContain("visibility");
+    // The value behind the name is not published: the name is the fact, the value is the caller's.
+    expect(invented.text).not.toContain("holdout-SECRET-VALUE");
+    // and nothing about the page moved: the refusal happened before any read
+    expect(refusal["unknownCount"]).toBe(1);
+  });
+
+  it("refuses a filter on the job page that §8 line 277 does not name", async () => {
+    const session = await pair();
+    const projectId = await project(session, "query-jobs");
+    // The two names §8 line 277 gives, exactly as it gives them. An empty `cursor=` is a *malformed*
+    // cursor, not an absent one, so it is not part of what this case is proving.
+    expect((await get(`${API_PREFIX}/projects/${projectId}/jobs?limit=10`, session)).status).toBe(200);
+    const filtered = await get(`${API_PREFIX}/projects/${projectId}/jobs?state=queued`, session);
+    expect(filtered.status).toBe(400);
+    expect(JSON.stringify(filtered.text)).toContain("jobs-query-unknown");
+  });
+
+  it("refuses §8's own graph slot rather than answering an unfiltered graph", async () => {
+    const session = await pair();
+    const projectId = await project(session, "query-graph");
+    // `afterRevision` is the name §8 line 280 lists. Nothing in this build reads a graph as of a
+    // revision, so the honest answer is a refusal that says so - not the whole graph with a 200 that
+    // looks like the filter worked. (This is the second half of issue #63's shape: an unused name in
+    // the contract and an unimplemented name in the doc are the same failure wearing different clothes.)
+    const revision = await get(`${API_PREFIX}/projects/${projectId}/graph?afterRevision=3`, session);
+    expect(revision.status).toBe(400);
+    expect(JSON.stringify(revision.text)).toContain("graph-query-unknown");
+
+    // `targetId` is the deviation the other way: implemented by the worker's own request schema and
+    // listed nowhere in that row, so it is allowed here and said out loud in the README and in #63.
+    const named = newId();
+    const target = await get(`${API_PREFIX}/projects/${projectId}/graph?targetId=${named}`, session);
+    expect(target.status, target.text).toBe(200);
+    // A project with no rows answers with an empty view rather than an error, and says which target it
+    // read - the reply is honest about the miss instead of pretending the name was a filter.
+    const view = JSON.parse(target.text) as { data?: { targetId: string | null } } & { targetId?: string | null };
+    expect((view.data ?? view).targetId).toBeNull();
+  });
+
+  it("takes no query at all on the routes that name none", async () => {
+    const session = await pair();
+    const projectId = await project(session, "query-none");
+    expect((await get(`${API_PREFIX}/projects/${projectId}`, session)).status).toBe(200);
+    const withQuery = await get(`${API_PREFIX}/projects/${projectId}?limit=5`, session);
+    expect(withQuery.status).toBe(400);
+    expect(JSON.stringify(withQuery.text)).toContain("query-not-accepted");
+    // Both audit pages (§8 line 301-303) do take their two names, and nothing else.
+    expect((await get(`${API_PREFIX}/projects/${projectId}/audit?after=0&limit=5`, session)).status).toBe(200);
+    expect((await get(`${API_PREFIX}/projects/${projectId}/audit?since=yesterday`, session)).status).toBe(400);
+
+    // The order is §14's: who you are is answered before what you asked. An anonymous request with a
+    // bad parameter learns it has no session, not that the parameter is unknown - the query gate runs
+    // after the session and CSRF gates, so a refused query never becomes a free probe of what exists.
+    const anonymous = await call("GET", `${API_PREFIX}/projects/${projectId}/vectors?visibility=public`, { headers: { host: host() } });
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.text).toContain("cookie-absent");
   });
 });

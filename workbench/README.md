@@ -298,6 +298,29 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 这条读门答的就是 `findComparatorPolicy` 查的那一份常量（不是第二份清单），并且**不带 default、不带
 recommended、不重排序**：两条里 alphabetically 排第一的恰好是松的那档，而 §10 禁的正是把松的一档当默认。
 页面上原来那个手打的输入框因此换成从这份清单里选（首项是"还没有选"，页面不预选任何一档）。
+
+**query 面也按同一把尺子量了（issue #63）**。上面那段说的是"路由有没有挂"，这一节管的是"挂上的那条
+收哪些参数"：路由表旁边多了一张 `ROUTE_QUERY`，逐条列出 §8 那一行点名的 query 名字，**表里没有的名字一律
+具名拒绝**（`vectors-query-unknown` / `jobs-query-unknown` / `audit-query-unknown` / `graph-query-unknown` /
+`events-query-unknown` / 其余路由 `query-not-accepted`），拒绝在会话与 CSRF 门**之后**、任何读动作之前。
+这补的是一个此前没人抓的失败形状：`?visibility=holdout` 会被静静丢掉然后回一整页——那和 §14 已经禁止的
+`limit=1.5` 被读成 1 是同一件事（**没被看的条件长得像被满足了的条件**）。细节只发名字与计数，
+query 的**值**不回显（用例里用 `holdout-SECRET-VALUE` 钉着）。
+
+同一把尺子立刻量出两处反向偏差，都记在这里而不是抹平：图读那一行 §8 只写 `afterRevision?:integer`，
+而**这个 build 没有按修订读图的能力**（`graph.read` 的请求只有 `targetId?`），所以现在 `?afterRevision=3`
+是被具名拒掉的——它不给一张"看起来过滤过了"的整图；反过来代码**多收一个 §8 没点的 `targetId`**，
+因为 worker 自己的 `graphReadRequestSchema` 实现了它、回包也会说它选了哪个目标。
+这两条都是文档侧要裁决的事（要么给 `afterRevision` 补上语义，要么把它从那一行拿掉；要么把 `targetId`
+写进那一行），我按"代码已有的行为 + 文档点名的槽位不假装实现"处理，**没动 docs**。
+
+还有一处要按同一标准纠正我自己：#63 的正文写着「PRD F06 要四个样本过滤维度（操作/覆盖状态/时间/库存版本）」——
+**三份文档里搜不到"筛选"二字，F06 那一行也只是一个 P0 特性标题**（从持久 Evidence 创建/读取/审阅 vectors…）。
+那四个维度是我从 `contracts/vectors.ts` 里那份 `vectorListQuerySchema` 反推出来的，而那份 schema 恰好
+**零调用方**——把死代码当需求读，得出的"文档有洞"自然是幻觉。这是本仓第四次犯"没读全就宣称文档有洞"
+（前三次：#19 的 §3 名录、#55 的 §8 路由、#58 的主张清单），已在本条 issue 的评论里公开改正。
+`vectorListQuerySchema` 与它的类型一起删了（不留无人调用的契约），`vectorPageQuerySchema` 保留——
+它是 worker 侧 `vector.list` 真在用的那个（composition 里 `safeParse`）。
 这一轮补的是最后一条**挂得上**的 `POST /projects/:p/jobs`（275）。它缺的从来不是路由形状而是**判定者**，
 所以门里每一条规则都指着一个已有的人：体的 `task` 是 `contracts/tasks.ts` 那份具名联合（本仓此前只有
 契约测试读它，没有第二个调用者）；`expectedGraphRevision` 在这里是**必填并真的比对**——§8 表下那句
