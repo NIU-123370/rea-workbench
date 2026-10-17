@@ -1,9 +1,9 @@
 import path from "node:path";
 
 // The Builder's role context (DESIGN §3 `packages/adapters/agents` = 独立角色上下文与工具清单,
-// §5 line 425, §7.3, §10 / PRD A07, issue #19).
+// §12 line 425, §7.3, §10 / PRD A07, issue #19).
 //
-// §5 says the Builder sees its blueprint class and its own output directory and nothing
+// §12 says the Builder sees its blueprint class and its own output directory and nothing
 // else - not the raw Evidence, not the original upload, not the Inspector's logs or model
 // history, not a holdout, not the host HOME, not provider configuration. That is a statement
 // about *what a role is handed*, so it belongs in a module that decides exactly that, and it
@@ -12,7 +12,7 @@ import path from "node:path";
 //
 // What this deliberately does not claim: process isolation here is not the sandbox the broker
 // will provide (§11). A separate process with a scoped file view and a rebuilt environment is
-// the boundary §5 names for this role; it is not a namespace, and it does not pretend to be.
+// the boundary §12 names for this role; it is not a namespace, and it does not pretend to be.
 
 export const BUILDER_ROLE_ID = "builder";
 

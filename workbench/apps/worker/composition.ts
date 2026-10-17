@@ -532,7 +532,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
-  // §2 and §5 line 425 put the Builder in its own process with its own file view, so the
+  // §2 and §12 line 425 put the Builder in its own process with its own file view, so the
   // worker hands the role one handoff file in a directory the role owns and verifies what
   // comes back. The service still owns publishing and the candidate identity.
   const builder = new BuilderService({

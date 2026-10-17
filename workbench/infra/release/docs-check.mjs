@@ -47,9 +47,18 @@ const REF_REASON_BY_PREFIX = {
 // inline and says why, so the opt-out stays visible at the site instead of exempting a file.
 const IGNORE_MARKER = "docs-check-ignore";
 
+// `§13 line 453` is a *pair*: the section says which rule, the line says which sentence. A
+// renumbered document moves the sentence while the section stays, and then the citation reads
+// as authority for something the document no longer says there. Only anchors that carry a line
+// number can be checked — a bare `§11` names a section, not a place — and the pair is checked
+// against DESIGN.md because every line-anchored citation in this tree is a DESIGN one.
+const DESIGN_ANCHOR = /§(\d+)(?:\s*(?:line|lines)\s+(\d{1,4})(?:\s*-\s*(\d{1,4}))?)?/g;
+const DESIGN_HEADING = /^##\s*(\d+)\./;
+
 export const TESTPLAN_FILE = "docs/TESTPLAN.md";
 export const PRD_FILE = "docs/PRD.md";
 export const DECISIONS_FILE = "docs/DECISIONS.md";
+export const DESIGN_FILE = "docs/DESIGN.md";
 export const SOURCE_ROOTS = ["packages", "apps", "tests", "infra"];
 export const SOURCE_EXTENSIONS = [".ts", ".mts", ".mjs"];
 export const SKIPPED_DIRECTORIES = ["node_modules", ".next", "dist", "coverage"];
@@ -97,6 +106,99 @@ export function parseDecisionRows(markdown) {
     if (match !== null) rows.push(match[1]);
   }
   return rows;
+}
+
+/**
+ * DESIGN.md's `## 7. …` headings split the document into the sections a citation names. A
+ * section runs to the next H2 and the last one to the end of the file, so a citation's line
+ * number can be placed in a section even after the document grows.
+ * @param {string} markdown
+ * @returns {{ section: string, start: number, end: number }[]}
+ */
+export function parseDesignSections(markdown) {
+  const lines = markdown.split("\n");
+  /** @type {{ section: string, start: number, end: number }[]} */
+  const sections = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = DESIGN_HEADING.exec(lines[index] ?? "");
+    if (match !== null) sections.push({ section: String(match[1]), start: index + 1, end: lines.length });
+  }
+  for (let index = 0; index < sections.length - 1; index += 1) {
+    const current = sections[index];
+    const next = sections[index + 1];
+    if (current !== undefined && next !== undefined) current.end = next.start - 1;
+  }
+  return sections;
+}
+
+/**
+ * @param {string} file
+ * @param {string} text
+ * @returns {{ section: string, from: number | null, to: number | null, file: string, line: number }[]}
+ *   `from` is null for a citation whose line number fell onto the next comment line: the pair
+ *   is unreadable as a pair, and a scanner that quietly skipped it would certify a document
+ *   half of whose anchors it cannot see.
+ */
+export function findSectionAnchors(file, text) {
+  /** @type {{ section: string, from: number | null, to: number | null, file: string, line: number }[]} */
+  const found = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line.includes(IGNORE_MARKER)) continue;
+    const wrapped = /§(\d+)\s+(?:lines?)[\s]*$/.exec(line);
+    if (wrapped !== null) found.push({ section: String(wrapped[1]), from: null, to: null, file, line: index + 1 });
+    for (const match of line.matchAll(DESIGN_ANCHOR)) {
+      // A bare `§11` names a section, not a place, and carries nothing to verify.
+      if (match[2] === undefined) continue;
+      found.push({
+        section: String(match[1]),
+        from: Number(match[2]),
+        to: Number(match[3] ?? match[2]),
+        file,
+        line: index + 1,
+      });
+    }
+  }
+  return found;
+}
+
+/**
+ * @param {{ section: string, from: number | null, to: number | null, file: string, line: number }[]} anchors
+ * @param {{ section: string, start: number, end: number }[]} sections
+ * @param {number} designLines the length of DESIGN.md, so an off-the-end line is named as such
+ * @returns {string[]} one reason per citation whose section and line disagree
+ */
+export function checkSectionAnchors(anchors, sections, designLines) {
+  const reasons = [];
+  for (const anchor of anchors) {
+    const site = `${anchor.file}:${String(anchor.line)}`;
+    if (anchor.from === null) {
+      reasons.push(`design-anchor-wrapped:§${anchor.section} line(${site}) 行号掉到下一行，这一对读不出来源`);
+      continue;
+    }
+    const label = `§${anchor.section} line ${String(anchor.from)}${anchor.to !== null && anchor.to > anchor.from ? `-${String(anchor.to)}` : ""}`;
+    const to = anchor.to ?? anchor.from;
+    if (to > designLines) {
+      reasons.push(`design-anchor-past-end:${label}(${site}) DESIGN.md 共 ${String(designLines)} 行`);
+      continue;
+    }
+    const named = sections.find((section) => section.section === anchor.section);
+    if (named === undefined) {
+      reasons.push(`design-section-unknown:${label}(${site}) DESIGN.md 没有这一节`);
+      continue;
+    }
+    if (anchor.from >= named.start && to <= named.end) continue;
+    // Name the number that is actually outside, so the reason does not say "this line belongs to
+    // the very section it was cited against" when only the tail of a range left the section.
+    const offender = anchor.from < named.start || anchor.from > named.end ? anchor.from : to;
+    const owner = sections.find((section) => offender >= section.start && offender <= section.end);
+    reasons.push(
+      `design-anchor-outside-section:${label}(${site}) 该节是 ${String(named.start)}-${String(named.end)}，`
+      + `而行号 ${String(offender)} 属于 ${owner === undefined ? "文档开头（任何 ## 之前）" : `§${owner.section} ${String(owner.start)}-${String(owner.end)}`}`,
+    );
+  }
+  return reasons;
 }
 
 /**
@@ -218,6 +320,8 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
 
   /** @type {{ ref: string, file: string, line: number }[]} */
   const references = [];
+  /** @type {{ section: string, from: number | null, to: number | null, file: string, line: number }[]} */
+  const anchors = [];
   let filesScanned = 0;
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -231,8 +335,10 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
       }
       if (!SOURCE_EXTENSIONS.some((extension) => entry.name.endsWith(extension))) continue;
       const relative = path.relative(project, absolute);
+      const text = readFileSync(absolute, "utf8");
       filesScanned += 1;
-      references.push(...findIdReferences(relative, readFileSync(absolute, "utf8")));
+      references.push(...findIdReferences(relative, text));
+      anchors.push(...findSectionAnchors(relative, text));
     }
   };
   for (const sourceRoot of SOURCE_ROOTS) {
@@ -241,6 +347,10 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
     if (!existsSync(path.join(project, sourceRoot))) reasons.push(`source-root-missing:${sourceRoot}`);
     else walk(path.join(project, sourceRoot));
   }
+  const design = readFileSync(path.join(root, DESIGN_FILE), "utf8");
+  const designSections = parseDesignSections(design);
+  if (designSections.length === 0) reasons.push("design-sections-unreadable:no `## N.` heading matched");
+  reasons.push(...checkSectionAnchors(anchors, designSections, design.split("\n").length));
   reasons.push(...checkSourceReferences(references, {
     cases: parseTestCaseRows(testplan).map((row) => row.case),
     accepts: parseAcceptanceRows(prd),
@@ -250,7 +360,8 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
   const rows = parseTestCaseRows(testplan).length;
   const accepts = parseAcceptanceRows(prd).length;
   process.stdout.write(
-    `docs:check 用例 ${String(rows)} 条 / 验收 ${String(accepts)} 条 / 决策 ${String(declaredDecisions.length)} 条 / 源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）\n`,
+    `docs:check 用例 ${String(rows)} 条 / 验收 ${String(accepts)} 条 / 决策 ${String(declaredDecisions.length)} 条 / `
+    + `源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）/ 设计锚点 ${String(anchors.length)} 处（DESIGN ${String(designSections.length)} 节）\n`,
   );
   for (const reason of reasons) process.stdout.write(`- ${reason}\n`);
   process.exit(reasons.length > 0 ? 1 : 0);

@@ -7,9 +7,9 @@ import {
   planBuilderLaunch,
 } from "../../packages/adapters/agents/builder-role.ts";
 
-// The Builder role's launch plan (DESIGN §5 line 425, §7.3, §10 / PRD A07, issue #19).
+// The Builder role's launch plan (DESIGN §12 line 425, §7.3, §10 / PRD A07, issue #19).
 //
-// §5's promise is about what a role is *handed*: its blueprint and its own output directory,
+// §12's promise is about what a role is *handed*: its blueprint and its own output directory,
 // and not the host HOME, not provider configuration, not the data directory. That is checkable
 // as data, and every line below is a way the promise could be quietly untrue.
 
