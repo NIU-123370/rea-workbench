@@ -179,6 +179,7 @@ function fakeWriter(state: FakeState): StorageWriterPort {
   const tx: StorageTransaction = {
     getProject: (projectId: Id) => state.projects.get(projectId) ?? null,
     getTarget: (projectId: Id, targetId: Id) => state.targets.get(`${projectId}|${targetId}`) ?? null,
+    listProjectsAfter: refused("listProjectsAfter", state),
     getArtifact: (projectId: Id, artifactId: Id) => state.artifacts.get(`${projectId}|${artifactId}`) ?? null,
     listEvidenceIdsForTarget: refused("listEvidenceIdsForTarget", state),
     findImportJobForTarget: refused("findImportJobForTarget", state),

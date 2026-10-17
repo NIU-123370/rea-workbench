@@ -6,7 +6,7 @@ import {
   sessionViewSchema,
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
-import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema, targetCreateRequestSchema, targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
+import { createProjectRequestSchema, createUrlTargetRequestSchema, createdProjectSchema, evidenceViewSchema, projectPageSchema, projectViewSchema, targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
@@ -87,6 +87,10 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "DELETE", template: `${API_PREFIX}/session`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/health`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
+  // §8 line 270's project page. It is the one list in this table that is not scoped to a project,
+  // so it is also the one read whose actor rule (§7.3: 仅本地操作者) is decided inside the service
+  // rather than by a project id on the path.
+  { method: "GET", template: `${API_PREFIX}/projects`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/events`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The graph read the three columns are built from (§6, §8 / issue #18). It is a GET
   // with no body: the target it names, if any, comes from the query, so a page can ask
@@ -979,12 +983,40 @@ async function readContract(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   return jsonSuccess(ctx.requestId, 200, revision.value);
 }
 
+async function listProjects(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  // The same shape the job page uses: a limit that is not a whole number is refused here rather
+  // than turned into NaN on the way to the worker, and an absent page marker stays null.
+  const rawLimit = ctx.request.query.limit;
+  if (rawLimit !== undefined && !/^\d+$/.test(rawLimit)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "projects-limit-malformed", "the limit in the query is not a whole number", ctx.declaration);
+  }
+  const outcome = await deps.worker.call(
+    "projects.list",
+    { request: { cursor: ctx.request.query.cursor ?? null, limit: rawLimit === undefined ? null : Number(rawLimit) } },
+    ctx.actor,
+  );
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const page = parseStrict(projectPageSchema, outcome.value);
+  if (!page.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "projects-shape", "the worker did not answer with a project page", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, page.value);
+}
+
 async function declareTarget(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
   const body = readJsonBody(ctx);
   if (!body.ok) return body.response;
-  const request = parseStrict(targetCreateRequestSchema, jsonRecord(body.value));
+  // §8's body is `{kind:'url',url}` and `createUrlTargetRequestSchema` has owned that shape since
+  // the contracts were first written, so the door asks it rather than a second copy of itself.
+  // A *file* kind is named before the parse because the schema can only say "not url" while the
+  // operator needs the reason: a har or asar target is created by the import that brought it.
+  const declared = jsonRecord(body.value);
+  if (declared["kind"] === "har" || declared["kind"] === "asar") {
+    return refused(ctx.requestId, "INVALID_INPUT", "target-kind-needs-import", "a har or asar target is created by the import that brought the file (§8 line 272)", ctx.declaration);
+  }
+  const request = parseStrict(createUrlTargetRequestSchema, declared);
   if (!request.ok) return invalidBody(ctx, "the target declaration does not match its contract", request.error);
   const outcome = await deps.worker.call("target.create", { projectId, request: request.value }, ctx.actor);
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
@@ -1351,6 +1383,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readHealth(ctx, deps);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects`) {
       response = await createProject(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "GET" && route.template === `${API_PREFIX}/projects`) {
+      response = await listProjects(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/exports/:exportId/download")) {
       response = await downloadExport(ctx, deps);
     } else if (route.method === "POST" && route.template.endsWith("/exports")) {

@@ -15,7 +15,7 @@ import { runWebProcess } from "../../apps/web/main.ts";
 import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
-import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
+import { evidenceViewSchema, projectPageSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
 import { vectorCommitReceiptSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
 import { contractCommitReceiptSchema, contractRevisionSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
@@ -2867,5 +2867,110 @@ describe("the job lifecycle doors (§8 lines 278-279 / issue #58)", () => {
     expect(untouched.value.id).toBe(unownedLease);
     expect(untouched.value.cleanupState).toBe("failed");
     expect(untouched.value.retryCount).toBe(0);
+  });
+});
+
+describe("the project page (§8 line 270 / issue #58)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+
+  async function pairSession(): Promise<{ cookie: string; csrf: string }> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "" };
+  }
+
+  async function createProject(session: { cookie: string; csrf: string }, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `page-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  function get(session: { cookie: string }, query: string) {
+    return call("GET", `${API_PREFIX}/projects${query}`, { headers: { host: host(), cookie: session.cookie } });
+  }
+
+  function reason(text: string): string {
+    return (JSON.parse(text) as { error: { details: { reason: string } } }).error.details.reason;
+  }
+
+  it("walks every project exactly once and names the cursor it issued", async () => {
+    const session = await pairSession();
+    const mine = [
+      await createProject(session, "page-alpha"),
+      await createProject(session, "page-beta"),
+      await createProject(session, "page-gamma"),
+    ];
+
+    const first = await get(session, "?limit=1");
+    expect(first.status, first.text).toBe(200);
+    const page1 = projectPageSchema.safeParse(JSON.parse(first.text) as JsonValue);
+    if (!page1.success) throw new Error(page1.error.issues.map((i) => i.message).join("; ") + first.text);
+    expect(page1.data.items).toHaveLength(1);
+    expect(page1.data.nextCursor).not.toBeNull();
+    // The cursor names the last row this page actually showed - not the one after it, which is
+    // how a caller can tell a page from a promise.
+    const shown = page1.data.items[0];
+    expect(Buffer.from(String(page1.data.nextCursor), "base64url").toString("utf8")).toBe(shown?.id);
+    expect(Object.keys(shown ?? {}).sort()).toEqual(["graphRevision", "id", "inventoryRevision", "name"]);
+
+    const seen: string[] = [];
+    let cursor: string | null = page1.data.nextCursor;
+    let pages = 1;
+    while (cursor !== null && pages < 80) {
+      const next = await get(session, `?limit=5&cursor=${cursor}`);
+      expect(next.status, next.text).toBe(200);
+      const parsed = projectPageSchema.safeParse(JSON.parse(next.text) as JsonValue);
+      if (!parsed.success) throw new Error(next.text);
+      // A cursor that leads to an empty page is a server that promised a next page it could not
+      // deliver: `hasMore` is decided by the extra row the read asked for, and this is what makes
+      // that decision observable rather than a flag nothing can contradict.
+      expect(parsed.data.items.length, `page ${String(pages)} came back empty`).toBeGreaterThan(0);
+      seen.push(...parsed.data.items.map((item) => item.id));
+      cursor = parsed.data.nextCursor;
+      pages += 1;
+    }
+    // No repeats across pages, and every project this test made is reachable.
+    expect(new Set(seen).size).toBe(seen.length);
+    const everyPage = [shown?.id as string, ...seen];
+    expect(new Set(everyPage).size).toBe(everyPage.length);
+    for (const id of mine) expect(everyPage).toContain(id);
+  });
+
+  it("refuses a cursor this server did not issue and a limit that is not a number", async () => {
+    const session = await pairSession();
+    const forged = Buffer.from("not-a-project-id").toString("base64url");
+    const refused = await get(session, `?cursor=${forged}`);
+    expect(refused.status, refused.text).toBe(400);
+    expect(reason(refused.text)).toBe("projects-cursor");
+
+    const notANumber = await get(session, "?limit=abc");
+    expect(notANumber.status, notANumber.text).toBe(400);
+    expect(reason(notANumber.text)).toBe("projects-limit-malformed");
+
+    const tooMany = await get(session, "?limit=5000");
+    expect([413, 429]).toContain(tooMany.status);
+    const details = (JSON.parse(tooMany.text) as { error: { details: Record<string, number> } }).error.details;
+    expect(details["maxLimit"]).toBe(200);
+    expect(details["limit"]).toBe(5000);
+
+    const anonymous = await call("GET", `${API_PREFIX}/projects`, { headers: { host: host() } });
+    expect(anonymous.status, anonymous.text).toBe(401);
   });
 });

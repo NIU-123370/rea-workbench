@@ -31,6 +31,7 @@ const builder: Actor = { actorId: "builder-agent", actorKind: "builder" };
 const EXPECTED_COMMANDS: readonly string[] = [
   "project.create",
   "project.get",
+  "projects.list",
   "capture.importHar",
   "target.create",
   "target.read",
@@ -299,6 +300,17 @@ describe("named commands and the local RPC (§14)", () => {
       if (looked.ok) continue;
       expect(looked.error.code).toBe("NOT_FOUND");
     }
+  });
+
+  it("keeps the project page off every role but the control plane (§8 line 270)", async () => {
+    const refused = await request("projects.list", { request: {} }, builder);
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.code).toBe("ACCESS_DENIED");
+    expect(refused.error.reason).toBe("role-may-not-list-projects");
+    // The same command for the local operator answers, so the refusal is the role rule.
+    const listed = unwrap(await request("projects.list", { request: { limit: 1 } }, inspector)) as { items: unknown[]; nextCursor: string | null };
+    expect(Array.isArray(listed.items)).toBe(true);
   });
 
   it("refuses the two lifecycle commands for a Builder and answers them for the control plane (§8 lines 278-279)", async () => {

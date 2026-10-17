@@ -13,14 +13,6 @@ import {
 // Projects, targets and file imports (DESIGN §8). A file target is only ever
 // created by an import, and a URL target has no snapshot until it is captured.
 
-// §8 line 273's declaration. `kind` accepts the file kinds here and the service refuses them by
-// name, because the answer an operator needs is "a har target comes from an import", not a 400
-// that names the field and stops there.
-export const targetCreateRequestSchema = z.strictObject({
-  kind: z.enum(["url", "har", "asar"]),
-  url: nonEmptyString,
-});
-
 // What the declaration created: §8 line 273's shape is `pendingTargetSchema` above, and this adds
 // only `auditSeq` - where the same decision can be re-read in the journal. The unknown identity is
 // spelled out rather than implied: `snapshotDigest` stays null until something is captured.
@@ -33,6 +25,17 @@ export const targetCreatedSchema = z.strictObject({
 });
 
 export type TargetCreated = z.infer<typeof targetCreatedSchema>;
+
+// The project page (§8 line 270). The bounds are this repository's, in the same shape as the
+// job and inventory pages: §8 names a `limit` without a number, so the cap lives beside the
+// schema that enforces it and the read refuses an over-large page by name.
+export const PROJECT_LIST_DEFAULT_LIMIT = 50;
+export const PROJECT_LIST_MAX_LIMIT = 200;
+
+export const projectListQuerySchema = z.strictObject({
+  cursor: nonEmptyString.nullable().optional(),
+  limit: z.int().min(1).nullable().optional(),
+});
 
 export const createProjectRequestSchema = z.strictObject({
   name: nonEmptyString,
@@ -60,6 +63,12 @@ export const pagedSchema = <T extends z.ZodTypeAny>(items: T) =>
     // A cursor the server mints; callers never construct one.
     nextCursor: z.string().min(1).max(512).nullable(),
   });
+
+// §8 line 270's project page: the shared page shape over the summary the graph read already uses.
+export const projectPageSchema = pagedSchema(projectSummarySchema);
+
+export type ProjectSummary = z.infer<typeof projectSummarySchema>;
+export type ProjectPage = z.infer<typeof projectPageSchema>;
 
 export const projectViewSchema = z.strictObject({
   id: idSchema,
