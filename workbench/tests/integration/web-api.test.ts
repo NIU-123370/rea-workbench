@@ -19,6 +19,7 @@ import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/
 import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
 import { vectorCommitReceiptSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
 import { contractCommitReceiptSchema, contractRevisionSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
+import { targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
@@ -1045,7 +1046,7 @@ describe("the §8 read routes (issue #58)", () => {
     return call("GET", pathname, { headers: { host: `127.0.0.1:${String(address.port)}`, cookie } });
   }
 
-  it("mounts exactly the eight documented reads and refuses each one unpaired", async () => {
+  it("mounts exactly the nine documented reads and refuses each one unpaired", async () => {
     const id = newId();
     for (const pathname of [
       `${API_PREFIX}/projects/${id}`,
@@ -1056,6 +1057,7 @@ describe("the §8 read routes (issue #58)", () => {
       `${API_PREFIX}/projects/${id}/contracts/${id}`,
       `${API_PREFIX}/projects/${id}/verifications/${id}`,
       `${API_PREFIX}/projects/${id}/blueprints/${id}`,
+      `${API_PREFIX}/projects/${id}/targets/${id}`,
     ]) {
       const anonymous = await call("GET", pathname);
       expect(`${pathname}:${String(anonymous.status)}`).toContain("401");
@@ -2121,6 +2123,100 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     expect(body.error.details["reasonCount"]).toBe(1);
     expect(body.error.details["reason"]).toBe("plan-not-approved");
     expect(JSON.stringify(body.error.details)).not.toContain("contract-not-approved");
+  });
+
+  function declareTarget(session: FreezeSession, body: Record<string, JsonValue>) {
+    return call("POST", `${API_PREFIX}/projects/${String(session.projectId)}/targets`, {
+      body: JSON.stringify(body),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "content-type": "application/json",
+        "x-csrf-token": session.csrf,
+      },
+    });
+  }
+
+  it("declares a URL target and reads its unknown identity back (§8 lines 273-274)", async () => {
+    const paired = await pairSession();
+    const projectId = await freshProject(paired, "door-target");
+    const session: FreezeSession = { ...paired, projectId };
+    const path = `${API_PREFIX}/projects/${String(projectId)}/targets`;
+    const created = await declareTarget(session, { kind: "url", url: "https://shop.example/cart" });
+    expect(created.status, created.text).toBe(201);
+    const declared = targetCreatedSchema.safeParse(JSON.parse(created.text) as JsonValue);
+    if (!declared.success) throw new Error(created.text);
+    expect(declared.data.kind).toBe("url");
+    expect(declared.data.snapshotDigest).toBeNull();
+    expect(declared.data.identityReason).toBe("url-declared-not-captured");
+    expect(declared.data.auditSeq).toBeGreaterThan(0);
+
+    const read = await call("GET", `${path}/${declared.data.id}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(read.status, read.text).toBe(200);
+    const view = targetViewSchema.safeParse(JSON.parse(read.text) as JsonValue);
+    if (!view.success) throw new Error(read.text);
+    // Nothing has been captured, so every identity column stays null and both lists are empty -
+    // and the reason string is what says "declared", not "the capture could not identify it".
+    expect(view.data.sourceSha256).toBeNull();
+    expect(view.data.evidenceIds).toEqual([]);
+    expect(view.data.importJobId).toBeNull();
+    // §5: the stored locator does not come back out through this surface.
+    expect(JSON.stringify(view.data)).not.toContain("shop.example");
+
+    const journal = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/audit?limit=20`, { headers: { host: host(), cookie: session.cookie } });
+    const journalBody = JSON.parse(journal.text) as { entries?: { action: string }[]; data?: { entries?: { action: string }[] } };
+    const actions = ((journalBody.data?.entries ?? journalBody.entries) ?? []).map((entry) => entry.action);
+    expect(actions).toContain("target.create");
+
+    // A retried declaration makes a second row. §8 line 261 does not name targets among the
+    // creations that carry an Idempotency-Key, so this door honours the document literally and
+    // records the replay question as a deviation on issue #58 rather than inventing a key.
+    const again = await declareTarget(session, { kind: "url", url: "https://shop.example/cart" });
+    expect(again.status, again.text).toBe(201);
+    const againBody = JSON.parse(again.text) as { id?: string; data?: { id: string } };
+    expect((againBody.data?.id ?? againBody.id) as string).not.toBe(declared.data.id);
+  });
+
+  it("refuses each target declaration with the reason that explains it", async () => {
+    const paired = await pairSession();
+    const projectId = await freshProject(paired, "door-target-refused");
+    const session: FreezeSession = { ...paired, projectId };
+    const path = `${API_PREFIX}/projects/${String(projectId)}/targets`;
+    const detailsOf = async (body: Record<string, JsonValue>) => {
+      const response = await declareTarget(session, body);
+      expect(response.status, response.text).toBe(400);
+      return (JSON.parse(response.text) as { error: { details: { reason?: string; fields?: string[] } } }).error.details;
+    };
+    // A file target comes from the import that brought the file; the door says that instead of
+    // answering "bad value in field kind".
+    expect((await detailsOf({ kind: "har", url: "https://shop.example/cart" })).reason).toBe("target-kind-needs-import");
+    expect((await detailsOf({ kind: "url", url: "https://user:token@shop.example/cart" })).reason).toBe("url-credentials-forbidden");
+    expect((await detailsOf({ kind: "url", url: "file:///etc/passwd" })).reason).toBe("url-scheme-not-http:file");
+    expect((await detailsOf({ kind: "url", url: "https://shop.example/x#access_token=1" })).reason).toBe("url-fragment-forbidden");
+    expect((await detailsOf({ kind: "url" })).fields).toContain("url");
+
+    const malformed = await call("GET", `${path}/not-an-id`, { headers: { host: host(), cookie: session.cookie } });
+    expect(malformed.status, malformed.text).toBe(400);
+    expect((JSON.parse(malformed.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("target-id-malformed");
+    const unknown = await call("GET", `${path}/${String(newId())}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(unknown.status, unknown.text).toBe(404);
+    expect((JSON.parse(unknown.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("target-unknown");
+
+    // The POST gate order, on this door: no cookie is 401, and a session without its CSRF header
+    // is 403 rather than a row.
+    const anonymous = await call("POST", path, {
+      body: JSON.stringify({ kind: "url", url: "https://shop.example/cart" }),
+      headers: { host: host(), origin: `http://${host()}`, "content-type": "application/json" },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+    expect(anonymous.text).toContain("cookie-absent");
+    const noCsrf = await call("POST", path, {
+      body: JSON.stringify({ kind: "url", url: "https://shop.example/cart" }),
+      headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "content-type": "application/json" },
+    });
+    expect(noCsrf.status, noCsrf.text).toBe(403);
+    expect(noCsrf.text).toContain("csrf-token-missing");
   });
 
   it("reads a frozen blueprint back over HTTP with the plan id for this role (§8 line 293)", async () => {

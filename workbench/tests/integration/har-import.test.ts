@@ -6,10 +6,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { TargetService } from "../../packages/application/target-service.ts";
 
 import { digestBytes } from "../../packages/domain/canonical-json.ts";
 import { asDigest } from "../../packages/domain/canonical-json.ts";
-import { newId, nowInstant } from "../../packages/domain/identity.ts";
+import { asId, newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import { acquireWorkerLock, applyMigrations, openWriteConnection, planMigrations } from "../../packages/adapters/storage/database.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
@@ -289,6 +290,9 @@ describe("import creates the trio atomically (DESIGN §5, §8)", () => {
     expect(projectRows("targets", projectId).length).toBe(1);
   });
 
+  // §8 line 274's view, read against a target a real import created: the two columns the target
+  // row does not carry (which evidence came from it, which job imported it) are the point of the
+  // read, and an empty answer would also pass a query whose WHERE clause had been dropped.
   it("requires a declaration context before staging anything", async () => {
     const before = await countStoredFiles(root);
     const failure = failureOf(await ingestion.importCapture(projectId, inspectorActor, command({ nonce: "nodecl" }), harBytes, emptyContext));
@@ -473,6 +477,73 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
     const journal = unwrapStorage(readAudit(writer, { after: 0, projectId: otherProjectId, limit: 50 }));
     expect(journal.some((entry) => entry.reasonCode === "resource-constraint-reference-retained" && entry.decision === "deny")).toBe(true);
   });
+
+  it("reads back the evidence and the import job a captured target owns (§8 line 274)", async () => {
+    const targets = new TargetService({ storage: writer });
+    const view = unwrapAsync(targets.read(projectId, inspectorActor, asId(receipt.targetId)));
+    expect(view.id).toBe(receipt.targetId);
+    expect(view.kind).toBe("har");
+    expect(view.sourceSha256).not.toBeNull();
+    expect(view.snapshotDigest).not.toBeNull();
+    // A captured target has no identity *reason*: the column is for the unknown, and null here is
+    // what keeps "declared, not captured" from looking the same as "capture could not identify".
+    expect(view.identityReason).toBeNull();
+    // Compared against the rows that exist rather than against a spelled-out id: the point is
+    // that the read names this target's evidence and nobody else's, so a dropped WHERE clause and
+    // an invented id would both show up here.
+    const stored = (db.prepare("SELECT id FROM evidence_records WHERE target_id = ? ORDER BY id ASC").get(receipt.targetId) !== undefined
+      ? (db.prepare("SELECT id FROM evidence_records WHERE target_id = ? ORDER BY id ASC").all(receipt.targetId) as { id: string }[])
+      : []
+    ).map((row) => row.id);
+    expect(stored.length).toBeGreaterThan(0);
+    expect(view.evidenceIds).toEqual(stored);
+    expect(view.importJobId).toBe(receipt.jobId);
+
+    const builder = { actorId: "builder-agent", actorKind: "builder" } as const;
+    const refused = targets.read(projectId, builder, asId(receipt.targetId));
+    expect(!refused.ok && refused.error.reason).toBe("role-may-not-read-targets");
+    const refusedDeclare = targets.declare(projectId, builder, { kind: "url", url: "https://shop.example/cart" });
+    expect(!refusedDeclare.ok && refusedDeclare.error.reason).toBe("role-may-not-declare-targets");
+
+    // A second, freshly declared target in the same project is what makes the two new reads mean
+    // something: without the target filter each of them would answer from the imported target's
+    // rows, and both would still look plausible.
+    const declaredId = asId(unwrapAsync(targets.declare(projectId, inspectorActor, { kind: "url", url: "https://shop.example/other" })).id);
+    const empty = unwrapAsync(targets.read(projectId, inspectorActor, declaredId));
+    expect(empty.evidenceIds).toEqual([]);
+    expect(empty.importJobId).toBeNull();
+    expect(empty.identityReason).toBe("url-declared-not-captured");
+    expect(empty.snapshotDigest).toBeNull();
+
+    // A job that is not an import does not answer `importJobId`: §8 line 272 names the inspect
+    // ingestion job, and a capture row for the same target must not be reported as one.
+    const jobId = newId();
+    const created = nowInstant();
+    const inserted = writer.transact((tx) => {
+      const outcome = tx.insertJob({
+        id: jobId,
+        projectId,
+        targetId: declaredId,
+        kind: "capture",
+        state: "queued",
+        cleanupState: "pending",
+        inputJson: {},
+        resultRef: null,
+        errorJson: null,
+        idempotencyKey: `capture-${jobId}`,
+        requestDigest: asDigest("e".repeat(64)),
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: created,
+        updatedAt: created,
+      });
+      if (outcome.outcome !== "inserted") throw new Error(`job ${outcome.outcome}`);
+      return true;
+    });
+    if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+    expect(unwrapAsync(targets.read(projectId, inspectorActor, declaredId)).importJobId).toBeNull();
+  });
+
 });
 
 describe("the shared decision unit refuses without leaving rows (DESIGN §12.2)", () => {

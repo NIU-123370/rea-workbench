@@ -12,6 +12,7 @@ import * as id from "../../packages/domain/id.ts";
 import * as identity from "../../packages/domain/identity.ts";
 import * as openApi from "../../packages/domain/openapi.ts";
 import * as plan from "../../packages/domain/plan.ts";
+import * as target from "../../packages/domain/target.ts";
 import * as inventory from "../../packages/domain/inventory.ts";
 import * as jsonValue from "../../packages/domain/json-value.ts";
 import * as report from "../../packages/domain/report.ts";
@@ -37,6 +38,7 @@ const MODULES: Record<string, unknown> = {
   "identity.ts": identity,
   "openapi.ts": openApi,
   "plan.ts": plan,
+  "target.ts": target,
   "inventory.ts": inventory,
   "json-value.ts": jsonValue,
   "report.ts": report,

@@ -428,6 +428,26 @@ class SqliteTransaction implements StorageTransaction {
       );
   }
 
+  listEvidenceIdsForTarget(projectId: Id, targetId: Id, limit: number): string[] {
+    const rows = this.db
+      .prepare(
+        "SELECT id FROM evidence_records WHERE project_id = ? AND target_id = ? ORDER BY id ASC LIMIT ?",
+      )
+      .all(projectId, targetId, limit) as Row[];
+    return rows.map((row) => String(row["id"]));
+  }
+
+  findImportJobForTarget(projectId: Id, targetId: Id): JobRow | null {
+    // An import is the job that *produced* this target's evidence, so a row whose target id is
+    // not this one cannot answer it; newest first because a re-import is a new job, not an edit.
+    const row = this.db
+      .prepare(
+        "SELECT * FROM jobs WHERE project_id = ? AND target_id = ? AND kind = 'inspect' ORDER BY created_at DESC, id DESC LIMIT 1",
+      )
+      .get(projectId, targetId) as Row | undefined;
+    return row === undefined ? null : this.rowToJob(row);
+  }
+
   getEvidence(projectId: Id, evidenceId: string): EvidenceRow | null {
     const row = this.db
       .prepare("SELECT * FROM evidence_records WHERE project_id = ? AND id = ?")

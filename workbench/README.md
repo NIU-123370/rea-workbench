@@ -275,7 +275,7 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **30 条**，仍缺 **10 条**。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **32 条**，仍缺 **8 条**。
 这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
@@ -381,6 +381,17 @@ details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键�
   bundle 的七个键就是 §7.3 那份名录。中途还有一次真实读数：计划没批的时候去冻结拿到
   **422 `BLUEPRINT_BLOCKED`**，而路径里 id 写成 `undefined` 时命中的正是新加的
   `blueprint-id-malformed` 400——不是 404。
+- 两条 target 门也在同一套 rig 里过了一遍（配对页面同源，2026-10-17 01:03）：
+  `POST .../targets` 交 `HTTPS://Shop.Example/Cart/../checkout?x=1` → **201**
+  `{kind:"url", snapshotDigest:null, identityReason:"url-declared-not-captured", auditSeq:14}`；
+  `GET .../targets/:t` → **200**，八个键里**没有 locator**（§5），`evidenceIds:[]`、`importJobId:null`；
+  带凭据的 URL → **400 `url-credentials-forbidden`**，`kind:"har"` → **400 `target-kind-needs-import`**。
+  磁盘侧独立核：`targets.original_locator` 存的是**序列化后**的 `https://shop.example/checkout?x=1`
+  （不是页面敲进去的那串），日志那一行 `actor_kind=reviewer`、`reason_code=url-declared`、
+  `safe_metadata_json={"host":"shop.example"}`——记的是主机，不是 locator。
+  顺带一条被测试纠正的期望：`url-host-missing` 那条规则**被删了**，因为 WHATWG 解析器让每一种
+  「看着没有 host」的写法都直接解析失败（`http://`、`//host/x`、`http:`），而 `https:///path`
+  反而把 `path` 提升成 host——留着那条检查就是留一条永远走不到的分支。
 - 两条新读门在同一轮里由配对页面同源取过：`GET .../contracts/da06…` 回 200、16 个键，
   `digest` = `ec5d1eec…9e62` 与库里那一行逐字相同，`review.status` 是 `draft`；
   `GET .../verifications/01d2…` 回 200、12 个键（**没有** `staleness`——§8 那一列写的是报告本身，
