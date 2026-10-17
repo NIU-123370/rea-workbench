@@ -32,6 +32,8 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "project.create",
   "project.get",
   "capture.importHar",
+  "target.create",
+  "target.read",
   "job.get",
   "jobs.list",
   "audit.list",

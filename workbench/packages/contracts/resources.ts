@@ -13,6 +13,27 @@ import {
 // Projects, targets and file imports (DESIGN §8). A file target is only ever
 // created by an import, and a URL target has no snapshot until it is captured.
 
+// §8 line 273's declaration. `kind` accepts the file kinds here and the service refuses them by
+// name, because the answer an operator needs is "a har target comes from an import", not a 400
+// that names the field and stops there.
+export const targetCreateRequestSchema = z.strictObject({
+  kind: z.enum(["url", "har", "asar"]),
+  url: nonEmptyString,
+});
+
+// What the declaration created: §8 line 273's shape is `pendingTargetSchema` above, and this adds
+// only `auditSeq` - where the same decision can be re-read in the journal. The unknown identity is
+// spelled out rather than implied: `snapshotDigest` stays null until something is captured.
+export const targetCreatedSchema = z.strictObject({
+  id: idSchema,
+  kind: z.literal("url"),
+  snapshotDigest: z.null(),
+  identityReason: nonEmptyString,
+  auditSeq: z.int().nonnegative(),
+});
+
+export type TargetCreated = z.infer<typeof targetCreatedSchema>;
+
 export const createProjectRequestSchema = z.strictObject({
   name: nonEmptyString,
 });

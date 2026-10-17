@@ -37,6 +37,7 @@ import type { PairingCode } from "../../packages/application/session.ts";
 import { normalizeEventLimit, toStreamEvents } from "../../packages/application/event-stream.ts";
 import { VectorService } from "../../packages/application/vector-service.ts";
 import { ContractService } from "../../packages/application/contract-service.ts";
+import { TargetService } from "../../packages/application/target-service.ts";
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
@@ -102,6 +103,10 @@ export const COMMAND_NAMES = [
   "project.create",
   "project.get",
   "capture.importHar",
+  // The two target routes (§8 lines 273-274). Declaring a URL target and reading one back are
+  // commands like any other, so the actor kind arrives on the frame and the service decides.
+  "target.create",
+  "target.read",
   "job.get",
   // The project's job page (§8 line 277): the documented way to recover a build or
   // verification resource id, because each row carries its persisted resultRef.
@@ -447,6 +452,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     facts: new WebCaptureEvidenceFacts({ storage: writer, artifacts: store, limits: LIMITS }),
     limits: LIMITS,
   });
+  const targets = new TargetService({ storage: writer });
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
@@ -562,6 +568,15 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
           recentJobIds: read.value.recentJobIds,
         },
       });
+    },
+    "target.create": (payload, actor) => relay(
+      targets.declare(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {}),
+    ),
+    "target.read": (payload, actor) => {
+      const targetId = pickId(payload, "targetId");
+      const refused = missing(targetId);
+      if (refused !== null) return refused;
+      return relay(targets.read(projectIdOr(payload), actor, targetId as Id));
     },
     "capture.importHar": async (payload, actor) => {
       const projectId = pickId(payload, "projectId");

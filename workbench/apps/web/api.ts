@@ -6,7 +6,7 @@ import {
   sessionViewSchema,
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
-import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
+import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema, targetCreateRequestSchema, targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
@@ -124,6 +124,12 @@ const ROUTES: readonly RouteSpec[] = [
   // plan it was cut from. No route here reaches a source manifest or a holdout list; §8 says so
   // for every role, and `blueprintReadSchema` has no field they could arrive in.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/blueprints/:blueprintId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The two target routes (§8 lines 273-274). The declaration is not in §8 line 261's list of
+  // creations that carry an Idempotency-Key, so the door honours the document literally and the
+  // replay question - what does a retried declaration make? - is answered by the row's identity
+  // being fresh each time. Recorded as a deviation on issue #58 rather than fixed by invention.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/targets`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/targets/:targetId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The three review writes (§8 lines 285, 287, 291). Session-bound and mutating, and - unlike
   // the creations §8 line 261 lists - they take no Idempotency-Key: a review carries its own
   // conflict token (the digest it looked at, and for the inventory-bound two the revision they
@@ -958,6 +964,38 @@ async function readContract(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   return jsonSuccess(ctx.requestId, 200, revision.value);
 }
 
+async function declareTarget(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const request = parseStrict(targetCreateRequestSchema, jsonRecord(body.value));
+  if (!request.ok) return invalidBody(ctx, "the target declaration does not match its contract", request.error);
+  const outcome = await deps.worker.call("target.create", { projectId, request: request.value }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const created = parseStrict(targetCreatedSchema, outcome.value);
+  if (!created.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "target-create-shape", "the worker did not answer with a created target", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 201, created.value);
+}
+
+async function readTarget(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const targetId = pathId(ctx, "targetId");
+  if (projectId === null) return unknownProject(ctx);
+  if (targetId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "target-id-malformed", "the target segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("target.read", { projectId, targetId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const view = parseStrict(targetViewSchema, outcome.value);
+  if (!view.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "target-shape", "the worker did not answer with a target view", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, view.value);
+}
+
 // §8 line 293. One path segment, one id, no query: the blueprint is named, not searched, and
 // the reply is the same bundle the Builder was handed - which is the point of reading it back:
 // two roles looking at one frozen thing see the same bytes.
@@ -1309,6 +1347,10 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readVerification(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/blueprints/:blueprintId")) {
       response = await readBlueprint(ctx, deps);
+    } else if (route.method === "POST" && route.template.endsWith("/targets")) {
+      response = await declareTarget(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/targets/:targetId")) {
+      response = await readTarget(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {

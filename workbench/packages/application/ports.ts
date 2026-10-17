@@ -315,6 +315,11 @@ export type StorageTransaction = {
   // Which target a project should be looked at through is a bounded listing, newest
   // first; the row stays the only owner of a target's identity (§5).
   listTargetsForProject(projectId: Id, limit: number): TargetRow[];
+  // §8 line 274's target view names the evidence a target produced and the job that imported it.
+  // Neither is a column on the target row - the evidence points at the target, and the job owns
+  // the relationship - so the read asks for them by name and stays bounded.
+  listEvidenceIdsForTarget(projectId: Id, targetId: Id, limit: number): string[];
+  findImportJobForTarget(projectId: Id, targetId: Id): JobRow | null;
   upsertProjectRevision(projectId: Id, increments: { graph?: number; inventory?: number }): number;
   insertJob(row: JobRow): JobIdempotency;
   updateJob(row: JobRow): void;
