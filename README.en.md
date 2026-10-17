@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/rea-workbench-hero.png" alt="REA Workbench promotional concept art inspired by software archaeology and evidence graphs" width="100%" />
+<a href="docs/assets/rea-workbench-promo-30s.mp4">
+  <img src="docs/assets/rea-workbench-hero.png" alt="Play the 30-second REA Workbench promo" width="100%" />
+</a>
 
 # REA Workbench
 
@@ -10,13 +12,38 @@ Local software archaeology. Evidence first.
 
 [![CI](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml) ![Stage: Early Development](https://img.shields.io/badge/stage-early%20development-f0b44d) [![REA baseline: 6.4.0](https://img.shields.io/badge/REA%20baseline-6.4.0-8bd5e8)](https://github.com/morluto/rea/tree/98d8470d36cfbf7cd25820a4ed430aebae20c0c5) [![License: MIT](https://img.shields.io/badge/license-MIT-8bd5e8)](LICENSE)
 
-[Highlights](#highlights) · [Preview](#preview) · [Development](#development) · [Roadmap](#roadmap) · [简体中文](README.md)
+[30-second video](#video) · [Current status](#status) · [Workflow](#workflow) · [Development](#development) · [Roadmap](#roadmap) · [简体中文](README.md)
 
 </div>
 
 REA Workbench is a **local, single-user, evidence-driven software archaeology workbench** built on [REA](https://github.com/morluto/rea). It is designed for engineers taking over legacy systems, investigating Electron applications, or documenting HTTP interfaces, with the goal of connecting collection, analysis, contract review, and SDK verification in one traceable workflow.
 
-> **Status: V0.1 — early development.** Foundation code exists for domain models, data contracts, storage, and REA integration. There is no runnable Web UI or end-to-end SDK workflow yet. Both promotional images in this README are product concepts. You can develop and test the foundation modules today; the complete workbench is still being built.
+> **Status: V0.1 — early development.** Domain models, data contracts, storage, REA integration, a local API, and a three-pane Web shell have foundation implementations. The worker, API, and Next.js processes can run locally and pair in a browser to read the graph. A real-provider end-to-end flow, isolated building, and full SDK delivery acceptance are not complete.
+
+<a id="video"></a>
+
+## REA Workbench in 30 seconds
+
+<div align="center">
+
+[▶ Play the 30-second promo](docs/assets/rea-workbench-promo-30s.mp4) · 1920 × 1080 · silent
+
+</div>
+
+> The promo explains the product direction and intended workflow. It is not a live UI recording or proof that every depicted capability has passed end-to-end acceptance. Use the status table and repository code as the source of truth.
+
+<a id="status"></a>
+
+## What works today
+
+| Foundation implemented | Not complete or verified |
+| --- | --- |
+| Domain models, data contracts, SQLite / artifact storage, audit, and task rules | A full end-to-end workflow with a real REA provider |
+| Worker, local API, Next.js three-pane shell, and browser pairing / graph readback | The ASAR static branch and scoped Web collection |
+| HAR import flow, candidate-file reads, blueprint freezing, and SDK / OpenAPI generation code | Broker / sandbox processes and isolated-build gates |
+| Sample comparison, export, and release-gate code | Product-level acceptance of a complete SDK delivery |
+
+“Foundation implemented” means the module or path exists; it does not mean every platform, real provider, or release gate has been verified. See the detailed [roadmap and implementation status](#roadmap).
 
 <a id="highlights"></a>
 
@@ -46,17 +73,7 @@ The first release aims to produce a **TypeScript HTTP SDK, OpenAPI 3.1.1, behavi
 
 These are product goals. See the [roadmap](#roadmap) for what exists today.
 
-<a id="preview"></a>
-
-## Product preview
-
-![REA Workbench three-pane concept: collection on the left, evidence graph in the center, contracts and code on the right](docs/assets/rea-workbench-concept.png)
-
-*AI-assisted interface concept illustrating the planned information layout. This repository does not yet include a runnable Web UI.*
-
-| Sandbox & Probes | Evidence Canvas | Clean-Room Studio |
-| --- | --- | --- |
-| Import targets, choose collection scope, and inspect collection progress and resource state. | Explore evidence relationships, locate unknowns, review contracts, and freeze blueprints. | Inspect contracts, SDK candidates, and verification differences; export deliverables. |
+<a id="workflow"></a>
 
 ## A workflow that starts with evidence
 
@@ -86,11 +103,23 @@ For example, to build a client for an undocumented HTTP service:
 
 ASAR follows a static analysis branch to locate modules, preload scripts, IPC, and candidate endpoints. Static facts require corresponding dynamic evidence before they can support runtime contracts. Differential results cover only request construction and response parsing under the specified samples and comparison rules.
 
+<a id="preview"></a>
+
+## Product direction preview
+
+![REA Workbench three-pane concept: collection on the left, evidence graph in the center, contracts and code on the right](docs/assets/rea-workbench-concept.png)
+
+*AI-assisted interface concept illustrating the planned information layout. The repository now has a locally runnable three-pane shell, but it is not a recreation of this image; the collection panel, visual preview, and complete code-editing experience remain product direction.*
+
+| Sandbox & Probes | Evidence Canvas | Clean-Room Studio |
+| --- | --- | --- |
+| Import targets, choose collection scope, and inspect collection progress and resource state. | Explore evidence relationships, locate unknowns, review contracts, and freeze blueprints. | Inspect contracts, SDK candidates, and verification differences; export deliverables. |
+
 <a id="development"></a>
 
 ## Start developing
 
-You can currently run foundation-module checks and tests. Install **Node.js `24.18.0` and npm `11.16.0`** first, as pinned in [`.nvmrc`](workbench/.nvmrc) and [`package.json`](workbench/package.json).
+Install **Node.js `24.18.0` and npm `11.16.0`** first, as pinned in [`.nvmrc`](workbench/.nvmrc) and [`package.json`](workbench/package.json). These commands install dependencies and run the foundation checks:
 
 ```sh
 git clone https://github.com/NIU-123370/rea-workbench.git
@@ -113,7 +142,7 @@ npm run test:integration
 | `npm run lint` | Run oxlint static checks. |
 | `npm run review` | Scan repository design rules and write local review findings. |
 
-Workbench scripts such as `dev`, `build`, `start`, `doctor`, and `db:migrate` are not available yet. Foundation tests require neither Docker, a local model, nor a real REA provider. Fixture MCP coverage does not establish that real-provider workflows have been verified. See [workbench/README.md](workbench/README.md) for development conventions.
+The `workbench/` package provides `worker` (assemble the worker and print a pairing code), `web` (local API process), `ui:dev` (Next.js shell), `doctor`, `typecheck`, `test`, `lint`, `review`, `docs:check`, and `perf:t17`. There is no `dev` or `db:migrate` script: migrations run when the worker starts, and offline restore uses `db:restore` after the worker is stopped. Foundation tests require neither Docker, a local model, nor a real REA provider. Fixture MCP coverage does not establish that real-provider workflows have been verified. See [workbench/README.md](workbench/README.md) for development conventions.
 
 <details>
 <summary><strong>Want to try the underlying REA tools first?</strong></summary>
@@ -144,20 +173,23 @@ V0.1 is moving from foundation modules toward its first complete workflow. The t
 | Domain models and data contracts | Foundation implemented | Target identity, evidence states, sample inventory, report rules, and Zod boundary validation. |
 | Storage and application rules | Foundation implemented | SQLite, artifact storage, migrations and backups, audit, redaction, and task lifecycle. |
 | REA integration | Foundation implemented | MCP stdio, identity probing, Evidence response parsing, and session ledger; currently covered by fixture tests. |
-| Worker and local API | Planned | Runtime composition, local RPC, browser sessions, and event recovery. |
-| Three-pane UI and target import | Planned | Evidence canvas, HAR import, ASAR static branch, and scoped Web collection. |
-| Isolated building and delivery | Planned | Broker, sandbox, blueprint review, SDK/OpenAPI generation, differential verification, and export. |
+| Worker and local API | Foundation implemented | Runtime composition, local RPC, browser sessions, event recovery, and the API process itself (`npm run worker` / `npm run web`). |
+| Three-pane UI and target import | Foundation implemented | Evidence canvas (Next.js shell + React Flow, paired and read in a real browser), candidate-file discovery and readback in the Code tab, and the HAR import flow. The ASAR static branch and scoped Web collection are not connected. |
+| Isolated building and delivery | Partially implemented | Blueprint freeze and release, SDK/OpenAPI 3.1.1 generation, comparison, export, and release-gate code exist. Broker and sandbox processes do not, so isolation gates cannot be claimed as passed locally. |
 
 The first vertical path is **fixed HAR → persisted Evidence → canvas → blueprint → SDK → offline comparison**. A V0.1 release also requires scoped Web collection, the ASAR static branch, and isolation and recovery gates. Follow [Issues](https://github.com/NIU-123370/rea-workbench/issues) and [Pull requests](https://github.com/NIU-123370/rea-workbench/pulls) for progress.
 
 ## Technology and architecture
 
-The existing implementation uses **TypeScript, Zod, Node.js built-in SQLite, Vitest, and oxlint**, with dependencies pinned by the lockfile. The planned Web stack is Next.js, React Flow, and Monaco; collection and isolation are planned around Playwright, Docker, and local model services.
+The implementation uses **TypeScript, Zod, Node.js built-in SQLite, Vitest, and oxlint**, with dependencies pinned by the lockfile. The Web layer uses **Next.js App Router, React 18, and React Flow**; collection and isolation are planned around Playwright, Docker, and local model services.
 
 ```text
 rea-workbench/
 ├── docs/                      # Product requirements, architecture, decisions, acceptance, and promotional assets
 └── workbench/
+    ├── apps/
+    │   ├── web/                 # Local API and Next.js three-pane interface
+    │   └── worker/              # Single-writer worker
     ├── packages/
     │   ├── domain/            # Identity, evidence, and report semantics
     │   ├── contracts/         # Boundary data contracts
@@ -192,6 +224,6 @@ Share a real software archaeology scenario, an authorized minimal reproduction, 
 
 If this would help your work, Star the repository and follow its development.
 
-**Acknowledgments:** [REA](https://github.com/morluto/rea) provides the underlying analysis capabilities and Evidence contracts. Prompts for the promotional images are available in the [asset notes](docs/assets/README.md).
+**Acknowledgments:** [REA](https://github.com/morluto/rea) provides the underlying analysis capabilities and Evidence contracts. Notes for the promotional images and video are available in the [asset notes](docs/assets/README.md).
 
 **License:** This project is licensed under the [MIT License](LICENSE). Upstream dependencies retain their respective licenses.

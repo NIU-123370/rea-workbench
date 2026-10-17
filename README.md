@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/rea-workbench-hero.png" alt="REA Workbench 软件考古与证据图谱主题宣传概念图" width="100%" />
+<a href="docs/assets/rea-workbench-promo-30s.mp4">
+  <img src="docs/assets/rea-workbench-hero.png" alt="播放 REA Workbench 30 秒宣传片" width="100%" />
+</a>
 
 # REA Workbench
 
@@ -10,13 +12,38 @@ Local software archaeology. Evidence first.
 
 [![CI](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/NIU-123370/rea-workbench/actions/workflows/ci.yml) ![Stage: Early Development](https://img.shields.io/badge/stage-early%20development-f0b44d) [![REA baseline: 6.4.0](https://img.shields.io/badge/REA%20baseline-6.4.0-8bd5e8)](https://github.com/morluto/rea/tree/98d8470d36cfbf7cd25820a4ed430aebae20c0c5) [![License: MIT](https://img.shields.io/badge/license-MIT-8bd5e8)](LICENSE)
 
-[项目亮点](#highlights) · [产品预览](#preview) · [开发上手](#development) · [路线图](#roadmap) · [English](README.en.md)
+[30 秒视频](#video) · [当前状态](#status) · [工作流](#workflow) · [开发上手](#development) · [路线图](#roadmap) · [English](README.en.md)
 
 </div>
 
 REA Workbench 是一个基于 [REA](https://github.com/morluto/rea) 的**本地、单人、证据驱动的软件考古工作台**。它面向接手遗留系统、理解 Electron 应用、梳理 HTTP 接口的工程师，目标是把采集、分析、契约审阅和 SDK 验证放进同一个可追溯流程。
 
-> **当前阶段：V0.1 早期开发。** 已有领域模型、数据契约、存储、REA 适配、本机 API 与三栏 Web 外壳——三个进程（worker、API、Next）能在本机跑起来并在浏览器里配对读图。仍然没有的是真实 REA provider 端到端、隔离构建（broker/沙箱，本机无 Docker）与完整 SDK 交付验收。本文两张宣传图均为产品概念图。
+> **当前阶段：V0.1 早期开发。** 领域模型、数据契约、存储、REA 适配、本机 API 与三栏 Web 外壳已有基础实现；worker、API、Next 三个进程可以在本机运行并在浏览器中配对读图。真实 REA provider 端到端、隔离构建（broker/沙箱）与完整 SDK 交付验收仍未完成。
+
+<a id="video"></a>
+
+## 30 秒了解 REA Workbench
+
+<div align="center">
+
+[▶ 播放 30 秒宣传片](docs/assets/rea-workbench-promo-30s.mp4) · 1920 × 1080 · 无音乐
+
+</div>
+
+> 宣传片用于解释产品方向与工作流，不是实时界面录屏，也不代表片中所有能力已经通过端到端验收。当前实现范围以本页状态表和仓库代码为准。
+
+<a id="status"></a>
+
+## 当前能做什么
+
+| 已有基础实现 | 尚未完成或验证 |
+| --- | --- |
+| 领域模型、数据契约、SQLite / artifact 存储、审计与任务规则 | 真实 REA provider 的完整端到端工作流 |
+| worker、本机 API、Next.js 三栏外壳，以及浏览器配对读图 | ASAR 静态支路与受控 Web 采集 |
+| HAR 导入闭环、候选文件读取、蓝图冻结与 SDK / OpenAPI 生成代码 | broker / 沙箱进程与隔离构建门禁 |
+| 样本差分、导出与发布门禁代码 | 完整 SDK 交付的产品级验收 |
+
+“已有基础实现”表示对应模块或路径存在，不等于所有平台、真实 provider 和发布门禁均已验证。更细的范围见[路线图与实现状态](#roadmap)。
 
 <a id="highlights"></a>
 
@@ -46,17 +73,7 @@ REA Workbench 围绕这三个问题组织产品：
 
 这些是产品方向，当前完成情况见[路线图](#roadmap)。
 
-<a id="preview"></a>
-
-## 产品预览
-
-![REA Workbench 三栏工作台概念图：左侧采集、中间证据图谱、右侧契约与代码](docs/assets/rea-workbench-concept.png)
-
-*界面概念图，由 AI 辅助生成，用于展示计划中的信息布局；仓库里已有一个能在本机跑起来的三栏外壳，但它不是这张图的复刻——概念图里的采集面板、画面预览与代码编辑器尚无对应实现。*
-
-| Sandbox & Probes | Evidence Canvas | Clean-Room Studio |
-| --- | --- | --- |
-| 导入目标、选择采集范围、查看采集进度与资源状态。 | 浏览证据关系、定位未知项、审阅契约并冻结蓝图。 | 查看契约、SDK 候选与验证差异，导出交付物。 |
+<a id="workflow"></a>
 
 ## 一条以证据为起点的工作流
 
@@ -86,11 +103,23 @@ flowchart LR
 
 ASAR 进入静态分析支路，用于定位模块、preload、IPC 和 endpoint 候选；其静态事实需要相应动态证据才能支持运行时契约。差分结论仅覆盖指定样本和比较规则下的请求构造、响应解析。
 
+<a id="preview"></a>
+
+## 产品方向预览
+
+![REA Workbench 三栏工作台概念图：左侧采集、中间证据图谱、右侧契约与代码](docs/assets/rea-workbench-concept.png)
+
+*AI 辅助生成的界面概念图，用于展示计划中的信息布局。仓库已有可在本机运行的三栏外壳，但它不是这张图的复刻；图中的采集面板、画面预览和完整代码编辑体验仍属于产品方向。*
+
+| Sandbox & Probes | Evidence Canvas | Clean-Room Studio |
+| --- | --- | --- |
+| 导入目标、选择采集范围、查看采集进度与资源状态。 | 浏览证据关系、定位未知项、审阅契约并冻结蓝图。 | 查看契约、SDK 候选与验证差异，导出交付物。 |
+
 <a id="development"></a>
 
 ## 开发上手
 
-当前可运行的是基础模块检查与测试。先自行准备仓库要求的 **Node.js `24.18.0` 与 npm `11.16.0`**，版本依据为 [`.nvmrc`](workbench/.nvmrc) 和 [`package.json`](workbench/package.json)。
+先自行准备仓库要求的 **Node.js `24.18.0` 与 npm `11.16.0`**，版本依据为 [`.nvmrc`](workbench/.nvmrc) 和 [`package.json`](workbench/package.json)。以下命令安装依赖并运行基础检查：
 
 ```sh
 git clone https://github.com/NIU-123370/rea-workbench.git
@@ -152,12 +181,15 @@ V0.1 正在从基础模块走向第一条完整工作流。下表描述仓库当
 
 ## 技术与架构
 
-现有实现使用 **TypeScript、Zod、Node.js 内置 SQLite、Vitest 与 oxlint**，依赖由锁文件固定。Web 层用 **Next.js App Router + React Flow**（源码编辑器要等 §8 的候选文件读取命令落地才回来，现在没有能喂给它的真数据）；采集和隔离层规划使用 Playwright、Docker 及本地模型服务。
+现有实现使用 **TypeScript、Zod、Node.js 内置 SQLite、Vitest 与 oxlint**，依赖由锁文件固定。Web 层使用 **Next.js App Router、React 18 与 React Flow**；采集和隔离层规划使用 Playwright、Docker 及本地模型服务。
 
 ```text
 rea-workbench/
 ├── docs/                      # 产品需求、架构、决策、验收与宣传资产
 └── workbench/
+    ├── apps/
+    │   ├── web/                 # 本机 API 与 Next.js 三栏界面
+    │   └── worker/              # 单写者 worker
     ├── packages/
     │   ├── domain/            # 身份、证据与报告语义
     │   ├── contracts/         # 边界数据契约
@@ -192,6 +224,6 @@ REA 提供分析能力，Workbench 负责项目工作流与交付。设计采用
 
 如果这个方向也解决了你的问题，欢迎 Star 并关注开发进展。
 
-**致谢**：感谢 [REA](https://github.com/morluto/rea) 提供底层分析能力与 Evidence 契约。宣传图的生成提示词见[资产说明](docs/assets/README.md)。
+**致谢**：感谢 [REA](https://github.com/morluto/rea) 提供底层分析能力与 Evidence 契约。宣传图和视频的说明见[资产说明](docs/assets/README.md)。
 
 **许可**：本项目采用 [MIT 许可证](LICENSE)；上游依赖遵循各自许可证。
