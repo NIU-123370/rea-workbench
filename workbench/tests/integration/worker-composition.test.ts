@@ -251,6 +251,14 @@ describe("composition root refuses to start unsafely (DESIGN §14)", () => {
     // is how a leftover staging directory stops being anybody's business.
     expect(storage.facts).toEqual({ migrationsApplied: 7, sweptRoleRuns: 0 });
     expect(sandbox.state).toBe("degraded");
+    // The supervisor behind the configured socket is asked, not assumed. This rig holds a
+    // socket that accepts and drops, which is exactly "a path exists, no broker answers our
+    // protocol" - a state the old filesystem-only check could not tell apart from a live
+    // supervisor, and the reason §14 line 477's 「broker 的实际可用性」 was not yet reportable.
+    const brokerCheck = report.checks.find((check) => check.name === "broker-socket");
+    if (brokerCheck === undefined) throw new Error("doctor omitted the broker-socket check");
+    expect(brokerCheck.state).toBe("degraded");
+    expect(brokerCheck.reasons).toEqual(["broker-socket-not-answering-the-protocol"]);
     expect(JSON.stringify(report)).not.toContain(dataDir);
   });
 });

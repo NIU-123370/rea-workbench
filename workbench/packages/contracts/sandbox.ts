@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { JsonValue } from "../domain/json-value.ts";
 import { profileLimitsSchema } from "./health.ts";
 import { digestSchema, idSchema, instantSchema, nonEmptyString } from "./primitives.ts";
 
@@ -375,6 +376,15 @@ const ownedScopeFields = {
   handle: idSchema,
 };
 
+// The three `*Owned` requests share this scope. Naming it once keeps the broker's
+// dispatch, the client and any later guard from spelling "the handle this job owns"
+// three different ways.
+export type OwnedScopeFields = {
+  requestId: z.infer<typeof idSchema>;
+  jobId: z.infer<typeof idSchema>;
+  handle: z.infer<typeof idSchema>;
+};
+
 export const inspectOwnedBrokerRequestSchema = z.strictObject({
   command: z.literal("inspectOwned"),
   ...ownedScopeFields,
@@ -504,4 +514,65 @@ export function unmetIsolationConditions(input: {
     }
   }
   return unmet;
+}
+
+// ---------------------------------------------------------------------------
+// Frames (§3 line 70 and line 74 give the same bytes to two processes)
+// ---------------------------------------------------------------------------
+
+// The cap and the separator belong to the protocol, not to whichever half wrote
+// them first. `apps/broker` may import only `packages/domain` and
+// `packages/contracts` (§3's own rule), so a server-side copy of this number would
+// be a second owner that can drift: a frame the broker accepts at 70 KiB and the
+// client refuses at 64 KiB is a socket that answers differently than the protocol.
+export const MAX_BROKER_FRAME_BYTES = 64 * 1024;
+
+export const BROKER_FRAME_SEPARATOR = 0x0a;
+
+export type BrokerFrameFailure = {
+  code: "CAPABILITY_UNAVAILABLE";
+  reason: string;
+  message: string;
+};
+
+export type BrokerFrameRead =
+  | { ok: true; record: JsonValue }
+  | { ok: false; failure: BrokerFrameFailure };
+
+// One command, one record, one trailing newline. The receiver still re-validates
+// everything, so this only has to keep the frame small, single-valued and
+// newline-free inside the record.
+export function encodeBrokerFrame(record: JsonValue): Uint8Array {
+  return new TextEncoder().encode(`${JSON.stringify(record)}\n`);
+}
+
+function frameFailure(reason: string, message: string): BrokerFrameRead {
+  return { ok: false, failure: { code: "CAPABILITY_UNAVAILABLE", reason, message } };
+}
+
+export function readBrokerFrameRecord(frame: Uint8Array): BrokerFrameRead {
+  if (frame.byteLength === 0) return frameFailure("broker-frame-empty", "a broker frame carried no bytes");
+  if (frame.byteLength > MAX_BROKER_FRAME_BYTES) {
+    return frameFailure("broker-frame-too-large", "the broker frame is above the frame budget");
+  }
+  if (frame[frame.byteLength - 1] !== BROKER_FRAME_SEPARATOR) {
+    return frameFailure("broker-frame-unterminated", "one frame must end with exactly one newline");
+  }
+  const body = frame.subarray(0, -1);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch {
+    return frameFailure("broker-frame-not-utf8", "the broker frame is not valid UTF-8");
+  }
+  if (text.includes("\n")) {
+    return frameFailure("broker-frame-concatenated", "one frame must carry exactly one record");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    return frameFailure("broker-frame-not-json", "the broker frame is not JSON");
+  }
+  return { ok: true, record: value as JsonValue };
 }

@@ -119,6 +119,11 @@ beforeAll(async () => {
   brokerSocket = path.join(dataDir, "broker.sock");
   brokerListener = await new Promise<net.Server>((resolve) => {
     const server = net.createServer();
+    // Held for BootConfig's socket-type check only, and it has to drop peers: the worker's
+    // doctor connects to ask whether a broker answers the protocol (§14 line 477), and a
+    // server that never ends a connection also never finishes `close()`. Same line as the
+    // two sibling rigs (`candidate-generation`, `inspect-execution`) already carry.
+    server.on("connection", (socket) => socket.destroy());
     server.listen(brokerSocket, () => resolve(server));
   });
 });
