@@ -63,6 +63,185 @@ export const SOURCE_ROOTS = ["packages", "apps", "tests", "infra"];
 export const SOURCE_EXTENSIONS = [".ts", ".mts", ".mjs"];
 export const SKIPPED_DIRECTORIES = ["node_modules", ".next", "dist", "coverage"];
 
+// §8's table is the only place in this repository that says which HTTP entry points exist, and
+// until now nothing compared it against the table the web adapter mounts. Issue #58 opened with
+// 40 documented rows against 13 mounted doors; the difference was visible only to whoever
+// re-counted by hand, which is how a project quietly normalises an unmet promise — a year in,
+// "the routes we mounted" is what people remember, and the document saying otherwise reads as
+// stale instead of as a list. So the difference is computed here, on every release check.
+//
+// A deviation is therefore not an exemption but a dated promise with an owner: each entry names
+// the issue that records it, and a route the two sides agree on turns the entry itself into a
+// defect (`route-deviation-stale`). Without that inversion a waiver table only grows, and the
+// gate decays back into the one-off reading it replaced.
+const DESIGN_ROUTE_ROW = /^\|\s*`(GET|POST|PUT|PATCH|DELETE)\s+(\S+)`\s*\|/;
+// The web adapter's own table. Line-shaped on purpose, like the other four parsers: an entry
+// that moves off the line this reads stops counting as a mounted door, and since §8 still names
+// it, the loss surfaces as `design-route-unmounted` rather than as a green pass over a shrunken
+// scan.
+const MOUNTED_ROUTE_ROW = /^\s*\{\s*method:\s*"(GET|POST|PUT|PATCH|DELETE)",\s*template:\s*`\$\{API_PREFIX\}([^`]+)`/;
+
+/**
+ * The three differences this build ships with, each recorded on an issue rather than smoothed
+ * over. Keys are §8's own spelling — only the parameter *names* are normalised when comparing,
+ * because the document writes `:p` where the code writes `:projectId` and that is a formatting
+ * difference, not a route difference.
+ */
+export const ROUTE_DEVIATIONS = {
+  // §8 line 304 promises a captured-frame preview. Nothing holds a frame: there is no pixel
+  // artifact class, no image media type, and no isolated-origin process to serve it from.
+  "GET /projects/:p/jobs/:j/preview": "issue #79 — 预览帧没有任何持有者（像素 class、image 媒体类型、隔离 origin 都不存在）",
+  // A read §8 never declared, added because the verification door needs a comparator *name* and
+  // an operator cannot be asked to type one they have no way of listing (issue #82, delivered).
+  "GET /comparator-policies": "issue #82 — §8 表内无此行；写入闸需要的比较器名必须有读门",
+  // §8 lines 299-300 declare the export create and its download; paging a project's packages is
+  // the one mount in this adapter still waiting for a ruling on whether the document extends.
+  "GET /projects/:p/exports": "issue #58 — §8 只声明 POST /exports 与 download；列表行待裁决",
+};
+
+export const WEB_API_FILE = "apps/web/api.ts";
+
+/**
+ * @param {string} markdown the DESIGN.md text
+ * @param {{ section: string, start: number, end: number }[]} sections the same split the anchor check uses
+ * @returns {{ method: string, target: string, line: number }[]} §8's route rows, and nothing else's
+ *
+ * Scoped to §8 because other tables in the document open their first cell with a backtick too
+ * (the module table's `packages/domain`, the field tables' `request.method`); the method
+ * alternation already excludes those, and the scope keeps a future `POST /something` row in an
+ * unrelated section from being read as a promised endpoint.
+ */
+export function parseDesignRoutes(markdown, sections) {
+  const owned = sections.find((entry) => entry.section === "8");
+  if (owned === undefined) return [];
+  const lines = markdown.split("\n");
+  /** @type {{ method: string, target: string, line: number }[]} */
+  const rows = [];
+  for (let index = owned.start - 1; index < owned.end; index += 1) {
+    const match = DESIGN_ROUTE_ROW.exec(lines[index] ?? "");
+    if (match !== null) rows.push({ method: String(match[1]), target: String(match[2]), line: index + 1 });
+  }
+  return rows;
+}
+
+/**
+ * @param {string} text the apps/web/api.ts source
+ * @returns {{ method: string, target: string, line: number }[]} the doors that table mounts
+ *
+ * The `${API_PREFIX}` the templates interpolate is dropped rather than substituted: §8's rows
+ * are written without it, and a gate that had to agree on the prefix would only be checking its
+ * own reading of a constant.
+ */
+export function parseMountedRoutes(text) {
+  /** @type {{ method: string, target: string, line: number }[]} */
+  const rows = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = MOUNTED_ROUTE_ROW.exec(lines[index] ?? "");
+    if (match !== null) rows.push({ method: String(match[1]), target: String(match[2]), line: index + 1 });
+  }
+  return rows;
+}
+
+/**
+ * `GET /projects/:p/jobs/:j/preview` and `GET /projects/:projectId/jobs/:jobId/preview` are one
+ * route; `GET /projects/:p` and `GET /projects/:p/jobs` are not. Each segment is kept or folded
+ * whole, so a parameter never swallows its neighbours.
+ * @param {string} method
+ * @param {string} target
+ */
+export function canonicalRoute(method, target) {
+  const folded = target
+    .split("/")
+    .filter((part) => part.length > 0)
+    .map((part) => (part.startsWith(":") ? ":" : part))
+    .join("/");
+  return `${method.toUpperCase()} /${folded}`;
+}
+
+/**
+ * @param {{ method: string, target: string, line: number }[]} design rows §8 declares
+ * @param {{ method: string, target: string, line: number }[]} mounted rows the web adapter mounts
+ * @param {Record<string, string>} deviations named, dated differences allowed to stand
+ * @returns {string[]} one reason per difference the table does not already own
+ */
+export function checkRoutes(design, mounted, deviations) {
+  const reasons = [];
+  if (design.length === 0) reasons.push("design-routes-unreadable:§8 没有一行 | `METHOD /path` | 表格，或那一节换了形状");
+  if (mounted.length === 0) reasons.push("mounted-routes-unreadable:apps/web/api.ts 的 ROUTES 一条都没读出来");
+  if (design.length === 0 || mounted.length === 0) return reasons;
+
+  /** @param {{ method: string, target: string, line: number }[]} rows */
+  const byKey = (rows) => {
+    const grouped = new Map();
+    for (const row of rows) {
+      const key = canonicalRoute(row.method, row.target);
+      const seen = grouped.get(key);
+      if (seen === undefined) grouped.set(key, [row]);
+      else seen.push(row);
+    }
+    return grouped;
+  };
+  const designByKey = byKey(design);
+  const mountedByKey = byKey(mounted);
+
+  // Two rows for one canonical route are a defect on either side: on the document's, because
+  // the second promise is a different contract nobody reconciles with the first; on the
+  // adapter's, because `matchRoute` answers a collision with whichever entry came first, so a
+  // parameter rename that folds two templates together silently shadows one door.
+  for (const [key, rows] of designByKey) {
+    if (rows.length > 1) reasons.push(`design-route-duplicate:${key}(§8 line ${rows.map((row) => String(row.line)).join(",")})`);
+  }
+  for (const [key, rows] of mountedByKey) {
+    if (rows.length > 1) reasons.push(`mounted-route-duplicate:${key}(${rows.map((row) => `api.ts:${String(row.line)}`).join(",")})`);
+  }
+
+  /** @type {Map<string, string>} the allowed differences, keyed the way the two sides are keyed */
+  const waiver = new Map();
+  for (const target of Object.keys(deviations)) {
+    const [method, path] = splitRoute(target);
+    const key = canonicalRoute(method, path);
+    const already = waiver.get(key);
+    if (already !== undefined) reasons.push(`route-deviation-duplicate:${target} 与 ${already} 是同一条路由`);
+    waiver.set(key, target);
+  }
+
+  for (const [key, rows] of designByKey) {
+    const first = rows[0];
+    if (first === undefined || mountedByKey.has(key) || waiver.has(key)) continue;
+    reasons.push(`design-route-unmounted:${key}(§8 line ${String(first.line)})`);
+  }
+  for (const [key, rows] of mountedByKey) {
+    const first = rows[0];
+    if (first === undefined || designByKey.has(key) || waiver.has(key)) continue;
+    reasons.push(`mounted-route-unlisted:${key}(api.ts:${String(first.line)})`);
+  }
+
+  // The inversion: a waiver that no longer covers a difference is not a waiver, it is a
+  // description of something that is not true. Kept as a reason so the table stays readable.
+  for (const [target, note] of Object.entries(deviations)) {
+    const [method, path] = splitRoute(target);
+    const key = canonicalRoute(method, path);
+    const declared = designByKey.has(key);
+    const mountedHere = mountedByKey.has(key);
+    if (declared !== mountedHere) continue;
+    reasons.push(`route-deviation-stale:${target}(${declared ? "两侧已对上，删掉这条记录" : "两侧都没有这条路由"}) ${note}`);
+  }
+  return reasons;
+}
+
+/**
+ * `"GET /projects/:p"` → `["GET", "/projects/:p"]`. A key that spells no method cannot canonicalise
+ * to a route either side names, so it reaches the stale loop and is reported there rather than
+ * being silently skipped — an unreadable waiver still has to fail the gate.
+ * @param {string} target
+ */
+function splitRoute(target) {
+  const index = target.indexOf(" ");
+  if (index < 0) return ["", target];
+  return [target.slice(0, index), target.slice(index + 1)];
+}
+
 function ids(text) {
   return [...new Set(text)];
 }
@@ -357,11 +536,30 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
     decisions: declaredDecisions,
   }));
 
+  // The route table is read the same way the three id tables are: from the document that owns it
+  // and from the source that mounts it, with no copy of either kept here.
+  const designRouteRows = parseDesignRoutes(design, designSections);
+  const apiFile = path.join(project, WEB_API_FILE);
+  /** @type {{ method: string, target: string, line: number }[]} */
+  let mountedRouteRows = [];
+  if (existsSync(apiFile)) mountedRouteRows = parseMountedRoutes(readFileSync(apiFile, "utf8"));
+  else reasons.push(`web-api-module-missing:${WEB_API_FILE}`);
+
+  // `--probe-routes` mounts a door no document names. It exists because this repository's tree is
+  // currently clean, and a clean tree cannot tell "no defect" from "no check": the ordinary run's
+  // green line would print identically if the reconciliation were computed and then dropped, or if
+  // the waiver table had quietly grown wide enough to cover anything. The probe makes the whole
+  // path — read, parse, compare, print the reason, exit non-zero — observable in one run.
+  const PROBE_DOOR = { method: "GET", target: "/probe-routes-not-a-door", line: 0 };
+  const probed = process.argv.includes("--probe-routes");
+  reasons.push(...checkRoutes(designRouteRows, probed ? [...mountedRouteRows, PROBE_DOOR] : mountedRouteRows, ROUTE_DEVIATIONS));
+
   const rows = parseTestCaseRows(testplan).length;
   const accepts = parseAcceptanceRows(prd).length;
   process.stdout.write(
     `docs:check 用例 ${String(rows)} 条 / 验收 ${String(accepts)} 条 / 决策 ${String(declaredDecisions.length)} 条 / `
-    + `源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）/ 设计锚点 ${String(anchors.length)} 处（DESIGN ${String(designSections.length)} 节）\n`,
+    + `源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）/ 设计锚点 ${String(anchors.length)} 处（DESIGN ${String(designSections.length)} 节）/ `
+    + `路由 §8 ${String(designRouteRows.length)} 条 · 挂载 ${String(mountedRouteRows.length)} 条 · 已记偏差 ${String(Object.keys(ROUTE_DEVIATIONS).length)} 条\n`,
   );
   for (const reason of reasons) process.stdout.write(`- ${reason}\n`);
   process.exit(reasons.length > 0 ? 1 : 0);
