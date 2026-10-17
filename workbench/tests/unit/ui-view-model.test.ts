@@ -13,7 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
-  evidenceMetaLine, refusalFactsLine,
+  evidenceMetaLine, refusalFactsLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
   pickCandidateSource,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
@@ -374,5 +374,116 @@ describe("the numbers a refusal published (§8's ApiError.details, issue #59)", 
     // `null` rather than an empty string, so the caller does not draw a pair of brackets
     // around absence.
     expect(refusalFactsLine({})).toBeNull();
+  });
+});
+
+describe("the 样本 tab and its decisions (§8 lines 283 and 285 / issue #58)", () => {
+  const row = (reviewStatus: string) => ({
+    vectorId: "11111111-1111-4111-8111-111111111111",
+    caseKey: "cart-add",
+    digest: "a".repeat(64),
+    visibility: "public",
+    eligibility: "usable",
+    reviewStatus,
+  });
+
+  it("offers the tab to a role that may decide, and refuses a Builder by name", () => {
+    const inspector = buildRightTabs({ isBuilder: false, hasBlueprint: true });
+    const samples = inspector.find((tab) => tab.id === "samples");
+    expect(samples?.enabled, JSON.stringify(inspector)).toBe(true);
+    expect(samples?.disabledReason).toBeNull();
+    const builder = buildRightTabs({ isBuilder: true, hasBlueprint: true }).find((tab) => tab.id === "samples");
+    expect(builder?.enabled).toBe(false);
+    // The reason is the server's own reason code, not a paraphrase: §7.3's boundary is one rule
+    // with two spellings otherwise.
+    expect(builder?.disabledReason).toBe("builder-may-not-decide-samples");
+  });
+
+  it("only asks for a decision on a sample nobody has decided yet", () => {
+    expect(sampleIsDecidable("draft")).toBe(true);
+    expect(sampleIsDecidable("approved")).toBe(false);
+    expect(sampleIsDecidable("rejected")).toBe(false);
+  });
+
+  it("names each empty state apart, pairwise", () => {
+    expect(Object.keys(SAMPLES_EMPTY_LINE).sort()).toEqual(["empty-page", "no-session", "no-target"]);
+    const keys = Object.keys(SAMPLES_EMPTY_LINE) as (keyof typeof SAMPLES_EMPTY_LINE)[];
+    for (const a of keys) {
+      for (const b of keys) {
+        if (a !== b) expect(SAMPLES_EMPTY_LINE[a], `${a} vs ${b}`).not.toBe(SAMPLES_EMPTY_LINE[b]);
+      }
+    }
+    // Each line has to name its own cause, not just differ in wording.
+    expect(SAMPLES_EMPTY_LINE["no-session"]).toContain("配对");
+    expect(SAMPLES_EMPTY_LINE["no-target"]).toContain("目标");
+    expect(SAMPLES_EMPTY_LINE["empty-page"]).toContain("证据");
+  });
+
+  it("prints the row's own facts, in the order they are decided on", () => {
+    expect(sampleLine(row("draft"))).toBe("cart-add｜public｜usable｜draft");
+  });
+
+  it("says what a recorded decision reported, without inventing what it did not", () => {
+    expect(sampleDecisionLine({ auditSeq: 7, inventoryRevision: 3 }, "approved")).toBe("已批准该样本｜库存修订 3｜日志 seq 7");
+    expect(sampleDecisionLine({ inventoryRevision: 4 }, "rejected")).toBe("已驳回该样本｜库存修订 4");
+    expect(sampleDecisionLine({}, "approved")).toBe("已批准该样本");
+  });
+});
+
+describe("mapping the inventory page onto the 样本 tab (issue #58)", () => {
+  it("reads the fields the page actually publishes", () => {
+    // The wire shape is §8 line 283's: `id`, and a `review` object with a `status`. Reading
+    // `vectorId`/`reviewStatus` off it - the names the review route uses - used to render an
+    // empty list with no error at all.
+    const [row] = sampleRowsOf([
+      { id: "aaaaaaaa-1111-4111-8111-111111111111", digest: "b".repeat(64), caseKey: "cart-add", visibility: "public", eligibility: "usable", review: { status: "draft" } },
+    ]);
+    expect(row?.vectorId).toBe("aaaaaaaa-1111-4111-8111-111111111111");
+    expect(row?.reviewStatus).toBe("draft");
+    expect(sampleIsDecidable(row?.reviewStatus ?? "")).toBe(true);
+  });
+
+  it("offers no decision on a row whose state it cannot read", () => {
+    const [row] = sampleRowsOf([{ id: "x", digest: "y", caseKey: "z", visibility: "public", eligibility: "usable" }]);
+    expect(row?.reviewStatus).toBe("unknown");
+    expect(sampleIsDecidable(row?.reviewStatus ?? "")).toBe(false);
+  });
+});
+
+describe("the single parse of an inventory reply (§8 lines 283 and 285 / issue #58)", () => {
+  const summary = { id: "aaaaaaaa-1111-4111-8111-111111111111", digest: "b".repeat(64), caseKey: "cart-add", visibility: "public", eligibility: "usable", review: { status: "draft" } };
+
+  it("reads rows and the revision out of the relay's envelope", () => {
+    const page = samplesPageOf({ data: { items: [summary], inventoryRevision: 4 } });
+    expect(page.rows).toHaveLength(1);
+    // That number is what the *next* decision has to name. A page that kept the one it loaded
+    // first gets a 409 it could have predicted, which is the bug this parse exists to prevent.
+    expect(page.inventoryRevision).toBe(4);
+  });
+
+  it("reads the same page when the answer carried no envelope", () => {
+    expect(samplesPageOf({ items: [summary], inventoryRevision: 2 }).inventoryRevision).toBe(2);
+  });
+
+  it("reports an unreadable page as no rows rather than as a page it did not see", () => {
+    const page = samplesPageOf(null);
+    expect(page.rows).toEqual([]);
+    // 0 is the value that makes the following decision a stated conflict, not an implicit one.
+    expect(page.inventoryRevision).toBe(0);
+  });
+
+  it("keeps the numbers the server published in the line the operator reads", () => {
+    // expected/actual is the difference between "somebody decided first" and "this page was
+    // stale"; a line that dropped them would leave the operator guessing.
+    expect(samplesRefusalLine("decision", "inventory-revision-conflict", { expected: 3, actual: 4 })).toBe(
+      "决定被拒：inventory-revision-conflict（actual 4 · expected 3）",
+    );
+    expect(samplesRefusalLine("read", "target-unknown", {})).toBe("库存读取被拒：target-unknown");
+  });
+
+  it("unwraps the envelope once, for every reply on this island", () => {
+    expect(relayData({ data: { csrfToken: "issued" } })).toEqual({ csrfToken: "issued" });
+    expect(relayData({ csrfToken: "issued" })).toEqual({ csrfToken: "issued" });
+    expect(relayData(null)).toBeNull();
   });
 });

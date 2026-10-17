@@ -232,7 +232,14 @@ export class ExportService {
     if (entries.length !== declaredPackageEntries(bound).length) {
       return gateFail("REA_CONTRACT_MISMATCH", "package-entry-count", `the package holds ${String(entries.length)} of ${String(declaredPackageEntries(bound).length)} entries`);
     }
-    const archived = buildZipArchive(entries, nowInstant(), this.zipLimits);
+    // The archive's entry timestamp is a *frozen fact*, not the moment the operator asked.
+    // A package is a copy of frozen facts (§10), so two exports of the same candidate and report
+    // have to hash to the same digest and land on one artifact row (§5's dedupe inside a class);
+    // stamping with the wall clock made the digest move, which turned "one package per distinct
+    // package" into a race against a two-second field and left a second stored copy behind every
+    // time the clock happened to tick. The export's own instant is recorded in its row, where it
+    // belongs, and the report inside a verified-samples package may therefore postdate this stamp.
+    const archived = buildZipArchive(entries, blueprint.createdAt, this.zipLimits);
     if (!archived.ok) {
       return blockedByReasons(archived.error, "RESOURCE_LIMIT", "the package bytes");
     }

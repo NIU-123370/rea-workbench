@@ -118,6 +118,13 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
 - ZIP 只有 `STORED`：条目名在写入与读出两侧都验（绝对路径、`..`、反斜杠、盘符、目录项、重名
   一律拒），容量先计量再分配；`MANIFEST.json` 是唯一不列进自身 `parts` 的条目，包的摘要由
   `artifacts.sha256` 单一持有。
+- 包里的 ZIP 时间戳是**被冻结事实的 instant**（蓝图的 `createdAt`），不是操作者按按钮的那一刻。
+  一个包是「冻结事实的副本」，所以同一批事实两次导出必须哈希相同、共用一条 artifact 行（§5 的
+  class 内去重）。原先写 `nowInstant()`，等于让这条去重去和时钟赛跑：DOS 时间字段是 2 秒粒度，
+  跨过边界就把同样的字节再存一份——`tests/integration/export-service.test.ts` 里那条「两次导出
+  只有一个包」的用例因此在真实机器上偶发发红（10-17 抓到）。现在那条用例中间隔 2.1 秒仍然成立，
+  并且另有一条把包头 4 个时间字节**解码回来**与蓝图 instant 比对的断言，所以「一个常量」和
+  「一个事实」两种写法也分得开。导出记录自己的时刻仍在 `exports.created_at`，包内报告可以晚于这个戳。
 - **§5 的 class 枚举多了一个 `export`**：`exports.artifact_id` 在既有 schema 里就 FK 指向
   `artifacts`，而一个交付包同时含候选源码与已发布报告，把它塞进四个生产者 class 中的任何一个
   都会破坏「按 project+class 隔离」这条权限边界。因此迁移 `0005-artifact-export-class` 走
@@ -341,6 +348,24 @@ details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键�
 - 中栏「来源 1」现在**读的是正文**：`GET .../evidence/ev_111…` 回 200，页面渲染
   `application/json · 229 字节 · sha256 1d3195ba…e44`，正文是那 229 字节的 envelope。
   同一份文件在磁盘上 `shasum -a 256` = `1d3195ba…e44`、229 字节——两个读数各自独立取到。
+- 右栏「样本」页签＝库存，它是**页面第一次真写一次决定**（10-17 第二次真浏览器复跑，读数如下）：
+  播种后两行 draft、`data-inventory-revision="2"`；点第一行拿到
+  `已批准该样本｜库存修订 3｜日志 seq 2`，该行按钮消失并换成「已决定，正文不可改」，另一行照旧有按钮；
+  紧接着点第二行拿到 `库存修订 4｜日志 seq 3`——第二下能成，靠的是列表在决定后按 §8 line 283 重读到的
+  新 `inventoryRevision`（写死旧值会 409）。两行 id 与作业日志独立对过一次：
+  `GET .../audit?limit=20` 回 `seq 2 / seq 3`，两条 `vector.review`，`actorKind=reviewer`，
+  `resourceId` 正是页面上那两行的 id。刷新整页后读数＝修订 4、两行 approved、按钮 0 个（决定存在库里，不是内存里）。
+  Builder 角色下这个页签是禁用的，理由原文 `builder-may-not-decide-samples`（§7.3 的边界用同一个名字，不加 paraphrase）。
+  这一页签最初渲染出的是**零行的空列表**：客户端按 `vectorId`/`reviewStatus` 读库存行，
+  而 §8 line 283 的摘要叫 `id` 且评审状态在 `review.status` 里——用例全绿、页面却是空的，
+  只有真浏览器看得见。现在那层映射是 `sampleRowsOf()`，回包解析（relay 的 `{data:…}` 信封＋
+  `inventoryRevision`）收成 `samplesPageOf()`／`relayData()` 一份，拒绝行收成 `samplesRefusalLine()`，
+  首读与决定后的重读走同一条路（两条路各写一遍就会漂，而漂的那半正是上面那个 409）。
+- 同一个页签在**没有会话**时曾经一直显示「正在读取库存…」：worker 停掉之后 `GET /session` 直接 401，
+  `load()` 在会话那一步就返回了，库存那格从没被赋过状态——页面在假装还在读，而顶栏已经写着「会话：unpaired」。
+  现在它读 `SAMPLES_EMPTY_LINE["no-session"]`（第三种具名空态：没有会话／没有目标／该目标没有样本，
+  三条两两不同且有各自的关键词用例）。worker 重新起来、换新配对码配上之后同一格回到
+  「修订 4／两行 approved／0 个按钮」，证明这条线不是粘住的。
 - 点击「来源」不再往队列里塞草稿（队列计数 0），而带缺口的格子点「创建定向调查」仍然入队一条
   `capture-new`（`unmappedReasons: []`）——「读得到」与「还缺证据」在页面上是两件事。
 - 三条新读路由在同一轮里由页面直接取过：`GET /projects/:p` 回 6 个键

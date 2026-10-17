@@ -499,11 +499,41 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
     const second = unwrap(await exports_.create(projectId, reviewer, input));
     expect(second.id).not.toBe(first.id);
     expect(exportRowCount()).toBe(exportCountBefore + 2);
-    // Same facts and the same second: one package artifact, two export records pointing at it.
+    // Same facts: one package artifact, two export records pointing at it.
     expect(packageRowCount()).toBe(packageCountBefore + 1);
     expect(second.sha256).toBe(first.sha256);
     const archived = unwrap(await exports_.archive(projectId, reviewer, first.id));
     expect(digestBytes(archived.bytes)).toBe(first.sha256);
+  });
+
+  it("keeps one package after the clock moves, because the stamp is a fact and not a moment", async () => {
+    const scene = await seedVerified("verified-across-clock");
+    const input = { candidateId: scene.candidateId, verificationId: scene.verificationId, label: "verified-samples" as const };
+    const packageCountBefore = packageRowCount();
+    const first = unwrap(await exports_.create(projectId, reviewer, input));
+    // A zip entry's DOS timestamp has a two-second quantum, so this wait is what turns the
+    // assertion into a proof rather than a coin toss: stamp the archive with the wall clock and
+    // the second export lands in a later bucket, hashes differently, and stores a second copy of
+    // bytes that are identical to the first. The export rows still carry their own instants.
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    const second = unwrap(await exports_.create(projectId, reviewer, input));
+    expect(second.sha256).toBe(first.sha256);
+    expect(packageRowCount()).toBe(packageCountBefore + 1);
+    expect(second.id).not.toBe(first.id);
+
+    // Which instant it is, read out of the archive's own bytes rather than inferred from a
+    // digest that merely happens to be stable: the local file header carries the modification
+    // time as a uint16 at offset 10 and the date at 12, and the frozen fact they must spell is
+    // the blueprint's instant (§10's "a copy of frozen facts"), not a constant and not the clock.
+    const frozen = writer.transact((tx) => tx.getBlueprint(projectId, scene.blueprintId));
+    if (!frozen.ok || frozen.value === null) throw new Error("the seeded blueprint row vanished");
+    const packed = unwrap(await exports_.archive(projectId, reviewer, second.id));
+    const header = new DataView(packed.bytes.buffer, packed.bytes.byteOffset, packed.bytes.byteLength);
+    const time = header.getUint16(10, true);
+    const date = header.getUint16(12, true);
+    const stamped = Date.UTC(((date >> 9) & 0x7f) + 1980, ((date >> 5) & 0x1f) - 1, date & 0x1f, (time >> 11) & 0x1f, (time >> 5) & 0x3f, (time & 0x1f) * 2);
+    const at = new Date(frozen.value.createdAt);
+    expect(stamped).toBe(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate(), at.getUTCHours(), at.getUTCMinutes(), Math.floor(at.getUTCSeconds() / 2) * 2));
   });
 });
 

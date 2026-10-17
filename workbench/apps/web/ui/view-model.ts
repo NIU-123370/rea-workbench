@@ -301,7 +301,7 @@ export function buildLeftPanel(input: {
   };
 }
 
-export type RightTab = { id: "contract" | "code" | "report"; label: string; enabled: boolean; disabledReason: string | null };
+export type RightTab = { id: "contract" | "code" | "report" | "samples"; label: string; enabled: boolean; disabledReason: string | null };
 
 // The code tab is an Inspector authority question, not a layout question: a Builder
 // that was handed generated or decompiled source would have received content the
@@ -309,6 +309,12 @@ export type RightTab = { id: "contract" | "code" | "report"; label: string; enab
 export function buildRightTabs(actor: { isBuilder: boolean; hasBlueprint: boolean }): RightTab[] {
   return [
     { id: "contract", label: "契约", enabled: true, disabledReason: null },
+    // The inventory is where a sample gets *decided on*, so it is a control-plane surface:
+    // §7.3 keeps a Builder to the blueprint projection, and `vector.review` refuses that actor
+    // by name. A disabled tab says which rule disabled it, in the same words the server uses.
+    actor.isBuilder
+      ? { id: "samples", label: "样本", enabled: false, disabledReason: "builder-may-not-decide-samples" }
+      : { id: "samples", label: "样本", enabled: true, disabledReason: null },
     actor.isBuilder
       ? { id: "code", label: "代码", enabled: false, disabledReason: "builder-may-not-read-source" }
       : { id: "code", label: "代码", enabled: true, disabledReason: null },
@@ -358,4 +364,106 @@ export function pickCandidateSource(jobs: readonly JobRowView[]): CandidateDisco
     return { found: false, reason: "result-ref-is-not-an-id" };
   }
   return { found: true, jobId: latest.id, candidateId: latest.resultRef };
+}
+
+// --- The inventory surface (§8 line 283 with issue #58's review doors) -----------------
+//
+// A row of the inventory page, narrowed to what the operator decides with: which case, whether
+// it is public, whether it is usable, and whether someone has decided on it yet. The digest is
+// kept with it because `expectedDigest` is what makes the decision a compare-then-write rather
+// than a blind overwrite - the page approves the bytes it is looking at.
+// The inventory page's own row shape (§8 line 283): the id is `id`, and the review is an object
+// with a `status`. The browser pass caught the first version of this file reading
+// `vectorId`/`reviewStatus` off that payload, which rendered a list with zero rows and no error -
+// the quiet failure a mapping without a test is good at.
+export type VectorSummaryWire = {
+  id: string;
+  digest: string;
+  caseKey: string;
+  visibility: string;
+  eligibility: string;
+  review?: { status?: string } | null;
+};
+
+export type SampleRow = {
+  vectorId: string;
+  caseKey: string;
+  digest: string;
+  visibility: string;
+  eligibility: string;
+  reviewStatus: string;
+};
+
+// Only an undecided sample offers a button. An approved vector's body is immutable (§7.4), so a
+// second decision would be a 409 the row could have predicted; showing the control anyway would
+// be teaching the operator to press things that cannot work.
+export function sampleIsDecidable(reviewStatus: string): boolean {
+  return reviewStatus === "draft";
+}
+
+export function sampleLine(row: SampleRow): string {
+  return `${row.caseKey}｜${row.visibility}｜${row.eligibility}｜${row.reviewStatus}`;
+}
+
+// The ways the 样本 tab can legitimately have no rows are different operator problems, and one
+// generic 暂无 would hide which of them this is: no session means nothing was read at all, no
+// capture target yet means there is nothing to list against, and a target with no rows means the
+// inventory is genuinely empty for it. The browser pass found the first of these while the worker
+// was stopped: the tab was still saying 正在读取 after the page had already reported 会话：unpaired.
+export const SAMPLES_EMPTY_LINE: Record<"no-session" | "no-target" | "empty-page", string> = {
+  "no-session": "还没有会话：库存要配对之后才读得到，用终端里打印的配对码建立会话。",
+  "no-target": "本项目还没有目标：库存是按目标编的，先导入一次采集或建一个 URL 目标。",
+  "empty-page": "该目标的库存里还没有样本：可以先读证据正文看捕获到了什么。",
+};
+
+// What a recorded decision says back. The receipt's numbers are the point (§8's
+// ApiError.details, issue #59): the inventory revision is what the next decision must name, and
+// the audit sequence is where the same decision can be re-read in the journal.
+export function sampleDecisionLine(receipt: { inventoryRevision?: number; auditSeq?: number }, decision: string): string {
+  const revision = receipt.inventoryRevision === undefined ? "" : `｜库存修订 ${String(receipt.inventoryRevision)}`;
+  const audit = receipt.auditSeq === undefined ? "" : `｜日志 seq ${String(receipt.auditSeq)}`;
+  return `已${decision === "approved" ? "批准" : "驳回"}该样本${revision}${audit}`;
+}
+
+// One mapping, one place: an unknown status is not decidable, so a row this page cannot read
+// offers no button rather than guessing at the state it should have had.
+export function sampleRowsOf(items: readonly VectorSummaryWire[]): SampleRow[] {
+  return items.map((item) => ({
+    vectorId: item.id,
+    caseKey: item.caseKey,
+    digest: item.digest,
+    visibility: item.visibility,
+    eligibility: item.eligibility,
+    reviewStatus: item.review?.status ?? "unknown",
+  }));
+}
+
+export type SamplesPage = { rows: SampleRow[]; inventoryRevision: number };
+
+// The UI relay answers on behalf of the worker, and the worker's reply arrives under `data`
+// (DESIGN §8's response envelope). Everything on this island that reads a reply therefore
+// unwraps it the same way, once: a page that looked at the top level only would silently see an
+// empty result instead of the data it asked for.
+export function relayData(payload: unknown): unknown {
+  return (payload as { data?: unknown } | null)?.data ?? payload;
+}
+
+// The page the relay answers with, read once per visit. Two things here are load-bearing and
+// neither is visible from the client that calls it: the relay wraps the worker's reply in
+// `{ data: … }`, and `inventoryRevision` is the number the *next* decision has to name (§8's
+// optimistic-concurrency check). The first read and the re-read after a decision parse the same
+// payload, so this is one function rather than two copies that can drift apart and leave the
+// page holding a revision the server no longer has.
+export function samplesPageOf(payload: unknown): SamplesPage {
+  const listed = relayData(payload) as { items?: VectorSummaryWire[]; inventoryRevision?: number } | null;
+  return { rows: sampleRowsOf(listed?.items ?? []), inventoryRevision: listed?.inventoryRevision ?? 0 };
+}
+
+// A refusal on this tab names the facts the server published with it (§8's ApiError.details,
+// issue #59): `expected` and `actual` are the difference between "somebody decided first" and
+// "this page held a stale revision", and those are different things to do about.
+export function samplesRefusalLine(kind: "read" | "decision", reason: string, facts: Record<string, number | boolean>): string {
+  const published = refusalFactsLine(facts);
+  const head = kind === "read" ? "库存读取被拒" : "决定被拒";
+  return published === null ? `${head}：${reason}` : `${head}：${reason}（${published}）`;
 }
