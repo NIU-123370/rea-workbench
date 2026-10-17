@@ -1539,6 +1539,61 @@ runner 的，见下文"这轮没做浏览器"）：
 第 3 格卡在一个我没有替它裁的点：`POST /projects/:p/exports` 的 §8 请求字段里**没有** `sensitiveValues`，
 所以那一面要么按 line 441 末句让调用方在门口重新提供（＝给这扇门加一个文档没写的名字），
 要么承认包的正文本来就来自各自已过门的行——两条都不是「补个调用」，等你选。
+
+发布门禁·第三十轮（2026-10-18 05:50–06:12，**#121：§3 名录里的 `apps/broker` 从一行表格变成一个进程**）：
+
+- 本轮开始前现读：`ls apps` 只有 `web`／`worker`；`BrokerClient` 与 `SandboxService` 生产构造点 **0**
+  （`grep -rn "new BrokerClient\|new SandboxService" packages apps` 只命中 tests）；
+  `graph.updated` 只有名字没有写入方。也就是说整条隔离线只在测试里跑，用的是注入的 fake transport。
+- 落地的形状：`apps/broker/{main.ts, protocol.ts, supervision.ts}` ——
+  监听 §14 line 473 的 `WB_BROKER_SOCKET`，一帧一命令一答，只认 `BROKER_COMMANDS` 四条；
+  所有权凭据由 `OwnershipRegistry` 自己签发（`newId()`，**不是 PID／容器名／路径**——
+  §11 说 cleanup 只碰 owned 资源，那么"owned"必须由这个进程回答），cleanup 成功后 `revoke`。
+  §3 给这个模块的入站白名单是 `packages/domain`＋`packages/contracts`＋自身，本轮一字未放宽。
+- **帧的预算与分隔符搬到 `contracts/sandbox.ts`**：`apps/broker` 按 §3 不能 import adapter，
+  留在 `broker-client.ts` 里就等于让服务端抄一份 64 KiB——两份数会漂，漂成 70 KiB 的那一侧
+  会读出一条客户端拒收的回答。所以 cap／分隔符／「一帧一条记录」这三件事现在只有一个出处，
+  `broker-client.ts` 与 `apps/broker` 各自只保留自己方向的入口；本轮新增那条
+  「客户端自己的 encoder 对着服务端自己的 reader」用例（`broker-process.test.ts`）就是钉这一点的。
+- 本机实跑读数：`WB_BROKER_SOCKET=/tmp/nope.sock npm run broker` →
+  `broker-refused:no-known-container-engine` / `host-platform-unverified-for-sandbox:darwin/arm64` /
+  `required:linux/x64`，exit **78**，**且不创建 socket 文件**。这一条是 #121 第 2 框的字面要求
+  （「启动前具名拒绝，不许假装起来了」），也是本轮唯一能在本机拿到的真进程证据。
+- 新用例 **14** 条（`tests/integration/broker-process.test.ts`）：四条命令的真 unix socket 往返、
+  凭据按 jobId 收窄（别的 job 拿同一串 → `owned:false` 且四个事实全 `unknown`）、
+  cleanup 后 `revoke` 从**注册表本身**数出来、失败 cleanup 留 `failed`＋retryAt 且凭据不消失、
+  引擎拒启动时不留凭据、超预算帧不读、名录外命令**不作答**（客户端读到的仍是具名传输原因），
+  以及「客户端自己的 encoder 对着服务端自己的 reader」。
+- worker 侧第一次拿到真调用点：composition 构造 `BrokerClient`，doctor 的 `broker-socket` 检查
+  从「路径是不是 socket」升级成「**那个进程答不答我们的协议**」——问的是一个本 worker 从未签发过的 handle，
+  所以诚实的答案只有 `owned:false`。三种答案三种状态：路径不是 socket ⇒ failed；socket 有人但不答协议 ⇒
+  **degraded**（§14 line 477 的「实际可用性」）；答了却声称 owned ⇒ failed `broker-claimed-an-unminted-handle`。
+- **两条被测试纠正出来的真缺陷**，都不是「补个断言」而是代码错：
+  1. 失败的 cleanup 只回给了调用方 `failed`，没写进注册表 ⇒ 下一次 `inspectOwned` 会说 `pending`。
+     §11 的 retryAt 因此读到一个没发生过的状态。补 `markCleanup(handle,"failed")`。
+  2. 探针放弃一个不作答的对端时，`connection.destroy()` 之后**服务端那一半仍然开着**，
+     于是 `server.close()` 永不返回——两个 restart 用例的 `afterAll` 直接超时（10s hook）。
+     修在两侧：`apps/broker` 答完就 `end`，持有 socket 但不说协议的 rig 加 `connection → destroy`
+     （`candidate-generation`／`inspect-execution` 本来就写了这一行，另两个没有）。
+     `resetAndDestroy()` 这条路实测在 unix socket 上抛 `ERR_INVALID_HANDLE_TYPE`，注释里记下了。
+- **一条按「不会红就别写」删掉的东西**：`decideBoot` 里第二次 push `no-known-container-engine`。
+  探针已经报过它，变异 B5 删掉这一行 38 条用例仍全绿——它唯一的作用是照成日志里同一句打印两遍
+  （我第一次读到自己日志时就看见了）。顺带删掉随之变成 no-op 的 `new Set` 去重。
+- 变异 **8 支全红**：B1 所有权不按 job 收窄、B2 cleanup 成功不撤销凭据、B3 失败 cleanup 不记录、
+  B4 start 跳过隔离/限额检查、B5' 探针不报缺引擎、B6 doctor 只回答文件存在、B7 声称 owned 不算失败、
+  B8 不合法的请求也照答。**本轮没有存活变异。**
+- #121 第 5 格那条反方向守卫也补上了：`architecture.test.ts` 现在断言
+  「§3 名录里声明的模块目录必须存在」。证据是把 `apps/broker` 临时改名的那一轮——
+  新用例报 `expected [ 'apps/broker' ] to deeply equal []`，其余 23 条照绿；改回来 25 条全绿。
+
+**这轮仍然没做的**：#121 第 3 格只做了一半。`BrokerClient` 有生产构造点也有生产调用点；
+**`SandboxService` 仍然没有**，原因这轮才看得清：四条命令里没有一格能向 worker 报告宿主能力
+（`preflight` 需要的 `SandboxHostFacts` 只有 broker 知道），而闭合命令表与 §8 的 40 行里也没有
+任何沙箱命令名。要么给协议加第五个名字（改 §3/§11 的封闭表），要么让 `job.cancel`/`job.cleanupRetry`
+去消费 `resourceKind='sandbox-profile'` 的 lease（那是数据流改动，不是加名字）。这两条形状不一样，等你点。
+本轮交的是**进程本体、协议、所有权权威与 doctor 的实答**，不交隔离能力：seccomp 实际加载、
+network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待 Linux x64 宿主）。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
@@ -1553,8 +1608,12 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 但 worker 启动时自动跑迁移那条路不变；TESTPLAN §5 里剩下的是 `dev`/`build`/`start` 的**命名**
 （仓库现在叫 `ui:dev`/`ui:build`/`ui:start`）与一个独立的 `test:e2e` 档（#123，等你选）；
 `.env.example` 还在队列里；宿主 broker 的契约与控制面门禁已落地（issue #21，见下），
-但 `apps/broker` **进程本体仍未实现**（#121）。本机没有 Docker 时，隔离类门禁一律
-不可声明为已通过。
+`apps/broker` **进程本体第三十轮落地**（#121 的第 1、2、4、5、6 格）：监听 §14 的
+`WB_BROKER_SOCKET`、只认四条命令、所有权凭据由它自己签发，本机实测 `npm run broker`
+在**监听之前**就具名拒绝。仍**未落地**的是真容器执行：这一版没有任何引擎实现，
+`observeHost()` 找不到 bwrap/docker 就拒绝启动；worker 侧 `SandboxService` 也仍没有生产调用方
+（四条命令里没有"报告宿主能力"那一格，闭合命令表里也没有沙箱名字——见本轮末尾「这轮仍然没做的」）。
+本机没有 Docker 时，隔离类门禁一律不可声明为已通过。
 
 明确**未实现 / 未验证**的范围：
 
@@ -1695,8 +1754,9 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 与 default-deny egress 在本机的单元与集成测试里可证。但**这些隔离效果在本机（macOS）不可
 验证**，具体是：
 
-- 没有真实容器执行——`apps/broker`（唯一持有调度权限的进程）尚未实现，测试一律注入 fake
-  transport；
+- 没有真实容器执行——`apps/broker` 的进程本体已在（第三十轮：协议、所有权、拒绝启动的形状），
+  但它**没有任何引擎实现**：`BrokerEnginePort` 全部由注入提供，测试注 fake，本机
+  `npm run broker` 因探测不到 bwrap/docker 而拒绝监听；
 - 没有 seccomp profile 的实际加载；
 - 没有 network namespace 对 egress 的实际拦截（本机只验证了地址与 CIDR 的判定逻辑）。
 

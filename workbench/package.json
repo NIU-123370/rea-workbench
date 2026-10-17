@@ -18,6 +18,7 @@
     "review": "node infra/review/scan.mjs --json .review/findings.json --summary .review/summary.md",
     "review:post": "node infra/review/post.mjs",
     "worker": "node apps/worker/main.ts",
+    "broker": "node apps/broker/main.ts",
     "web": "node apps/web/main.ts",
     "doctor": "node apps/worker/main.ts --doctor",
     "docs:check": "node infra/release/docs-check.mjs",

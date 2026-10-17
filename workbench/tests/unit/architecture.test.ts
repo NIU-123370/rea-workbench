@@ -262,6 +262,18 @@ describe("module dependency direction (DESIGN §3)", () => {
     expect(MODULES.filter((module) => RULES[module] === undefined)).toEqual([]);
   });
 
+  // The same check, pointed the other way. The rule above asks "does every directory that
+  // exists have a rule", which stays green forever for a module §3 names and this build has
+  // not written yet - `apps/broker` sat in that blind spot until issue #121 counted it by
+  // hand. A declared module whose directory is absent is now a named failure, so the table
+  // in §3 cannot keep a promise the repository has not kept.
+  it("has a directory for every module listed in DESIGN §3", () => {
+    const absent = MODULES.filter(
+      (module) => statSync(path.join(ROOT, module), { throwIfNoEntry: false })?.isDirectory() !== true,
+    );
+    expect(absent).toEqual([]);
+  });
+
   it.each(present.map((module) => [module]))("%s stays inside its allowed dependencies", (module) => {
     expect(violationsFor(module as string)).toEqual([]);
   });

@@ -91,6 +91,13 @@ async function exitedPid(): Promise<number> {
 function holdSocket(target: string): Promise<net.Server> {
   return new Promise((resolve) => {
     const server = net.createServer();
+    // Nothing in this suite ever speaks the broker protocol, but a client may still
+    // connect to the path - the worker's doctor does exactly that to ask whether a broker
+    // is answering (§14 line 477). A server that takes a connection and never ends it also
+    // never finishes `close()`, so the held socket has to drop peers it cannot serve; this
+    // is the same line `candidate-generation.test.ts` and `inspect-execution.test.ts`
+    // already carry.
+    server.on("connection", (socket) => socket.destroy());
     server.listen(target, () => resolve(server));
   });
 }

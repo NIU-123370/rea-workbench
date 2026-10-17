@@ -70,6 +70,8 @@ import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
 import { jobListRequestSchema } from "../../packages/contracts/jobs.ts";
 import { auditListRequestSchema } from "../../packages/contracts/audit.ts";
 import { vectorPageQuerySchema } from "../../packages/contracts/vectors.ts";
+import { BrokerClient } from "../../packages/adapters/sandbox/broker-client.ts";
+import { SocketBrokerExchange } from "../../packages/adapters/sandbox/broker-socket.ts";
 import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../packages/contracts/candidate.ts";
 import { INSTALLED_COMPARATOR_POLICIES } from "../../packages/contracts/verification.ts";
 
@@ -330,6 +332,37 @@ export function filesystemProbe(): ConfigInput["filesystem"] {
   };
 }
 
+// The doctor's sentence about the supervisor, kept in one exported function so the
+// three answers it can give are testable without booting a worker.
+//
+// A socket file at the configured path is one fact; whether the process behind it
+// answers *this protocol* is another, and only the second tells the operator that a
+// profile could be started and owned at all. The question is asked with a handle this
+// worker never minted, so the only honest answer is "not mine" - and an answer of
+// `owned: true` is a failure of its own, because it would mean the supervisor hands out
+// authority over a resource no caller proved (§11 forbids cleanup from acting on that).
+export async function classifyBrokerProbe(
+  pathIsSocket: boolean,
+  broker: BrokerClient,
+): Promise<CheckOutcome> {
+  if (!pathIsSocket) return { state: "failed", reasons: ["broker-socket-absent-or-not-a-socket"] };
+  const answered = await broker.inspectOwned({
+    command: "inspectOwned",
+    requestId: newId(),
+    jobId: newId(),
+    handle: newId(),
+  });
+  if (!answered.ok) {
+    // Degraded, not failed: something owns the path and it is not answering our protocol.
+    // Every other capability may still be present, and §14's health shape keeps the two
+    // states apart rather than collapsing them into "unhealthy".
+    return { state: "degraded", reasons: ["broker-socket-not-answering-the-protocol"] };
+  }
+  if (answered.value.owned) return { state: "failed", reasons: ["broker-claimed-an-unminted-handle"] };
+  return { state: "ok", facts: { reachable: true, protocol: "answered", presence: answered.value.presence } };
+}
+
+
 function readProfiles(profileDir: string): { label: string; json: JsonValue }[] {
   let names: string[];
   try {
@@ -502,6 +535,14 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     canEnforceSandbox: request.sandboxEnforced === true,
     reaPackageDigest: digestOfFile(config.reaEntrypoint),
   });
+  // DESIGN §3 line 74's supervisor, reached over §14 line 473's private socket. This is
+  // the first production construction point for `BrokerClient` (issue #121): until now the
+  // only implementation of the byte exchange lived in a test, which is how a protocol with
+  // no server on the other end stayed green. The client owns no decision - it encodes one
+  // named command and reads one named answer - and it is built whether or not a broker is
+  // currently listening, because "is one there" is a question the doctor asks, not one this
+  // line gets to assume.
+  const broker = new BrokerClient({ exchange: new SocketBrokerExchange({ socketPath: config.brokerSocket }) });
 
   const vectors = new VectorService({
     storage: writer,
@@ -1241,11 +1282,10 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
               : { state: "degraded", reasons: profile.unavailableReasons },
       },
       {
+        // §14 line 477 asks the doctor for the broker's *actual availability*, and
+        // `classifyBrokerProbe` below is the single owner of what that sentence means.
         name: "broker-socket",
-        run: (): CheckOutcome =>
-          filesystemProbe().isSocket(config.brokerSocket)
-            ? { state: "ok", facts: { reachable: true } }
-            : { state: "failed", reasons: ["broker-socket-absent-or-not-a-socket"] },
+        run: async (): Promise<CheckOutcome> => classifyBrokerProbe(filesystemProbe().isSocket(config.brokerSocket), broker),
       },
       {
         name: "network-lockdown",
