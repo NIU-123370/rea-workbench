@@ -136,7 +136,11 @@ export function projectJobRecord(job: JobRow, leases: readonly LeaseRow[]): JobR
 const NAMED_REASON = /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/;
 export const UNSHAPEABLE_REASON = "reason-unshapeable";
 
-function namedReason(reason: string): string {
+// Exported because `resource_leases.last_error_json` is written by a second construction site
+// (`har-ingestion.ts` records the inspection failure on the lease as well as on the job), and §12.1
+// names that column beside `jobs.error_json` as one face of the same rule. Two rules would drift;
+// one predicate cannot.
+export function namedReason(reason: string): string {
   return NAMED_REASON.test(reason) ? reason : UNSHAPEABLE_REASON;
 }
 
