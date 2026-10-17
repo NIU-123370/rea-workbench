@@ -46,6 +46,11 @@ import type {
 } from "../../packages/application/ports.ts";
 import type { Result } from "../../packages/domain/result.ts";
 
+// §12.1 line 441: an operation that needs the exclusion context is asked to supply it again.
+// These cases declare nothing unless they are the refusal cases; the door still runs for them
+// because the structural half of the filter needs no declaration to fire.
+const undisclosedDeclaration = { sensitive: { declaredValues: [] as string[] } };
+
 // VerificationService against real storage (DESIGN §10, PRD F09 / A08, issue #20).
 //
 // Plan, blueprint and candidate rows are seeded through the storage port here:
@@ -489,6 +494,15 @@ function eventsFor(id: string): string[] {
   return eventRowsFor(id).map((event) => event.type);
 }
 
+// The report artifact is the other half of "nothing was written": the completion publishes the
+// report bytes before it commits the row, so a refusal has to leave the artifact count where it was.
+function reportArtifactCount(): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS n FROM artifacts WHERE class = 'report'")
+    .get() as { n: number };
+  return Number(row.n);
+}
+
 function recordedCount(candidateId: Id): number {
   const row = db
     .prepare("SELECT COUNT(*) AS n FROM verifications WHERE candidate_id = ?")
@@ -545,7 +559,7 @@ afterAll(async () => {
 describe("recording a verification (DESIGN §10)", () => {
   it("derives a PASS the caller was never allowed to state", async () => {
     const scenario = await seedScenario("pass");
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     expect(committed.report.result).toBe("PASS");
     expect(committed.report.counts).toEqual({ total: 2, passed: 2, failed: 0, blocked: 0, skipped: 0 });
     expect(committed.report.identities.snapshotDigest).toBe(scenario.snapshotDigest);
@@ -575,7 +589,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("refuses a submission that tries to state its own verdict", async () => {
     const scenario = await seedScenario("forged");
     const forged = await failureOf(
-      verifications.complete(projectId, evaluator, completionFor(scenario, { result: "PASS" })),
+      verifications.complete(projectId, evaluator, completionFor(scenario, { result: "PASS" }), undisclosedDeclaration),
     );
     expect(forged.code).toBe("INVALID_INPUT");
     expect(forged.reason).toBe("completion-schema");
@@ -585,12 +599,12 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("refuses every actor but the evaluator, before reading the payload", async () => {
     const scenario = await seedScenario("actors");
-    const denied = await failureOf(verifications.complete(projectId, builder, { nonsense: true }));
+    const denied = await failureOf(verifications.complete(projectId, builder, { nonsense: true }, undisclosedDeclaration));
     expect(denied.code).toBe("ACCESS_DENIED");
     expect(denied.reason).toBe("builder-may-not-record-a-verification");
 
     const inspectorDenied = await failureOf(
-      verifications.complete(projectId, inspector, completionFor(scenario)),
+      verifications.complete(projectId, inspector, completionFor(scenario), undisclosedDeclaration),
     );
     expect(inspectorDenied.reason).toBe("only-the-evaluator-records-a-verification");
     expect(journal("verification.complete", "deny")).toContain("only-the-evaluator-records-a-verification");
@@ -603,7 +617,7 @@ describe("recording a verification (DESIGN §10)", () => {
       verifications.complete(
         projectId,
         evaluator,
-        completionFor(scenario, { comparatorPolicyId: "ignore-volatile-v9" }),
+        completionFor(scenario, { comparatorPolicyId: "ignore-volatile-v9" }), undisclosedDeclaration,
       ),
     );
     expect(denied.code).toBe("CAPABILITY_UNAVAILABLE");
@@ -622,7 +636,7 @@ describe("recording a verification (DESIGN §10)", () => {
       verifications.complete(
         projectId,
         evaluator,
-        completionFor(scenario, { reportStagingId: TAMPERED_STAGING_ID }),
+        completionFor(scenario, { reportStagingId: TAMPERED_STAGING_ID }), undisclosedDeclaration,
       ),
     );
     expect(denied.code).toBe("REA_CONTRACT_MISMATCH");
@@ -632,7 +646,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("refuses a completion naming a blueprint the candidate was not built against", async () => {
     const scenario = await seedScenario("wrong-blueprint");
     const denied = await failureOf(
-      verifications.complete(projectId, evaluator, completionFor(scenario, { blueprintId: newId() })),
+      verifications.complete(projectId, evaluator, completionFor(scenario, { blueprintId: newId() }), undisclosedDeclaration),
     );
     expect(denied.reason).toBe("candidate-blueprint-mismatch");
   });
@@ -644,7 +658,7 @@ describe("recording a verification (DESIGN §10)", () => {
       verifications.complete(
         projectId,
         evaluator,
-        completionFor(scenario, { observations: [observation(stranger)] }),
+        completionFor(scenario, { observations: [observation(stranger)] }), undisclosedDeclaration,
       ),
     );
     expect(denied.code).toBe("REA_CONTRACT_MISMATCH");
@@ -653,7 +667,7 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("settles a missing oracle to skipped, which keeps the result below PASS", async () => {
     const scenario = await seedScenario("no-oracle", { unreviewedMain: true });
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     expect(committed.report.result).toBe("UNKNOWN");
     // The unreviewed sample still occupies the plan's denominator (§10).
     expect(committed.report.counts.total).toBe(2);
@@ -665,7 +679,7 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("refuses a plan that is not approved and writes nothing", async () => {
     const scenario = await seedScenario("draft-plan", { approvedPlan: false });
-    const denied = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const denied = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     expect(denied.code).toBe("BLUEPRINT_BLOCKED");
     expect(denied.reason).toBe("plan-not-approved");
     expect(journal("verification.complete", "deny")).toContain("plan-not-approved");
@@ -674,7 +688,7 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("hands the Builder categories only, never a sample id or a diff", async () => {
     const scenario = await seedScenario("builder-view");
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     const summary = unwrap(await verifications.builderSummary(projectId, committed.verificationId));
     const text = JSON.stringify(summary);
     for (const vector of scenario.vectors) {
@@ -692,7 +706,7 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("refuses to read back a report whose body disagrees with its row", async () => {
     const scenario = await seedScenario("tampered-report");
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     const stored = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
 
     // A report body that is internally valid and correctly hashed, but bound to a
@@ -738,7 +752,7 @@ describe("recording a verification (DESIGN §10)", () => {
       approved: true,
     });
     const denied = await failureOf(
-      verifications.complete(projectId, evaluator, completionFor(scenario)),
+      verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration),
     );
     expect(denied.code).toBe("BLUEPRINT_BLOCKED");
     expect(JSON.stringify(denied.details)).toContain("inventory-not-partitioned");
@@ -766,7 +780,7 @@ describe("recording a verification (DESIGN §10)", () => {
             }),
             observation(holdoutVector.id),
           ],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     expect(committed.report.result).toBe("FAIL");
@@ -785,7 +799,7 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("reports staleness from the rows that exist now without rewriting the report", async () => {
     const scenario = await seedScenario("stale");
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     const storedBefore = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
 
     // A later import adds a sample to the same snapshot. The frozen plan is not
@@ -819,7 +833,7 @@ describe("recording a verification (DESIGN §10)", () => {
   // ID」 was true only for builds.
   it("records the result onto the job that asked for it, in the same write as the report", async () => {
     const scenario = await seedScenario("job-bound");
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     const row = jobFields(scenario.jobId);
     expect(row["state"]).toBe("succeeded");
     // Read back by value: the pointer is the verification this call just returned, which is the whole
@@ -842,7 +856,7 @@ describe("recording a verification (DESIGN §10)", () => {
     const scenario = await seedScenario("job-unknown");
     const reports = verificationCount();
     const jobs = jobCount();
-    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: newId() })));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: newId() }), undisclosedDeclaration));
     expect(failure.code).toBe("NOT_FOUND");
     expect(failure.reason).toBe("verification-job-unknown");
     expect(verificationCount()).toBe(reports);
@@ -853,7 +867,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("refuses to hang a verification on another kind of work, naming the kind", async () => {
     const scenario = await seedScenario("job-kind");
     const captureJob = seedJob(scenario, "capture", "running", {});
-    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: captureJob })));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: captureJob }), undisclosedDeclaration));
     expect(failure.code).toBe("INVALID_INPUT");
     expect(failure.reason).toBe("verification-job-kind-mismatch");
     expect(failure.details["jobKind"]).toBe("capture");
@@ -866,14 +880,14 @@ describe("recording a verification (DESIGN §10)", () => {
     const other = await seedScenario("job-request-b");
     // A real verify job in the same project - but it was queued for another candidate. §10 has the
     // worker derive the bound identities from rows it owns, so this is not a free choice of pointer.
-    const crossed = await failureOf(verifications.complete(projectId, evaluator, completionFor(asked, { jobId: other.jobId })));
+    const crossed = await failureOf(verifications.complete(projectId, evaluator, completionFor(asked, { jobId: other.jobId }), undisclosedDeclaration));
     expect(crossed.reason).toBe("verification-job-request-mismatch");
     expect(crossed.details["fields"]).toEqual(["candidateId"]);
 
     // The comparator is the other half of the same request. An *installed* name still has to be the one
     // that was asked for, or the looser policy would be adjudicating a request made under the strict one.
     const looser = await failureOf(
-      verifications.complete(projectId, evaluator, completionFor(asked, { comparatorPolicyId: "exact-http-normalized-v1" })),
+      verifications.complete(projectId, evaluator, completionFor(asked, { comparatorPolicyId: "exact-http-normalized-v1" }), undisclosedDeclaration),
     );
     expect(looser.reason).toBe("verification-job-request-mismatch");
     expect(looser.details["fields"]).toEqual(["comparatorPolicyId"]);
@@ -884,7 +898,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("refuses a verify job whose input this door never wrote, rather than reading it as no constraint", async () => {
     const scenario = await seedScenario("job-blank-input");
     const handWritten = seedJob(scenario, "verify", "running", {});
-    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: handWritten })));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: handWritten }), undisclosedDeclaration));
     expect(failure.reason).toBe("verification-job-request-mismatch");
     expect((failure.details["fields"] as string[]).slice().sort()).toEqual(["candidateId", "comparatorPolicyId"]);
     expect(recordedCount(scenario.candidateId)).toBe(0);
@@ -893,7 +907,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("will not resurrect a terminal job, and says which state it found (§11)", async () => {
     const scenario = await seedScenario("job-terminal");
     const cancelled = seedJob(scenario, "verify", "cancelled", verifyInputFor(scenario));
-    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: cancelled })));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: cancelled }), undisclosedDeclaration));
     expect(failure.code).toBe("REVISION_CONFLICT");
     expect(failure.reason).toBe("verification-job-terminal");
     expect(failure.details["jobState"]).toBe("cancelled");
@@ -906,7 +920,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("takes a queued job through running to succeeded in one write (the build door's precedent)", async () => {
     const scenario = await seedScenario("job-queued");
     const queued = seedJob(scenario, "verify", "queued", verifyInputFor(scenario));
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: queued })));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: queued }), undisclosedDeclaration));
     // §11's diagram has no queued→succeeded edge, so the row is moved through running first by the same
     // owner (`transition`) the build door uses - `queued` is not a state that holds a result.
     expect(jobFields(queued)["state"]).toBe("succeeded");
@@ -915,8 +929,8 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("refuses a second result on a job that already carries one", async () => {
     const scenario = await seedScenario("job-twice");
-    const first = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
-    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const first = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     expect(failure.code).toBe("REVISION_CONFLICT");
     expect(failure.reason).toBe("verification-job-already-completed");
     expect(recordedCount(scenario.candidateId)).toBe(1);
@@ -926,7 +940,7 @@ describe("recording a verification (DESIGN §10)", () => {
 
   it("reaches the client through the projection the job page reads (§8 line 277)", async () => {
     const scenario = await seedScenario("job-projection");
-    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario), undisclosedDeclaration));
     const looked = writer.transact((tx) => {
       const job = tx.getJob(projectId, scenario.jobId);
       return job === null ? null : projectJobRecord(job, tx.listLeasesForJobs(projectId, [scenario.jobId]));
@@ -939,6 +953,90 @@ describe("recording a verification (DESIGN §10)", () => {
     // in the shape a browser would actually get.
     expect(record).toMatchObject({ kind: "verify", state: "succeeded", resultRef: committed.verificationId });
     expect(record.error).toBeNull();
+  });
+
+  // §12.1 names safeDiff as one of the faces the single filter owner covers. `deriveOutcomes` is the
+  // only place a safeDiff is ever written - the comparator's own JSON, arriving from a trusted process
+  // - so the door belongs here, on the operation that carries the evaluator's declaration (§12.1 line
+  // 441 asks the caller to supply it again rather than assuming an old one survived).
+  it("refuses a safeDiff carrying what the completion declared, and publishes no report", async () => {
+    const SECRET = "sesame-secret-value";
+    const scenario = await seedScenario("filter-declared");
+    const before = reportArtifactCount();
+
+    const refusal = await failureOf(
+      verifications.complete(
+        projectId,
+        evaluator,
+        completionFor(scenario, {
+          observations: scenario.vectors.map((vector, index) =>
+            observation(vector.id, index === 0 ? { safeDiff: { expected: SECRET } } : {}),
+          ),
+        }),
+        { sensitive: { declaredValues: [SECRET] } },
+      ),
+    );
+    expect(refusal.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refusal.reason).toBe("declared-value-present");
+    // The refusal is a name, not a sample of what it refused.
+    expect(refusal.message).not.toContain(SECRET);
+
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+    expect(reportArtifactCount()).toBe(before);
+    expect(journal("verification.complete", "deny")).toContain("declared-value-present");
+  });
+
+  it("refuses a safeDiff shaped like a transport authentication header with nothing declared", async () => {
+    const scenario = await seedScenario("filter-structure");
+    const refusal = await failureOf(
+      verifications.complete(
+        projectId,
+        evaluator,
+        completionFor(scenario, {
+          observations: scenario.vectors.map((vector, index) =>
+            observation(vector.id, index === 0 ? { safeDiff: { headers: [{ name: "Authorization", value: "Bearer any" }] } } : {}),
+          ),
+        }),
+        undisclosedDeclaration,
+      ),
+    );
+    expect(refusal.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refusal.reason).toBe("transport-auth-structure");
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+  });
+
+  it("runs the same door over the evaluator's own limitation lines", async () => {
+    // A mutant that scans only the cases survives nothing here: `limitations` is the other free-text
+    // carrier this operation writes into the report, and it is scanned for the same reason.
+    const SECRET = "sesame-secret-value";
+    const scenario = await seedScenario("filter-limitations");
+    const refusal = await failureOf(
+      verifications.complete(
+        projectId,
+        evaluator,
+        completionFor(scenario, { limitations: [`replay with ${SECRET} against the staging host`] }),
+        { sensitive: { declaredValues: [SECRET] } },
+      ),
+    );
+    expect(refusal.reason).toBe("declared-value-present");
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+  });
+
+  it("still records the verification when the declared value is nowhere in the transcript", async () => {
+    const scenario = await seedScenario("filter-clear");
+    const committed = unwrap(
+      await verifications.complete(
+        projectId,
+        evaluator,
+        completionFor(scenario),
+        { sensitive: { declaredValues: ["nothing-in-this-transcript"] } },
+      ),
+    );
+    expect(committed.report.result).toBe("PASS");
+    expect(recordedCount(scenario.candidateId)).toBe(1);
+    // And the declaration itself is not in what got written: the report is digested over the
+    // comparison, not over what the caller asked to be hidden.
+    expect(JSON.stringify(committed.report)).not.toContain("nothing-in-this-transcript");
   });
 });
 

@@ -959,8 +959,17 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     // gates on - a builder or an inspector reaching this name is refused there with its own reason,
     // not filtered here - and the payload is passed as the service's own schema reads it, so the
     // staging bytes stay an opaque id plus a digest rather than a path or a storage key.
-    "verification.complete": async (payload, actor) =>
-      relay(await verifications.complete(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
+    // The completion is the evaluator's own operation, so §12.1 line 441 asks the *caller* to supply
+    // the exclusion context again rather than assuming an old one survives: it arrives on the frame
+    // beside `request`, and the service runs the door over the transcript it is about to persist.
+    "verification.complete": async (payload, actor) => {
+      const fields = asRecord(payload);
+      return relay(
+        await verifications.complete(projectIdOr(payload), actor, fields["request"] ?? {}, {
+          sensitive: { declaredValues: stringList(fields["sensitiveValues"]) },
+        }),
+      );
+    },
     // §10's claim. The frame carries no job id unless the caller narrows the queue to one candidate, and
     // the service - not this handler - decides which row starts, because the row, the deadline and the
     // state machine all live behind the single writer.

@@ -1504,7 +1504,41 @@ runner 的，见下文"这轮没做浏览器"）：
 - 末态闸门：typecheck 0／lint **208 文件 0 条**／`test:unit` **689/39**／`test:integration`
   **521 passed + 6 skipped / 26 files**／`docs:check` exit 0（源码引用 270 处／201 个文件、设计锚点 379 处）。
 
+发布门禁·第廿九轮（2026-10-18 05:31–05:34，**#125 的第 4 格：`safeDiff` 这一面第一次有了真正的 owner**）：
 
+- #125 原话把这一面列为「只有 `report.ts` 那条 `holdout-safe-diff-exposed` 守卫（管的是 holdout 明细不许外泄，
+  不是声明值不许出现在 diff 里）」。现读确认它是**唯一写入非 null safeDiff 的地方**：`grep -rn "safeDiff" packages`
+  共 **13 处** = 3 处形状/类型（contracts 两条＋`domain/report.ts` 的 `ReportedCase`）、4 处注释、1 处 holdout 守卫、
+  1 处对外投影，剩下 **4 处赋值**里只有 `observation.safeDiff` 那一条把调用方的值搬进报告，其余三条都是显式 `null`。
+  而 `packages/contracts/verification.ts` 里原本写着「Already filtered by the only filter owner before it arrives
+  here」——那是一句**没有实现支撑的承诺**；本轮把它变成实现，注释改成指向真正执行它的那道门。
+- 门放在**解析后的那份 transcript** 上、`findComparatorPolicy` 与 staging 读回之前：扫的是评估者自己送来的
+  `observations[].safeDiff` 与 `limitations`。与 `vector.create` 的 caller-payload 检查同一待遇——
+  拒的是调用方发了什么，不是这个服务碰巧留下了什么（推导过程只会把 safeDiff 抹成 null，不会新增文本）。
+  §12.1「过滤发生在任何持久化/输出之前」在这一面的读数是：命中时 `verifications` 行数 0、
+  `artifacts` 中 `class='report'` 的行数不变、deny 审计点名 reason。
+- **门的位置自己有一条 witness**：RPC 那条用例故意用一批**不存在的** candidate／job／blueprint id。门在前面，
+  答案就是 `SENSITIVE_CONTENT_BLOCKED`；把门挪到行绑定之后（变异 N4），同一帧的答案变成 `REA_CONTRACT_MISMATCH`。
+  「先过滤、再动行」因此是回包里读出来的顺序，不是注释。
+- 声明仍走帧（§12.1 line 441 末句：后续操作需要排除上下文时调用方必须重新显式提供）：`verification.complete`
+  的处理器读与 `request` 平级的 `sensitiveValues`。**这条命令没有 HTTP 门**——§10 说评估者不是浏览器，
+  §8 那 40 行里本就没有它，闭合的命令表就是它的线面，所以这一面不存在上一轮那种「门口不收这个名字」的缺口。
+- 新增用例 5 条。服务侧 4 条：声明值在 `safeDiff` → 拒＋零副作用；`{name:"Authorization",value:...}` 形状在
+  **什么都没声明**时也拒（结构本身是理由）；同一值只出现在 `limitations` 也拒；声明了一个不在场的串 →
+  照常 PASS 且报告正文不含它。RPC 侧 1 条：同一份 transcript 带声明被门拒、不带声明被行的规则拒——
+  两个答案不同才叫门在动。
+- 变异 **6 支全红**（都在**最终位置**上重跑过）：N1 删门（**4 条红**）、N2' 只扫 observations、N3 处理器把列表写死成空、N4 门挪到行绑定之后、
+  N5' 只扫 limitations、N8' 门照跑但吞掉结论。**没有存活变异**。
+- N8' 与 N1 在任何用例上都同色，两支仍都跑：区别是给**读代码的人**看的——「检查跑了但结论没人接」是这个族里
+  独立的一种失手形状，§12.1「不许静默改写已批准内容」正好管它。这条算可读性增量，不计进红绿证据。
+- 末态闸门：typecheck 0／lint **208 文件 0 条**／`test:unit` **689/39**（本轮没动单测面）／`test:integration`
+  **526 passed + 6 skipped / 26 files**／`docs:check` exit 0（源码引用 270 处／201 个文件、设计锚点 379 处——
+  本轮新增的都是 `§12.1`／`#125` 这类锚点，不产生新的 T/A/D 引用，两个计数因此没动）。
+
+**这轮仍然没做的**：#125 第 3 格（导出面）与第 6 格（`resource_leases.last_error_json` 无生产者）仍开着。
+第 3 格卡在一个我没有替它裁的点：`POST /projects/:p/exports` 的 §8 请求字段里**没有** `sensitiveValues`，
+所以那一面要么按 line 441 末句让调用方在门口重新提供（＝给这扇门加一个文档没写的名字），
+要么承认包的正文本来就来自各自已过门的行——两条都不是「补个调用」，等你选。
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
