@@ -66,6 +66,14 @@ export const URL_TARGET_IDENTITY_REASON = "url-declared-not-captured";
 // can name are one vocabulary rather than three that happen to agree today.
 export const TARGET_KINDS = ["url", "har", "asar"] as const;
 
+// The two kinds that arrive as bytes through §8 line 272's import door. This list, not a copy in a
+// contract, is what decides "which uploads exist": the same value names the target row's `kind`,
+// the ingestion command's `format`, and the producer tool the adapter may ask for, so a third list
+// that drifts would be a target nobody can import or an import that stores a kind nobody reads.
+export const FILE_TARGET_KINDS = ["har", "asar"] as const;
+
+export type FileTargetKind = (typeof FILE_TARGET_KINDS)[number];
+
 export type TargetKind = (typeof TARGET_KINDS)[number];
 
 export function isTargetKind(name: string): name is TargetKind {

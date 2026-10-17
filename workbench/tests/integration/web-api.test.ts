@@ -3499,6 +3499,7 @@ describe("the import door (§8 line 272 / issue #58)", () => {
     return asId((body.data?.id ?? body.id) as string);
   }
 
+  const ASAR_EVIDENCE_ID = `ev_${"a".repeat(64)}`;
   const HAR_TEXT = JSON.stringify({ log: { version: "1.2", creator: { name: "fixture", version: "1" }, entries: [] } });
   const uploadPath = (projectId: Id) => `${API_PREFIX}/projects/${String(projectId)}/imports`;
 
@@ -3728,20 +3729,80 @@ describe("the import door (§8 line 272 / issue #58)", () => {
     expect(badDeadline.text).not.toContain("tomorrow");
   });
 
-  it("answers an ASAR upload the two ways §8 distinguishes", async () => {
+  it("ingests an ASAR upload the way §8 line 272 states it, and drives it to evidence (issue #113)", async () => {
     const session = await pairSession();
     const projectId = await freshProject(session, "import-asar");
+    const headers = { host: host(), origin: `http://${host()}`, cookie: session.cookie };
+    const readTarget = async (targetId: string) => {
+      const got = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/targets/${targetId}`, { headers });
+      expect(got.status, got.text).toBe(200);
+      return targetViewSchema.parse(JSON.parse(got.text) as JsonValue);
+    };
 
-    const bare = await upload(session, projectId, formOf({ kind: "asar" }), "import-key-11");
-    expect(bare.status, bare.text).toBe(503);
-    expect(reasonOf(bare.text)["reason"]).toBe("import-asar-not-wired");
+    const bare = await upload(
+      session,
+      projectId,
+      formOf({ kind: "asar", filename: "app.asar", mediaType: "application/octet-stream" }),
+      "import-key-11",
+    );
+    // This used to answer 503 `import-asar-not-wired`: the door named two kinds and only one of them
+    // had an ingestion loop behind it, so F12's whole static branch could only ever be exercised by
+    // a test that seeded its own envelope. §8 line 272's `kind:'har'|'asar'` is now literally true.
+    expect(bare.status, bare.text).toBe(202);
+    const receipt = harImportHttpResponseSchema.parse(JSON.parse(bare.text) as JsonValue);
+    expect(receipt.job.kind).toBe("inspect");
+    expect(receipt.job.state).toBe("queued");
+
+    const before = await readTarget(receipt.targetId);
+    expect(before.kind).toBe("asar");
+    // §5 draws the line §4 does not: an archive is never captured, so it has a source digest and no
+    // deployment snapshot - and the difference has to be readable, not inferred from a null.
+    expect(before.sourceSha256).not.toBeNull();
+    expect(before.snapshotDigest).toBeNull();
+    expect(before.identityReason).toBe("file-import-without-capture");
+    expect(before.evidenceIds).toEqual([]);
 
     // §8 line 272 names this 422 itself (ASAR 携带 sensitiveValues 返回 422, 不伪称上游支持), and it
     // is the answer the caller can act on, so it comes before "this build has no ASAR path at all".
+    // §8 line 272's own 422 stays in front of everything: upstream has no sensitive projection for
+    // this tool, and "remove the declaration" is a different instruction from "this path is missing".
     const declared = await upload(session, projectId, formOf({ kind: "asar", sensitiveValues: ["sesecret"] }), "import-key-12");
     expect(declared.status, declared.text).toBe(422);
     expect(reasonOf(declared.text)["reason"]).toBe("import-asar-sensitive-values-unsupported");
     expect(declared.text).not.toContain("sesecret");
+
+    // §11's other half of #108: an ASAR row is an `inspect` row, so the same runner drives it, and
+    // the tool it asks for is chosen by the stored target - not by anything a caller re-declares.
+    for (let turns = 0; turns < 40; turns += 1) {
+      const outcome = await worker.runJobs();
+      if (!outcome.ok) throw new Error(`${outcome.error.code}:${outcome.error.reason}`);
+      if (outcome.value.kind === "idle") break;
+    }
+
+    const job = jobRecordSchema.parse(JSON.parse((await call("GET", `${API_PREFIX}/projects/${String(projectId)}/jobs/${receipt.job.id}`, { headers })).text) as JsonValue);
+    expect(job.state).toBe("succeeded");
+    expect(job.resultRef).toBe(ASAR_EVIDENCE_ID);
+
+    const after = await readTarget(receipt.targetId);
+    expect(after.evidenceIds).toEqual([ASAR_EVIDENCE_ID]);
+
+    // The envelope is about *this* archive: the producer's answer names the path the store minted, so
+    // a fixture that echoed a recorded path could never satisfy this. Read back from disk, the same
+    // bytes are still there and still hash to the target's source digest.
+    const evidence = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/evidence/${ASAR_EVIDENCE_ID}`, { headers });
+    expect(evidence.status, evidence.text).toBe(200);
+    const view = evidenceViewSchema.safeParse(JSON.parse(evidence.text) as JsonValue);
+    if (!view.success) throw new Error(`the evidence route refused its own schema: ${evidence.text}`);
+    const envelope = view.data.evidence as unknown as {
+      operation: string;
+      parameters: { input_path?: string | null; format?: string };
+    };
+    expect(envelope.operation).toBe("analyze_javascript_application");
+    expect(envelope.parameters.format).toBe("asar");
+    const namedPath = envelope.parameters.input_path;
+    expect(typeof namedPath).toBe("string");
+    const readBack = readFileSync(namedPath as string);
+    expect(digestBytes(new Uint8Array(readBack))).toBe(after.sourceSha256);
   });
 
   it("measures the upload before it allocates: empty, oversized and beyond the transport", async () => {

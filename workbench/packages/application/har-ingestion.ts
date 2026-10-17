@@ -11,6 +11,7 @@ import type { HarImportReceipt, InspectionReceipt } from "../contracts/imports.t
 import { reaEvidenceSchema } from "../contracts/rea-evidence.ts";
 import type { ReaEvidence } from "../contracts/rea-evidence.ts";
 import type { Actor } from "./actor.ts";
+import type { FileTargetKind } from "../domain/target.ts";
 import { buildAuditRow, commitDecision, recordDeny, type Step } from "./decision.ts";
 import { gateFail, issueNames, type GateFailure } from "./gate-failure.ts";
 import { assertPayloadClean } from "./sanitizer.ts";
@@ -276,14 +277,17 @@ export class HarIngestionService {
         const target: TargetRow = {
           id: targetId,
           projectId,
-          kind: "har",
+          kind: command.format,
           originalLocator: locator,
           sourceSha256: measured,
           sourceArtifactId,
-          // §4: for a file target the snapshot identity is the content digest, so
-          // it exists before any producer has opened the file.
-          snapshotDigest: measured,
-          identityReason: null,
+          // §4: for a captured file the snapshot identity is the content digest, so it exists before
+          // any producer has opened the file. §5 says the other half of line 272 is not captured at
+          // all - an archive is an archive - so an ASAR import states a source digest and no
+          // deployment snapshot, and `identityReason` is where the difference has to be readable
+          // rather than inferred from a null.
+          snapshotDigest: command.format === "har" ? measured : null,
+          identityReason: command.format === "har" ? null : "file-import-without-capture",
           createdAt: created,
         };
         tx.insertTarget(target);
@@ -352,7 +356,7 @@ export class HarIngestionService {
             job: projectJobRecord(job, tx.listLeasesForJobs(projectId, [jobId])),
             leaseId,
             sourceArtifactId,
-            snapshotDigest: measured,
+            snapshotDigest: target.snapshotDigest,
             byteLength: command.byteLength,
             reused: false,
           },
@@ -440,12 +444,30 @@ export class HarIngestionService {
       return gateFail("INVALID_INPUT", "artifact-path-unresolvable", "only a path this store minted may be inspected");
     }
 
+    // The stored target row, not the request, decides which producer is asked - §8 line 272's `kind`
+    // is fixed at import time, and re-reading it from the row is what keeps a resumed inspection
+    // from being talked into asking the capture tool to read an archive.
     const recordOrdinals = arrayOf(commandOf(job), "recordOrdinals");
+    const ordinals = Array.isArray(recordOrdinals) ? recordOrdinals.map((value) => Number(value)) : null;
+    if (target.kind === "asar" && ordinals !== null) {
+      return gateFail(
+        "INVALID_INPUT",
+        "inspection-record-ordinals-for-archive",
+        "a record selection belongs to a network capture; an ASAR import analyses the whole archive",
+      );
+    }
+    // A declared URL target never reaches this line: it has no store-minted source artifact, and the
+    // `import-incomplete` refusal above is what says so. So the two kinds left are exactly §8 line
+    // 272's two, and the narrowing below is a type fact rather than a second gate.
+    const format: FileTargetKind = target.kind === "asar" ? "asar" : "har";
     const outcome = await this.inspector.inspect({
       capturePath,
-      format: "har",
-      recordOrdinals: Array.isArray(recordOrdinals) ? recordOrdinals.map((value) => Number(value)) : null,
-      sensitiveValues: context.sensitive.declaredValues,
+      format,
+      recordOrdinals: ordinals,
+      // §8 line 272's own asymmetry: the declaration belongs to a HAR. An ASAR row that somehow
+      // carries one is refused rather than silently stripped, because stripping would let the
+      // producer run with a filter the operator was told does not exist.
+      sensitiveValues: target.kind === "har" ? context.sensitive.declaredValues : [],
     });
 
     if (outcome.kind === "retained-reference") {
