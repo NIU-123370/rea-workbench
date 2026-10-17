@@ -36,6 +36,8 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "target.read",
   "job.get",
   "jobs.list",
+  "job.cancel",
+  "job.cleanupRetry",
   "audit.list",
   "audit.listGlobal",
   "evidence.get",
@@ -293,6 +295,27 @@ describe("named commands and the local RPC (§14)", () => {
       // The same command for the control plane gets past the role gate and into the lookup, so
       // the refusal above cannot be a missing row wearing the role's clothes.
       const looked = await request(one.command, { projectId, [one.key]: newId() }, inspector);
+      expect(looked.ok).toBe(false);
+      if (looked.ok) continue;
+      expect(looked.error.code).toBe("NOT_FOUND");
+    }
+  });
+
+  it("refuses the two lifecycle commands for a Builder and answers them for the control plane (§8 lines 278-279)", async () => {
+    const created = unwrap(await request("project.create", { name: "lifecycle-roles" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    for (const one of [
+      { command: "job.cancel", reason: "role-may-not-cancel-jobs" },
+      { command: "job.cleanupRetry", reason: "role-may-not-retry-cleanup" },
+    ] as const) {
+      const refused = await request(one.command, { projectId, jobId: newId() }, builder);
+      expect(refused.ok).toBe(false);
+      if (refused.ok) continue;
+      expect(refused.error.code).toBe("ACCESS_DENIED");
+      expect(refused.error.reason).toBe(one.reason);
+      // The same command for a control-plane role gets past the gate and into the lookup, so the
+      // refusal above is the role rule rather than a missing row.
+      const looked = await request(one.command, { projectId, jobId: newId() }, inspector);
       expect(looked.ok).toBe(false);
       if (looked.ok) continue;
       expect(looked.error.code).toBe("NOT_FOUND");

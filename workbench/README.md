@@ -275,7 +275,7 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **32 条**，仍缺 **8 条**。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **34 条**，仍缺 **6 条**。
 这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
@@ -381,6 +381,15 @@ details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键�
   bundle 的七个键就是 §7.3 那份名录。中途还有一次真实读数：计划没批的时候去冻结拿到
   **422 `BLUEPRINT_BLOCKED`**，而路径里 id 写成 `undefined` 时命中的正是新加的
   `blueprint-id-malformed` 400——不是 404。
+- 两条作业生命周期门（`POST .../jobs/:j/cancel`、`.../cleanup-retry`，2026-10-17 01:18 同源读数）：
+  取消一个 `succeeded` 的作业 → **202 且状态仍是 `succeeded`/`cleanupState=complete`**（§8 写的
+  「完成态返回现状」）；带字段的 cancel → **400 `rejectedKeys:["reason"]`**；
+  cleanup-retry 不带幂等键 → **400 `idempotency-key-required`**；带上 → **202**
+  `{jobId, cleanupState:"complete", retryAt:null, leaseIds:[], auditSeq:17}`（那个作业没有 lease，
+  所以"没什么可排"如实报出来）；**同键重发拿到逐字相同的回包（`auditSeq` 仍是 17）而 `x-request-id` 换了**
+  ——这就是幂等日志在起作用：重放的是那次决定，不是第二次执行。
+  §11 的终态由 `canTransitionJob` 那张表持有，所以服务里**没有**再加一道"是否终态"的检查：
+  变异 P1 证明那道检查与它守的规矩没有任何可观察差别，属于装饰，本轮把它删了。
 - 两条 target 门也在同一套 rig 里过了一遍（配对页面同源，2026-10-17 01:03）：
   `POST .../targets` 交 `HTTPS://Shop.Example/Cart/../checkout?x=1` → **201**
   `{kind:"url", snapshotDigest:null, identityReason:"url-declared-not-captured", auditSeq:14}`；
