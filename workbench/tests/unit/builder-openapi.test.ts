@@ -188,15 +188,21 @@ describe("the candidate's declared adapter ABI (§10)", () => {
     expect(manifest["openApiVersion"]).toBe(OPENAPI_VERSION);
   });
 
-  it("emits a branch per reviewed operation and an error for anything else", () => {
+  it("dispatches from one table keyed by the reviewed ids, and refuses anything else in one place", () => {
     const source = adapterSource(operations);
     for (const operation of operations) {
-      expect(source).toContain(`operationId === ${JSON.stringify(operation.operationId)}`);
+      expect(source).toContain(`${JSON.stringify(operation.operationId)}: { method:`);
     }
+    // The table is the dispatch. The earlier shape carried each operation twice - a `ROUTE` entry *and*
+    // an `if (operationId === …)` branch - and the copy inside `request` held a guard nothing could
+    // reach, which is exactly the kind of decoration that survives a mutation forever. Counting the
+    // entries is what a single table makes checkable.
+    expect(source.match(/: \{ method: "/g)?.length).toBe(operations.length);
     expect(source).toContain("export async function invoke(");
+    expect(source).toContain("ROUTE[operationId]");
     expect(source).toContain("is not part of the reviewed contract");
-    // No operation means nothing callable: the fall-through says so rather than
-    // dispatching on a guessed name.
+    expect(source.match(/is not part of the reviewed contract/g)?.length).toBe(1);
+    // No operation means nothing callable: the refusal says so rather than dispatching on a guessed name.
     expect(adapterSource([])).toContain("no reviewed operation in this candidate");
   });
 

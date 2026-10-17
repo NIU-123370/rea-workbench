@@ -20,7 +20,7 @@ export function hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-export function blueprintPayload(blueprintId: Id, digest: Digest): BlueprintPayload {
+export function blueprintPayload(blueprintId: Id, digest: Digest, withPost = false): BlueprintPayload {
   return {
     schemaVersion: 1,
     blueprintId,
@@ -41,6 +41,15 @@ export function blueprintPayload(blueprintId: Id, digest: Digest): BlueprintPayl
             requestMediaType: "application/json",
             responses: [{ status: 200, mediaType: "application/json", schema: { type: "object" } }],
           },
+          // A body-carrying sibling, off by default: without one, every generated candidate has only
+          // GET routes and the `content-type`/body half of the adapter is a branch nothing executes.
+          ...(withPost ? [{
+            operationId: "addCartItem",
+            method: "POST",
+            path: "/api/cart/items",
+            requestMediaType: "application/json",
+            responses: [{ status: 201, mediaType: "application/json", schema: { type: "object" } }],
+          }] : []),
         ],
         errorCases: ["401 unauthenticated"],
         limitations: ["no retry semantics observed"],
@@ -64,12 +73,16 @@ export async function seedBlueprintForGeneration(deps: {
   // When true the index row carries a digest the payload does not claim, which is the
   // disagreement the Builder has to refuse rather than generate from.
   mismatchRowDigest?: boolean;
+  // Adds a POST operation to the reviewed contract, so a candidate can be exercised on the branch
+  // that carries a request body. Off by default: the other consumers of this fixture read the
+  // one-operation shape they were written against.
+  withPost?: boolean;
 }): Promise<SeededBlueprint> {
-  const { writer, store, projectId, targetId, name } = deps;
+  const { writer, store, projectId, targetId, name, withPost = false } = deps;
   const blueprintId = newId();
   const digest = asDigest(hex(`blueprint-${name}`));
   const rowDigest = deps.mismatchRowDigest === true ? asDigest(hex(`other-${name}`)) : digest;
-  const payload = blueprintPayload(blueprintId, rowDigest);
+  const payload = blueprintPayload(blueprintId, rowDigest, withPost);
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   const published = await store.publish(projectId, "blueprint", bytes);
   if (!published.ok) throw new Error(JSON.stringify(published.error));

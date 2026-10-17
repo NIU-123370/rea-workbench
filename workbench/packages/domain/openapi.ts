@@ -192,37 +192,53 @@ export function adapterSource(operations: readonly ReviewedOperation[]): string 
   // the contract stated. The fall-through is an error, never a best guess at which
   // endpoint the caller meant, and the base URL arrives through the context argument
   // instead of module state two parallel calls could clobber.
+  //
+  // The body rule below is not a style choice: this file used to emit `body` unconditionally, and
+  // nothing ever *ran* a generated candidate, so no test could see what a browser or a harness sees
+  // immediately - `fetch` rejects a GET carrying a body with `TypeError: Request with GET/HEAD method
+  // cannot have body`, which made every generated GET operation uncallable. Silently dropping
+  // `sdkInput` on those methods would be worse than the crash: the call would answer 200 while
+  // ignoring part of what the caller passed, which is the "best guess at what the caller meant"
+  // this function otherwise refuses to make. So a bodyless method that is handed a non-empty input
+  // names the mistake instead of hiding it.
   const routes = sorted.map(
     (operation) =>
       `    ${JSON.stringify(operation.operationId)}: { method: ${JSON.stringify(
         operation.method.toUpperCase(),
       )}, path: ${JSON.stringify(operation.path)} },`,
   );
-  const branches = sorted.map(
-    (operation) =>
-      `    if (operationId === ${JSON.stringify(operation.operationId)}) return request(context, ${JSON.stringify(
-        operation.operationId,
-      )}, sdkInput);`,
-  );
   const unknown = `throw new Error("operation " + String(operationId) + " is not part of the reviewed contract");`;
+  // One table, one lookup, one guard. There used to be a second copy of the same fact - an `if
+  // (operationId === …) return request(…)` branch per operation, plus a `route === undefined` check
+  // inside `request` that nothing could ever reach, because `invoke` had already refused the id. A
+  // mutation that turned that dead check into a silent `{ invented: true }` passed the whole suite,
+  // which is how it got found: the guard that cannot be reached cannot be wrong, and a guard that
+  // cannot be wrong is not a guard.
   return [
     `// Generated from a frozen REA Workbench blueprint. Do not edit by hand.`,
     `export type SdkInput = Record<string, unknown>;`,
     `export type Context = { baseUrl: string };`,
-    `const ROUTE: Record<string, { method: string; path: string }> = {`,
+    `type Route = { method: string; path: string };`,
+    `const ROUTE: Record<string, Route> = {`,
     ...(routes.length > 0 ? routes : [`    // no reviewed operation in this candidate`]),
     `};`,
     `async function request(`,
+    `  route: Route,`,
     `  context: Context,`,
-    `  operationId: string,`,
     `  sdkInput: SdkInput,`,
+    `  operationId: string,`,
     `): Promise<unknown> {`,
-    `  const route = ROUTE[operationId];`,
-    `  if (route === undefined) { ${unknown} }`,
-    `  const response = await fetch(context.baseUrl + route.path, {`,
-    `    method: route.method,`,
-    `    body: JSON.stringify(sdkInput),`,
-    `  });`,
+    `  const bodyless = route.method === "GET" || route.method === "HEAD";`,
+    `  const hasInput = Object.keys(sdkInput).length > 0;`,
+    `  if (bodyless && hasInput) {`,
+    `    throw new Error("operation " + String(operationId) + " is " + route.method + ": it can carry no request body, and this call passed " + String(Object.keys(sdkInput).length) + " field(s)");`,
+    `  }`,
+    `  const init: Record<string, unknown> = { method: route.method };`,
+    `  if (!bodyless && hasInput) {`,
+    `    init.body = JSON.stringify(sdkInput);`,
+    `    init.headers = { "content-type": "application/json" };`,
+    `  }`,
+    `  const response = await fetch(context.baseUrl + route.path, init);`,
     `  return (await response.json()) as unknown;`,
     `}`,
     `export async function invoke(`,
@@ -230,8 +246,9 @@ export function adapterSource(operations: readonly ReviewedOperation[]): string 
     `  sdkInput: SdkInput,`,
     `  context: Context,`,
     `): Promise<unknown> {`,
-    ...(branches.length > 0 ? branches : [`    ${unknown}`]),
-    `  ${unknown}`,
+    `  const route = ROUTE[operationId];`,
+    `  if (route === undefined) { ${unknown} }`,
+    `  return request(route, context, sdkInput, operationId);`,
     `}`,
   ].join("\n");
 }
