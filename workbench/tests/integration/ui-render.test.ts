@@ -210,3 +210,30 @@ describe("the list view's own actions (PRD F04, issue #18 acceptance)", () => {
     expect(markup).toContain("data-tab=\"report\"");
   });
 });
+
+describe("the 样本 tab in the rendered shell (issue #58)", () => {
+  it("is an enabled control for a local operator and a named refusal for a Builder", () => {
+    const inspector = renderToStaticMarkup(
+      createElement(WorkbenchColumns, {
+        left: { reason: "no-task-and-no-target" },
+        cells: [],
+        canvasFailures: [],
+        tabs: buildRightTabs({ isBuilder: false, hasBlueprint: true }),
+        activeTab: "samples",
+      }),
+    );
+    expect(inspector).toContain('data-tab="samples"');
+    expect(inspector).toContain('data-enabled="yes"');
+    const builder = renderToStaticMarkup(
+      createElement(WorkbenchColumns, {
+        left: { reason: "no-task-and-no-target" },
+        cells: [],
+        canvasFailures: [],
+        tabs: buildRightTabs({ isBuilder: true, hasBlueprint: true }),
+        activeTab: "contract",
+      }),
+    );
+    expect(builder).toContain('data-tab="samples"');
+    expect(builder).toContain("builder-may-not-decide-samples");
+  });
+});

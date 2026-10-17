@@ -9,7 +9,8 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, listView, pickCandidateSource, refusalFactsLine } from "../../ui/view-model.ts";
+import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, listView, pickCandidateSource, refusalFactsLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine } from "../../ui/view-model.ts";
+import type { SampleRow } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, LeftPanel, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
@@ -62,15 +63,42 @@ async function getJson(
 ): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
   const response = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
   const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const details = (payload as RefusalBody | null)?.error?.details ?? {};
-    const facts: Record<string, number | boolean> = {};
-    for (const [name, value] of Object.entries(details)) {
-      if (name === "reason") continue;
-      if (typeof value === "number" || typeof value === "boolean") facts[name] = value;
-    }
-    return { ok: false, status: response.status, reason: typeof details["reason"] === "string" ? details["reason"] : "request-refused", facts };
+  if (!response.ok) return refusalOf(response.status, payload);
+  return { ok: true, value: payload };
+}
+
+// One parse of a refusal, shared by the read and the write below: this is where an unmodelled
+// JSON body becomes a `reason` plus a swept `facts`, and two copies of the sweep would be two
+// chances to disagree about what is safe to put on screen (§12.1).
+function refusalOf(
+  status: number,
+  payload: unknown,
+): { ok: false; status: number; reason: string; facts: Record<string, number | boolean> } {
+  const details = (payload as RefusalBody | null)?.error?.details ?? {};
+  const facts: Record<string, number | boolean> = {};
+  for (const [name, value] of Object.entries(details)) {
+    if (name === "reason") continue;
+    if (typeof value === "number" || typeof value === "boolean") facts[name] = value;
   }
+  return { ok: false, status, reason: typeof details["reason"] === "string" ? details["reason"] : "request-refused", facts };
+}
+
+// A state change the operator asked for. The CSRF token is the one this session was issued,
+// read back over the same channel that reports whether it is paired: the API compares it against
+// the session it holds, so a page that sent anything else gets a 403 naming the header.
+async function postJson(
+  path: string,
+  body: unknown,
+  csrf: string,
+): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", "x-csrf-token": csrf, accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) return refusalOf(response.status, payload);
   return { ok: true, value: payload };
 }
 
@@ -214,13 +242,48 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [session, setSession] = useState<SessionState>("unknown");
   const [mode, setMode] = useState<"canvas" | "list">("canvas");
   const [activeTab, setActiveTab] = useState<RightTab["id"]>("contract");
+  const [samplesTarget, setSamplesTarget] = useState("");
+  const [samples, setSamples] = useState<{ rows: SampleRow[]; inventoryRevision: number } | null>(null);
+  const [samplesNotice, setSamplesNotice] = useState<string | null>(null);
+  const [csrf, setCsrf] = useState("");
   const [inquiries, setInquiries] = useState<DirectedInquiry[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const health = await getJson("/api/v1/session");
     setSession(health.ok ? "paired" : "unpaired");
-    if (!health.ok) return;
+    if (!health.ok) {
+      // Nothing below this line can be read without the session, so each panel says which of its
+      // own states it is in rather than leaving one of them spinning at 正在读取 (the browser pass
+      // caught the 样本 tab doing exactly that while the worker was stopped).
+      setSamples(null);
+      setSamplesNotice(SAMPLES_EMPTY_LINE["no-session"]);
+      return;
+    }
+    const issued = relayData(health.value) as { csrfToken?: string } | null;
+    setCsrf(typeof issued?.csrfToken === "string" ? issued.csrfToken : "");
+    // The inventory is indexed per target (§5), so the page asks the project which targets it
+    // has rather than guessing one from a graph node.
+    const project = await getJson(`/api/v1/projects/${props.projectId}`);
+    if (project.ok) {
+      const view = (project.value as { targetIds?: string[]; inventoryRevision?: number } | null) ?? {};
+      const first = view.targetIds?.[0];
+      if (first === undefined) {
+        setSamples(null);
+        setSamplesNotice(SAMPLES_EMPTY_LINE["no-target"]);
+      } else {
+        setSamplesTarget(first);
+        const page = await getJson(`/api/v1/projects/${props.projectId}/vectors?targetId=${first}`);
+        if (page.ok) {
+          const listed = samplesPageOf(page.value);
+          setSamples({ rows: listed.rows, inventoryRevision: listed.inventoryRevision });
+          setSamplesNotice(listed.rows.length === 0 ? SAMPLES_EMPTY_LINE["empty-page"] : null);
+        } else {
+          setSamples(null);
+          setSamplesNotice(samplesRefusalLine("read", page.reason, page.facts));
+        }
+      }
+    }
     const view = await getJson(`/api/v1/projects/${props.projectId}/graph`);
     if (!view.ok) {
       setError(view.reason);
@@ -253,6 +316,36 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // One decision, then a fresh read of the page it came from. The re-read is not decoration:
+  // the inventory revision the next decision must name is the one this response reported, and a
+  // row that still says draft after a 201 would be the page claiming a state the server does not
+  // hold. A refusal keeps the row as it was and says which side of the conflict it disagrees on.
+  const decideSample = useCallback(
+    async (row: SampleRow, decision: "approved" | "rejected") => {
+      if (csrf === "") {
+        setSamplesNotice("还没有可用的会话令牌，先完成配对。");
+        return;
+      }
+      const got = await postJson(
+        `/api/v1/projects/${props.projectId}/vectors/${row.vectorId}/review`,
+        { decision, expectedDigest: row.digest, expectedInventoryRevision: samples?.inventoryRevision ?? 0 },
+        csrf,
+      );
+      if (!got.ok) {
+        setSamplesNotice(samplesRefusalLine("decision", got.reason, got.facts));
+        return;
+      }
+      const receipt = (relayData(got.value) as { auditSeq?: number; inventoryRevision?: number } | null) ?? {};
+      setSamplesNotice(sampleDecisionLine(receipt, decision));
+      const page = await getJson(`/api/v1/projects/${props.projectId}/vectors?targetId=${samplesTarget}`);
+      if (page.ok) {
+        const listed = samplesPageOf(page.value);
+        setSamples({ rows: listed.rows, inventoryRevision: listed.inventoryRevision });
+      }
+    },
+    [csrf, props.projectId, samples, samplesTarget],
+  );
 
   const openFile = useCallback(
     async (fileId: string) => {
@@ -408,6 +501,32 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
               </li>
             ))}
           </ul>
+        ) : null}
+        {activeTab === "samples" ? (
+          samples === null ? (
+            <p data-samples-empty>{samplesNotice ?? "正在读取库存…"}</p>
+          ) : (
+            <ul data-sample-list data-inventory-revision={samples.inventoryRevision}>
+              {samples.rows.map((row) => (
+                <li key={row.vectorId} data-sample={row.vectorId} data-sample-review={row.reviewStatus}>
+                  <span>{sampleLine(row)}</span>
+                  {sampleIsDecidable(row.reviewStatus) ? (
+                    <>
+                      <button type="button" data-sample-approve={row.vectorId} onClick={() => void decideSample(row, "approved")}>
+                        批准
+                      </button>
+                      <button type="button" data-sample-reject={row.vectorId} onClick={() => void decideSample(row, "rejected")}>
+                        驳回
+                      </button>
+                    </>
+                  ) : (
+                    <span data-sample-decided={row.reviewStatus}>已决定，正文不可改</span>
+                  )}
+                </li>
+              ))}
+              {samplesNotice === null ? null : <p data-samples-notice>{samplesNotice}</p>}
+            </ul>
+          )
         ) : null}
         {activeTab === "code" ? (
           candidate === null ? (
