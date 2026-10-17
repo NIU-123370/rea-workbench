@@ -32,15 +32,28 @@ jobs:
       # document half / A01-A13). A hole here is a build failure, not a warning.
       - name: docs:check (T01-T17 vs A01-A13)
         run: npm run docs:check
-      # T17 on this host: linux x64 is A13's gate host, but no browser lane runs here, so
-      # the record is advisory and the job does not fail on it. The harness itself reports
-      # gateHostSatisfied=false until a browser lane exists.
+      # T17 on this host. A13's interval ends in a browser, and the record now refuses to call the
+      # gate satisfied without a lane (infra/perf/t17-graph-update.ts), so this run measures the
+      # projection half only and reports gateHostSatisfied=false until the lane runner lands. It is
+      # advisory for that reason, not because a failing number is ignorable.
       - name: T17 measurement record (advisory)
         run: |
           mkdir -p .perf
           npm run perf:t17 --silent | sed -n 's/^record: //p' > .perf/t17.json
-          node -e "const r=require('./.perf/t17.json');console.log(JSON.stringify({p50:r.p50Ms,p95:r.p95Ms,max:r.maxMs,samples:r.samplesMs.length,host:r.host.platform+'/'+r.host.arch,gateHostSatisfied:r.gateHostSatisfied}))"
+          node -e "const r=require('./.perf/t17.json');console.log(JSON.stringify({p50:r.p50Ms,p95:r.p95Ms,max:r.maxMs,samples:r.samplesMs.length,host:r.host.platform+'/'+r.host.arch,browserLane:r.gate.browserLane,gateHostSatisfied:r.gateHostSatisfied}))"
           test -s .perf/t17.json
+        continue-on-error: true
+      # The facts A13's lane needs from this host, printed rather than assumed: which browser the
+      # runner image actually ships and what the machine is. Advisory while no step acts on it; the
+      # reading is what the lane runner will be written against instead of a guessed binary name.
+      - name: A13 lane host facts (advisory)
+        run: |
+          node -e "console.log('node', process.version, process.platform+'/'+process.arch)"
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          for b in google-chrome google-chrome-stable chromium chromium-browser firefox; do
+            if command -v "$b" >/dev/null 2>&1; then echo "$b -> $(command -v "$b") version=$("$b" --version 2>&1 | head -1)"; else echo "$b -> absent"; fi
+          done
         continue-on-error: true
       - name: upload T17 record
         if: always()
