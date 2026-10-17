@@ -7,6 +7,8 @@ import { jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { EVENT_TYPES, committedEventSchema, eventPayloadSchema } from "../../packages/contracts/events.ts";
 import { healthResponseSchema, effectiveProfileSchema } from "../../packages/contracts/health.ts";
 import { browserActionKinds, browserActionSchema, captureTaskSchema, inspectTaskSchema, locatorKinds, locatorSchema, waitStates } from "../../packages/contracts/tasks.ts";
+import { excludedVectorSchema, planBuildHttpRequestSchema } from "../../packages/contracts/behaviors.ts";
+import { EXCLUSION_REASON_CODES } from "../../packages/domain/inventory.ts";
 import { bootstrapExchangeSchema, currentSessionSchema } from "../../packages/contracts/session.ts";
 import { createUrlTargetRequestSchema, importFieldsSchema, pendingTargetSchema, pagedSchema, projectSummarySchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
@@ -40,11 +42,14 @@ function accepts(schema: Parameters<typeof parseStrict>[0], input: unknown): voi
 // see a branch nobody listed. The union's published JSON Schema lists every branch, so reading the
 // discriminators from it compares the two sets as sets - and is the only form that goes red when the
 // contract grows a kind the composer has no row for.
-function branchKind(branch: unknown): unknown {
-  return (branch as { properties?: { kind?: { const?: unknown } } }).properties?.kind?.const;
+function branchConst(branch: unknown, key: string): unknown {
+  return (branch as { properties?: { [name: string]: { const?: unknown } | undefined } }).properties?.[key]?.const;
 }
-function kindNames(branches: unknown[]): string[] {
-  return branches.map(branchKind).map((kind) => String(kind));
+// The discriminator's *name* is a parameter, not an assumption: `browserActionSchema` discriminates on
+// `kind` while §8's exclusion union discriminates on `reasonCode`, and a helper that only looked at the
+// first would silently return ["undefined","undefined"] for the second - a green list of nothing.
+function discriminatorNames(branches: unknown[], key: string): string[] {
+  return branches.map((branch) => String(branchConst(branch, key)));
 }
 function enumOf(branch: unknown, key: string): string[] {
   const values = (branch as { properties?: { [name: string]: { enum?: unknown } | undefined } }).properties?.[key]?.enum;
@@ -208,12 +213,21 @@ describe("task instruction surface (DESIGN §8)", () => {
   // does not list alive on the wire - which is the drift §3 forbids, and the page would then be able to
   // send a kind it can never show. So the comparison is by value against the union's own discriminators.
   it("accepts exactly the action and locator kinds the domain lists (§8 白名单, #58)", () => {
-    expect(kindNames(z.toJSONSchema(browserActionSchema, { io: "input" }).oneOf ?? [])).toEqual([...browserActionKinds]);
-    expect(kindNames(z.toJSONSchema(locatorSchema, { io: "input" }).oneOf ?? [])).toEqual([...locatorKinds]);
+    expect(discriminatorNames(z.toJSONSchema(browserActionSchema, { io: "input" }).oneOf ?? [], "kind")).toEqual([...browserActionKinds]);
+    expect(discriminatorNames(z.toJSONSchema(locatorSchema, { io: "input" }).oneOf ?? [], "kind")).toEqual([...locatorKinds]);
     // `waitFor`'s observed state is the third vocabulary. It lives inside one branch rather than as a
     // discriminator, so it is read from the same projection rather than trusted from the enum object.
-    const waitForBranch = (z.toJSONSchema(browserActionSchema, { io: "input" }).oneOf ?? []).find((branch) => branchKind(branch) === "waitFor");
+    const waitForBranch = (z.toJSONSchema(browserActionSchema, { io: "input" }).oneOf ?? []).find((branch) => branchConst(branch, "kind") === "waitFor");
     expect(enumOf(waitForBranch, "state")).toEqual([...waitStates]);
+  });
+
+  // §7.4's two exclusion claims and §8 line 289's body are the same reason this page's composer is
+  // pinned against the contract: the screen offers the codes from `domain/inventory.ts`, and a third
+  // name on either side would be an exclusion the door refuses or a choice the form never shows.
+  it("takes the exclusion codes from the domain list, and the plan body from §8's five names", () => {
+    expect(discriminatorNames(z.toJSONSchema(excludedVectorSchema, { io: "input" }).oneOf ?? [], "reasonCode")).toEqual([...EXCLUSION_REASON_CODES]);
+    const fields = z.toJSONSchema(planBuildHttpRequestSchema, { io: "input" }).required as string[];
+    expect([...fields].sort()).toEqual(["contractRevisionIds", "exclusions", "expectedInventoryRevision", "snapshotDigest", "targetId"]);
   });
 
   it("keeps inspect scopes and claim references narrow", () => {

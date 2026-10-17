@@ -3,6 +3,15 @@ import type { Id } from "./identity.ts";
 // Frozen plan versus full inventory (DESIGN §7.4). The plan denominator can
 // never be shrunk after execution to manufacture a PASS.
 
+// The two exclusion reasons, as a value the screen can offer by. §7.4 names exactly these two and
+// §8 line 289 repeats them inside the body's type, so `contracts/behaviors.ts` builds its
+// discriminated union from these two words and the capture-style guard compares the union's published
+// discriminators against this list: an exclusion the door would refuse can then never appear as a
+// choice, and one the door accepts can never go missing from the form.
+export const EXCLUSION_REASON_CODES = ["outside-scope", "superseded"] as const;
+
+export type ExclusionReasonCode = (typeof EXCLUSION_REASON_CODES)[number];
+
 // The two exclusion reasons are different claims about the inventory, so the
 // pairing is part of the type: a revision-chain exclusion must name its
 // successor, a scope exclusion must not (DESIGN §7.4).

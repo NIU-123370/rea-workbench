@@ -15,9 +15,9 @@ import {
   COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
   inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, inspectClaimsNoteFor,
   INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES, INSPECT_CAPTURE_NOTE,
-  captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, TARGET_URL_EMPTY_LINE, targetDraftOf, targetReceiptLine, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
+  captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, TARGET_URL_EMPTY_LINE, targetDraftOf, targetReceiptLine, approvedContractIds, planBuildLine, planDraftOf, planExclusionOf, planSubjectLine, planSubjectOf, PLAN_CONTRACT_UNLISTED_LINE, PLAN_CONTRACT_UNSELECTED_LINE, PLAN_NO_CONTRACTS_LINE, PLAN_NO_INVENTORY_LINE, PLAN_NO_JOURNAL_LINE, PLAN_NO_SNAPSHOT_LINE, PLAN_NO_TARGET_LINE, PLAN_SUCCESSOR_EMPTY_LINE, PLAN_TARGET_UNREADABLE_LINE, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
 } from "../../apps/web/ui/view-model.ts";
-import type { CaptureActionRow, CaptureProfileOption, GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
+import type { CaptureActionRow, CaptureProfileOption, JournalEntryWire, PlanExclusionRow, GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
 
 // The three-column surface's own rules (PRD F04 / DESIGN §6, issue #18).
 // Colour is never the only channel, an edge is judged by its own claim, a list view
@@ -959,7 +959,7 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
 
   const readySubject = {
     graph: { targetId, claimIds: [claimA, claimB] },
-    target: { ok: true, kind: "har" } as const,
+    target: { ok: true, kind: "har", snapshotDigest: null } as const,
     graphRevision: 7,
   };
 
@@ -979,14 +979,14 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
   }
 
   it("reads a target row only when it names the row this page asked about", () => {
-    expect(inspectTargetReadOf({ id: targetId, kind: "har" }, targetId)).toEqual({ ok: true, kind: "har" });
+    expect(inspectTargetReadOf({ id: targetId, kind: "har", snapshotDigest: null }, targetId)).toEqual({ ok: true, kind: "har", snapshotDigest: null });
     // The relay's envelope must not decide: the same row read through `{data: …}` is the same answer.
-    expect(inspectTargetReadOf({ data: { id: targetId, kind: "asar" } }, targetId)).toEqual({ ok: true, kind: "asar" });
+    expect(inspectTargetReadOf({ data: { id: targetId, kind: "asar", snapshotDigest: null } }, targetId)).toEqual({ ok: true, kind: "asar", snapshotDigest: null });
     // A URL target is a kind the read *recognises*, not a broken read - blocking it is the subject
     // gate's job, because that gate can say why.
-    expect(inspectTargetReadOf({ id: targetId, kind: "url" }, targetId)).toEqual({ ok: true, kind: "url" });
+    expect(inspectTargetReadOf({ id: targetId, kind: "url", snapshotDigest: null }, targetId)).toEqual({ ok: true, kind: "url", snapshotDigest: null });
 
-    const mismatch = inspectTargetReadOf({ id: newId(), kind: "har" }, targetId);
+    const mismatch = inspectTargetReadOf({ id: newId(), kind: "har", snapshotDigest: null }, targetId);
     expect(mismatch.ok).toBe(false);
     if (mismatch.ok) return;
     // The two ids are named: "the read answered about a different row" is only actionable if the
@@ -994,7 +994,15 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
     expect(mismatch.line).toContain("另一个行");
 
     expect(inspectTargetReadOf(undefined, targetId).ok).toBe(false);
-    expect(inspectTargetReadOf({ kind: "har" }, targetId).ok).toBe(false);
+    // A row that never says what its snapshot digest is (a string or an explicit `null`, §8 line 274) is
+    // a read the plan control must not guess from: it fails as an unreadable row, not as "no snapshot".
+    expect(inspectTargetReadOf({ id: targetId, kind: "har" }, targetId).ok).toBe(false);
+    expect(inspectTargetReadOf({ id: targetId, kind: "har", snapshotDigest: 7 }, targetId).ok).toBe(false);
+    expect(inspectTargetReadOf({ id: targetId, kind: "har", snapshotDigest: "z".repeat(64) }, targetId)).toEqual({
+      ok: true,
+      kind: "har",
+      snapshotDigest: "z".repeat(64),
+    });
     expect(inspectTargetReadOf({ id: targetId, kind: 7 }, targetId).ok).toBe(false);
     // An unknown vocabulary word is refused *without echoing it*: §12.1 publishes names, never values,
     // and this is the one field whose value has already failed the closed list.
@@ -1013,7 +1021,7 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
         refusalOf(inspectSubjectOf({ graph: { targetId: null, claimIds: [] }, target: readySubject.target, graphRevision: 7 })),
         refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: null, graphRevision: 7 })),
         refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: { ok: false, line: "目标行读到的形状不对" }, graphRevision: 7 })),
-        refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: { ok: true, kind: "url" }, graphRevision: 7 })),
+        refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: { ok: true, kind: "url", snapshotDigest: null }, graphRevision: 7 })),
         refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: readySubject.target, graphRevision: null })),
       ]
       // Pinned by identity and by position: swapping two branches would tell the operator to go fix
@@ -1061,7 +1069,7 @@ describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
       [{ graph: null }, INSPECT_GRAPH_UNREAD_LINE],
       [{ graph: { targetId: null, claimIds: [] } }, INSPECT_NO_TARGET_LINE],
       [{ target: null }, INSPECT_TARGET_UNREADABLE_LINE],
-      [{ target: { ok: true, kind: "url" } as const }, INSPECT_TARGET_URL_LINE],
+      [{ target: { ok: true, kind: "url", snapshotDigest: null } as const }, INSPECT_TARGET_URL_LINE],
       [{ graphRevision: null }, INSPECT_REVISION_UNREAD_LINE],
       [{ question: "   " }, INSPECT_QUESTION_EMPTY_LINE],
       [{ scope: "" }, INSPECT_SCOPE_UNSELECTED_LINE],
@@ -1208,7 +1216,7 @@ describe("capture composer (DESIGN §8 line 275's CaptureTask)", () => {
     return {
       csrf: "token-1234567890",
       targetId: "22222222-2222-4222-8222-222222222222",
-      target: { ok: true, kind: "url" } as const,
+      target: { ok: true, kind: "url", snapshotDigest: null } as const,
       graphRevision: 0,
       profiles: captureProfileOptionsOf(profileList),
       profileId: "web-fixture",
@@ -1225,7 +1233,7 @@ describe("capture composer (DESIGN §8 line 275's CaptureTask)", () => {
 
   it("states its subject once, and the submit refuses exactly what that sentence says is missing", () => {
     const subjectOf = (overrides: Partial<{ targetId: string | null; target: InspectTargetRead | null; graphRevision: number | null; profiles: CaptureProfileOption[] | null }>) =>
-      captureSubjectOf({ targetId: "22222222-2222-4222-8222-222222222222", target: { ok: true, kind: "url" }, graphRevision: 3, profiles: captureProfileOptionsOf(profileList), ...overrides });
+      captureSubjectOf({ targetId: "22222222-2222-4222-8222-222222222222", target: { ok: true, kind: "url", snapshotDigest: null }, graphRevision: 3, profiles: captureProfileOptionsOf(profileList), ...overrides });
 
     const ready = subjectOf({});
     expect(ready.ok).toBe(true);
@@ -1249,7 +1257,7 @@ describe("capture composer (DESIGN §8 line 275's CaptureTask)", () => {
       { targetId: null },
       { target: null },
       { target: { ok: false, line: "目标行读到的形状不对" } },
-      { target: { ok: true, kind: "har" } },
+      { target: { ok: true, kind: "har", snapshotDigest: null } },
       { graphRevision: null },
       { profiles: null },
       { profiles: [] },
@@ -1395,7 +1403,7 @@ describe("capture composer (DESIGN §8 line 275's CaptureTask)", () => {
         lineOf(captureInput({ targetId: null })),
         lineOf(captureInput({ target: null })),
         lineOf(captureInput({ target: { ok: false, line: "目标行读到的形状不对" } })),
-        lineOf(captureInput({ target: { ok: true, kind: "har" } })),
+        lineOf(captureInput({ target: { ok: true, kind: "har", snapshotDigest: null } })),
         lineOf(captureInput({ graphRevision: null })),
         lineOf(captureInput({ profiles: null })),
         lineOf(captureInput({ profiles: [] })),
@@ -1579,5 +1587,219 @@ describe("declare a URL target (DESIGN §8 line 273)", () => {
     expect(targetReceiptLine({ ...receipt, identityReason: "" })).toContain("url-declared-not-captured");
     expect(targetReceiptLine({ ...receipt, auditSeq: undefined })).toContain("日志 seq 没给");
     expect(targetReceiptLine({ ...receipt, identityReason: "" })).not.toContain("undefined");
+  });
+});
+
+// §8 line 289's plan builder (issue #58's next handle). The two rules that shape these tests: every
+// value the door requires comes from a read the page already makes (so a hand-typed contract id is a
+// bug, not a shortcut), and an exclusion is a *claim* about the inventory - §7.4's two codes cannot be
+// mixed, and the page refuses the contradiction rather than letting the door store it.
+describe("plan builder (DESIGN §8 line 289 / §7.4)", () => {
+  const contractA = "44444444-4444-4444-8444-444444444444";
+  const contractB = "55555555-5555-5555-8555-555555555555";
+  const vectorA = "66666666-6666-4666-8666-666666666666";
+  const vectorB = "77777777-7777-4777-8777-777777777777";
+  const snapshot = "d".repeat(64);
+  const targetId = "88888888-8888-4888-8888-888888888888";
+
+  const journalRow = (overrides: Partial<JournalEntryWire>): JournalEntryWire => ({
+    seq: 1,
+    action: "contract.review",
+    resourceType: "contract",
+    resourceId: contractA,
+    decision: "allow",
+    reasonCode: "contract-approved",
+    safeMetadata: null,
+    ...overrides,
+  });
+
+  it("finds approved contracts in the journal and only approved contracts", () => {
+    // A rejection is not an approval; a plan approval is a different record type; a create row is not a
+    // decision. All three sit in the same window and none of them may enter the list.
+    const ids = approvedContractIds([
+      journalRow({ seq: 2 }),
+      // A rejection is journalled as `decision: "allow"` with reasonCode `contract-rejected` - the
+      // allow/deny axis in §12.2 is "was this request permitted to commit", not "what did the reviewer
+      // decide" (`packages/application/decision.ts` writes allow whenever a commit lands). So a fixture
+      // that models a rejection as `deny` would make the reason-code filter look redundant and let an
+      // excluded-but-rejected contract into the list; this row is the shape the service really writes.
+      journalRow({ seq: 3, resourceId: contractB, reasonCode: "contract-rejected" }),
+      journalRow({ seq: 4, action: "plan.review", reasonCode: "plan-approved", resourceId: contractB }),
+      journalRow({ seq: 5, action: "contract.create", reasonCode: "contract-drafted" }),
+      journalRow({ seq: 6, resourceId: null }),
+      // The same contract twice because a review can be re-recorded: the list is a set, and the request
+      // digest is taken over it, so a duplicate would make one decision two identities.
+      journalRow({ seq: 7 }),
+    ]);
+    // `contractB` names a row of its own, otherwise the two entries collapse in the dedupe and the
+    // reason-code filter has nothing to be wrong about - a fixture can be too small to prove its rule.
+    expect(ids).toEqual([contractA]);
+    expect(ids).not.toContain(contractB);
+    expect(approvedContractIds([])).toEqual([]);
+  });
+
+  it("names which read is missing before anything is answered", () => {
+    const lineOf = (input: Parameters<typeof planSubjectOf>[0]) => {
+      const subject = planSubjectOf(input);
+      return subject.ok ? "ready" : subject.line;
+    };
+    const ready = { targetId, target: { ok: true, kind: "har", snapshotDigest: snapshot } as const, inventoryRevision: 4, contracts: [contractA] };
+    expect(
+      [
+        lineOf({ ...ready, targetId: null }),
+        lineOf({ ...ready, target: null }),
+        lineOf({ ...ready, target: { ok: false, line: "目标行读到的形状不对" } }),
+        lineOf({ ...ready, target: { ok: true, kind: "url", snapshotDigest: null } }),
+        lineOf({ ...ready, inventoryRevision: null }),
+        lineOf({ ...ready, contracts: null }),
+        lineOf({ ...ready, contracts: [] }),
+      ]
+    ).toEqual([
+      PLAN_NO_TARGET_LINE,
+      PLAN_TARGET_UNREADABLE_LINE,
+      "目标行读到的形状不对",
+      PLAN_NO_SNAPSHOT_LINE,
+      PLAN_NO_INVENTORY_LINE,
+      PLAN_NO_JOURNAL_LINE,
+      PLAN_NO_CONTRACTS_LINE,
+    ]);
+
+    const subject = planSubjectOf(ready);
+    expect(subject.ok).toBe(true);
+    if (!subject.ok) return;
+    expect(subject).toEqual({ ok: true, targetId, snapshotDigest: snapshot, inventoryRevision: 4, contracts: [contractA] });
+    // The line quotes the three numbers a 409 has to be explainable against, and the digest in full
+    // because a truncated one cannot be checked against the row it came from.
+    const line = planSubjectLine(subject);
+    expect(line).toContain(targetId);
+    expect(line).toContain(snapshot);
+    expect(line).toContain("库存修订 4");
+    expect(line).toContain("已批准契约 1 份可勾");
+    expect(planSubjectLine({ ok: false, line: PLAN_NO_SNAPSHOT_LINE })).toBe(PLAN_NO_SNAPSHOT_LINE);
+  });
+
+  it("refuses each half-written exclusion by the row that is half-written", () => {
+    const row = (overrides: Partial<PlanExclusionRow> = {}): PlanExclusionRow => ({
+      vectorId: vectorA,
+      reasonCode: "outside-scope",
+      reason: "这一版不算它",
+      excludedBehavior: "GET /api/cart",
+      supersededBy: "",
+      ...overrides,
+    });
+    const inventory = [vectorA, vectorB];
+    const lineOf = (input: PlanExclusionRow, index: number, earlier: readonly string[] = []) => {
+      const built = planExclusionOf(input, index, inventory, earlier);
+      return built.ok ? "ready" : built.failure.line;
+    };
+
+    expect(lineOf(row(), 0)).toBe("ready");
+    // The two codes produce two different wire objects: `superseded` carries the successor's id and
+    // `outside-scope` carries a literal null, which is the pairing §7.4 makes part of the type.
+    expect(planExclusionOf(row({ reasonCode: "superseded", supersededBy: vectorB }), 1, inventory, [])).toEqual({
+      ok: true,
+      exclusion: { vectorId: vectorA, reasonCode: "superseded", reason: "这一版不算它", excludedBehavior: "GET /api/cart", supersededBy: vectorB },
+    });
+
+    const failures = [
+      [row({ vectorId: "" }), 0, "还没说排除的是哪一条样本"],
+      [row({ vectorId: newId() }), 1, "不在本页读到的库存清单里"],
+      [row({ reasonCode: "" }), 0, "不在 §7.4 的两个里"],
+      [row({ reasonCode: "deprecated" }), 0, "不在 §7.4 的两个里"],
+      [row({ reason: "  " }), 0, "还没有写理由"],
+      [row({ excludedBehavior: "" }), 0, "还没有写被排除的是哪个行为"],
+      [row({ supersededBy: vectorB }), 0, "互相矛盾"],
+      [row({ reasonCode: "superseded" }), 0, PLAN_SUCCESSOR_EMPTY_LINE],
+      [row({ reasonCode: "superseded", supersededBy: newId() }), 0, "那一行不在本页读到的库存里"],
+      [row({ reasonCode: "superseded", supersededBy: vectorA }), 0, "不能用自己取代自己"],
+    ] as const;
+    for (const [bad, index, fragment] of failures) {
+      const line = lineOf(bad, index);
+      expect(line).toContain(fragment);
+      expect(line).toContain(`第 ${String(index + 1)} 行`);
+    }
+    // A sample cannot be excluded twice across rows - the door's own `inventoryCounts` throws on it, and
+    // the page can see that much without knowing anything about required cases.
+    expect(lineOf(row(), 1, [vectorA])).toContain("已经被前面那一行排过了");
+  });
+
+  it("sends the five fields the door takes, in the journal's order rather than the click's", () => {
+    const base = {
+      csrf: "token-1234567890",
+      targetId,
+      target: { ok: true, kind: "har", snapshotDigest: snapshot } as const,
+      inventoryRevision: 4,
+      contracts: [contractA, contractB],
+      chosenContractIds: [contractA],
+      inventoryIds: [vectorA, vectorB],
+      rows: [] as PlanExclusionRow[],
+    };
+    expect(planDraftOf({ ...base, csrf: "", chosenContractIds: [] })).toEqual({ ok: false, line: NO_SESSION_LINE });
+    expect(planDraftOf({ ...base, chosenContractIds: [] })).toEqual({ ok: false, line: PLAN_CONTRACT_UNSELECTED_LINE });
+    expect(planDraftOf({ ...base, chosenContractIds: [newId()] })).toEqual({ ok: false, line: PLAN_CONTRACT_UNLISTED_LINE });
+
+    const both = planDraftOf({ ...base, chosenContractIds: [contractB, contractA] });
+    expect(both.ok).toBe(true);
+    if (!both.ok) return;
+    // Same two boxes, same body: the door's request digest is computed over this body, so the order an
+    // operator happened to click in must not become a second identity for one decision.
+    const forward = planDraftOf({ ...base, chosenContractIds: [contractA, contractB] });
+    expect(forward.ok).toBe(true);
+    if (!forward.ok) return;
+    expect(both.body).toEqual(forward.body);
+    expect((both.body.contractRevisionIds as string[])).toEqual([contractA, contractB]);
+
+    // The contradiction that spans two rows: row 1 says `vectorB` was superseded by `vectorA`, row 2
+    // says `vectorA` is out of scope. Neither row is malformed on its own - which is why this check is
+    // over the whole list, and why §7.4's own `inventoryCounts` refuses to be a per-entry predicate.
+    const contradictory = planDraftOf({
+      ...base,
+      rows: [
+        { vectorId: vectorB, reasonCode: "superseded", reason: "换了一版", excludedBehavior: "POST /api/cart", supersededBy: vectorA },
+        { vectorId: vectorA, reasonCode: "outside-scope", reason: "这一版不算它", excludedBehavior: "GET /api/cart", supersededBy: "" },
+      ],
+    });
+    expect(contradictory.ok).toBe(false);
+    if (contradictory.ok) return;
+    expect(contradictory.line).toContain("自己也在这份排除里");
+    expect(contradictory.line).toContain(vectorA);
+
+    // The same two codes that DO fit together: `vectorB` was superseded by a row that stays in the plan,
+    // and `vectorA` is itself not excluded - so only one row is written, and it travels with the
+    // successor as a value rather than a null (§7.4 makes that pairing part of the type).
+    const oneExclusion = planDraftOf({
+      ...base,
+      chosenContractIds: [contractA, contractB],
+      rows: [{ vectorId: vectorB, reasonCode: "superseded", reason: "换了一版", excludedBehavior: "POST /api/cart", supersededBy: vectorA }],
+    });
+    expect(oneExclusion.ok).toBe(true);
+    if (!oneExclusion.ok) return;
+    expect(oneExclusion.body.exclusions).toEqual([
+      { vectorId: vectorB, reasonCode: "superseded", reason: "换了一版", excludedBehavior: "POST /api/cart", supersededBy: vectorA },
+    ]);
+    const drafted = planDraftOf(base);
+    if (!drafted.ok) throw new Error("base should build");
+    expect(drafted.body).toEqual({
+      targetId,
+      snapshotDigest: snapshot,
+      contractRevisionIds: [contractA],
+      exclusions: [],
+      expectedInventoryRevision: 4,
+    });
+  });
+
+  it("says what the plan door answered, and that a draft is not an approval", () => {
+    const receipt = { planId: "99999999-9999-4999-8999-999999999999", selectedCount: 3, excludedCount: 1, reviewStatus: "draft", auditSeq: 12 };
+    const line = planBuildLine(receipt);
+    expect(line).toContain(receipt.planId);
+    expect(line).toContain("选中 3");
+    expect(line).toContain("排除 1");
+    expect(line).toContain("草稿（还要 §8 line 291 的批准）");
+    expect(line).toContain("日志 seq 12");
+    expect(planBuildLine({})).toBe("计划已被接受，但回包没带 planId");
+    expect(planBuildLine({ ...receipt, selectedCount: undefined })).toContain("两个计数没带回来");
+    expect(planBuildLine({ ...receipt, auditSeq: undefined })).toContain("日志 seq 没给");
+    // An approved plan answering here would be a different fact, and the sentence must not call it a draft.
+    expect(planBuildLine({ ...receipt, reviewStatus: "approved" })).not.toContain("草稿");
   });
 });

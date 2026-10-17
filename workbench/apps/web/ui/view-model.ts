@@ -32,6 +32,7 @@ import { BROWSER_ACTION_KINDS, isBrowserActionKind, isLocatorKind, isWaitState, 
 import type { BrowserActionKind, LocatorKind, WaitState } from "../../../packages/domain/capture.ts";
 // §8 line 273's URL rules, so this bundle asks the same owner whether a startUrl may be stored rather
 // than writing a second, weaker version of them.
+import { EXCLUSION_REASON_CODES, type ExclusionReasonCode } from "../../../packages/domain/inventory.ts";
 import { URL_TARGET_IDENTITY_REASON, urlLocatorDefects } from "../../../packages/domain/target.ts";
 import type { TargetKind } from "../../../packages/domain/target.ts";
 
@@ -737,6 +738,15 @@ export const GENERATE_EMPTY_LINE: Record<"no-journal" | "no-blueprint", string> 
   "no-blueprint": "还没有冻结过的蓝图：先在上面点「冻结蓝图」，§8 line 294 才有点得动的一行。",
 };
 
+// The contracts a plan may be built over, in the order the decisions happened: §8 gives no route that
+// lists contracts, only `GET /projects/:p/contracts/:c` for one somebody already names - so the
+// journal's own `contract-approved` allows are the page's only honest source, the same way the freeze
+// and generation panels find their rows. Duplicated because a contract can be re-reviewed; ordered
+// because the request digest is taken over this list.
+export function approvedContractIds(entries: readonly JournalEntryWire[]): string[] {
+  return [...new Set(allowedIds(entries, "contract.review", "contract-approved"))];
+}
+
 // What a freeze answers with. The eight fields are the receipt's own (§8 line 292's 201 body plus the
 // audit sequence §12.2 gives every decision), and the three counts are what the gate verified - the
 // page says them rather than "成功", because "冻上了" is not the fact an operator needs next.
@@ -1025,7 +1035,7 @@ export function inquiryQueueLine(inquiry: DirectedInquiry): string {
   return `${inquiry.kind}｜格子 ${inquiry.subjectId}｜缺口：${inquiry.gaps.join("、") || "（无）"}｜${INQUIRY_KIND_LINES[inquiry.kind]}`;
 }
 
-export type InspectTargetRead = { ok: true; kind: TargetKind } | { ok: false; line: string };
+export type InspectTargetRead = { ok: true; kind: TargetKind; snapshotDigest: string | null } | { ok: false; line: string };
 
 // A target row that is not one of the three kinds, or that names a different row than the one asked
 // for, is a read this page cannot use: the kind decides whether the request is sendable at all, so a
@@ -1042,7 +1052,14 @@ export function inspectTargetReadOf(payload: unknown, expectedTargetId: string):
     // list, so putting it on screen would be publishing an unvalidated string from a wire reply.
     return { ok: false, line: `${INSPECT_TARGET_UNREADABLE_LINE}（读到的 kind 是 ${typeof row.kind}，不是三种目标类型之一）` };
   }
-  return { ok: true, kind: row.kind };
+  // The snapshot digest travels with the kind because they are one record and the page has two
+  // questions for it: "may an inspect read this?" and "is there a frozen inventory to plan over?".
+  // `null` is a real answer (§8 line 274: 未捕获前身份未知), so it is kept rather than dropped - and a
+  // value that is neither a string nor absent is the whole read failing, not one field defaulting.
+  if (!("snapshotDigest" in row) || (typeof row.snapshotDigest !== "string" && row.snapshotDigest !== null)) {
+    return { ok: false, line: `${INSPECT_TARGET_UNREADABLE_LINE}（这一行没给出快照摘要该是什么：字符串或 null）` };
+  }
+  return { ok: true, kind: row.kind, snapshotDigest: row.snapshotDigest };
 }
 
 export function inspectTargetMismatchLine(expected: string, got: string): string {
@@ -1397,4 +1414,189 @@ export function targetReceiptLine(created: unknown): string {
   const reason = typeof row.identityReason === "string" && row.identityReason !== "" ? row.identityReason : URL_TARGET_IDENTITY_REASON;
   const seq = typeof row.auditSeq === "number" ? `｜日志 seq ${String(row.auditSeq)}` : "｜日志 seq 没给";
   return `已声明 URL 目标 ${row.id}｜身份未知（${reason}）${seq}：要等一次采集真跑过，才有可比较的快照。`;
+}
+
+// §8 line 289 - build a verification plan (issue #58's next handle). This is the door whose every
+// required input the page can already *read*: the target and its snapshot from the target row, the
+// approved contracts from §8 line 302's journal (there is no contract list route, exactly as there is
+// no plan or blueprint list route), and the inventory revision from the sample page the 样本 tab already
+// fetches. What the operator supplies is judgement only - which contracts, and for each excluded sample
+// which of §7.4's two claims is being made and about which behaviour.
+//
+// The exclusion rules are not re-derived here as a style choice: `domain/inventory.ts` owns
+// `inventoryCounts`, and its RangeErrors (uniqueness, both-selected-and-excluded, a successor outside
+// the snapshot, a self-successor) are the same facts this gate refuses one row at a time - because the
+// door answers with a whole-request failure while an operator needs "第 2 行的 successor 不在清单里".
+//
+// What is deliberately **not** offered: the plan's `selectedVectorIds` and `inventoryDigest`. §7.4 makes
+// both functions of the approved contracts plus the frozen snapshot, and the door's own body does not
+// accept them - a form field for either would be the page restating facts it is not allowed to decide.
+export const PLAN_NO_TARGET_LINE = "项目行读没有给出 targetId：一份计划要绑一个目标的冻结库存，而本项目当前的视图里没有这个格位。";
+export const PLAN_TARGET_UNREADABLE_LINE = "目标行没有读到：快照摘要与目标类型都在那一行里，页面不带着猜测去撞门口。";
+export const PLAN_NO_SNAPSHOT_LINE = "这个目标还没有快照摘要：§8 line 274 说未捕获前身份未知，而计划绑的正是「这一次冻结的库存」。先导入一次采集（§8 line 272）或声明后跑一次 capture。";
+export const PLAN_NO_JOURNAL_LINE = "还没有读到本项目的决策日志：计划要的是「已批准的契约」，而本页没有任何一处能列出契约。";
+export const PLAN_NO_CONTRACTS_LINE = "还没有已批准的契约：先批契约（§8 line 287），这一栏才有点得动的东西。";
+export const PLAN_CONTRACT_UNSELECTED_LINE = "还没有勾契约：§8 line 289 的 contractRevisionIds 至少要一个，页面不替你挑一份。";
+export const PLAN_CONTRACT_UNLISTED_LINE = "勾里有日志名单之外的契约：这一发要的是本页读到的那一行，不是猜出来的 id。";
+export const PLAN_NO_INVENTORY_LINE = "样本清单没读到：库存修订号是这一发的并发令牌，缺了它库存变了也不会告诉你。";
+export const PLAN_EMPTY_INVENTORY_LINE = "这份库存当前一条样本都没有：计划的分母来自库存，空库存排不出一份可判的方案（门口会按具名理由拒）。";
+
+export const PLAN_EXCLUSION_REASON_PHRASES: Record<ExclusionReasonCode, string> = {
+  "outside-scope": "不在本次范围（outside-scope）",
+  superseded: "已被更新的一行取代（superseded）",
+};
+
+export const PLAN_EXCLUSION_OPTIONS = EXCLUSION_REASON_CODES.map((code) => ({ value: code, label: PLAN_EXCLUSION_REASON_PHRASES[code] }));
+
+export const PLAN_SUCCESSOR_EMPTY_LINE = "被取代的那一类要说清是哪一行取代它，而这一格还空着。";
+
+export type PlanExclusionRow = { vectorId: string; reasonCode: string; reason: string; excludedBehavior: string; supersededBy: string };
+
+export type PlanExclusionFailure = { index: number; line: string };
+
+// One exclusion at a time. `inventoryIds` is what the sample page named for *this* target and snapshot,
+// so a vectorId typed by hand or left over from a re-read cannot be sent (§7.4: the denominator is the
+// frozen snapshot, and "excluded something that is not in it" is exactly a shrunk promise).
+export function planExclusionOf(
+  row: PlanExclusionRow,
+  index: number,
+  inventoryIds: readonly string[],
+  earlier: readonly string[],
+): { ok: true; exclusion: JsonObject } | { ok: false; failure: PlanExclusionFailure } {
+  const fail = (line: string): { ok: false; failure: PlanExclusionFailure } => ({ ok: false, failure: { index, line } });
+  const name = `第 ${String(index + 1)} 行`;
+  if (row.vectorId === "") return fail(`${name}还没说排除的是哪一条样本：排除项要的是库存里的 id。`);
+  if (!inventoryIds.includes(row.vectorId)) return fail(`${name}的样本不在本页读到的库存清单里：这一发要的是读到的那一行，不是猜出来的 id。`);
+  if (earlier.includes(row.vectorId)) return fail(`${name}排的样本已经被前面那一行排过了：同一条不能排两次（§7.4 的排除是唯一的一集合）。`);
+  if (!isExclusionReasonCode(row.reasonCode)) return fail(`${name}的排除理由不在 §7.4 的两个里（outside-scope / superseded）`);
+  const reason = row.reason.trim();
+  if (reason === "") return fail(`${name}还没有写理由：§8 line 289 的 reason 是非空的，排除是一次要留档的决定。`);
+  const behavior = row.excludedBehavior.trim();
+  if (behavior === "") return fail(`${name}还没有写被排除的是哪个行为：excludedBehavior 说的是这次范围划走的到底是什么。`);
+  const successor = row.supersededBy.trim();
+  if (row.reasonCode === "outside-scope") {
+    if (successor !== "") return fail(`${name}说是「不在范围」却又指了一个取代它的行：这一对说法互相矛盾（§7.4 把 successor 只留给 superseded）。`);
+    return { ok: true, exclusion: { vectorId: row.vectorId, reasonCode: "outside-scope", reason, excludedBehavior: behavior, supersededBy: null } };
+  }
+  if (successor === "") return fail(`${name}：${PLAN_SUCCESSOR_EMPTY_LINE}`);
+  if (!inventoryIds.includes(successor)) return fail(`${name}说被某一行的取代，而那一行不在本页读到的库存里（§7.4：successor 也得是同一份快照里的）。`);
+  if (successor === row.vectorId) return fail(`${name}不能用自己取代自己。`);
+  return { ok: true, exclusion: { vectorId: row.vectorId, reasonCode: "superseded", reason, excludedBehavior: behavior, supersededBy: successor } };
+}
+
+export function isExclusionReasonCode(name: string): name is ExclusionReasonCode {
+  return (EXCLUSION_REASON_CODES as readonly string[]).includes(name);
+}
+
+export type PlanSubject =
+  | { ok: true; targetId: string; snapshotDigest: string; inventoryRevision: number; contracts: readonly string[] }
+  | { ok: false; line: string };
+
+export function planSubjectOf(input: {
+  targetId: string | null;
+  target: InspectTargetRead | null;
+  inventoryRevision: number | null;
+  contracts: readonly string[] | null;
+}): PlanSubject {
+  if (input.targetId === null) return { ok: false, line: PLAN_NO_TARGET_LINE };
+  if (input.target === null) return { ok: false, line: PLAN_TARGET_UNREADABLE_LINE };
+  if (!input.target.ok) return { ok: false, line: input.target.line };
+  if (input.target.snapshotDigest === null) return { ok: false, line: PLAN_NO_SNAPSHOT_LINE };
+  if (input.inventoryRevision === null) return { ok: false, line: PLAN_NO_INVENTORY_LINE };
+  if (input.contracts === null) return { ok: false, line: PLAN_NO_JOURNAL_LINE };
+  if (input.contracts.length === 0) return { ok: false, line: PLAN_NO_CONTRACTS_LINE };
+  return {
+    ok: true,
+    targetId: input.targetId,
+    snapshotDigest: input.target.snapshotDigest,
+    inventoryRevision: input.inventoryRevision,
+    contracts: input.contracts,
+  };
+}
+
+// The snapshot digest is printed in full, not truncated: it is the value the plan binds, and a line an
+// operator cannot read back against the target row is a line that cannot be checked. A digest is a name
+// of bytes, not a secret (§12.1 forbids originals, not identifiers).
+export function planSubjectLine(subject: PlanSubject): string {
+  if (!subject.ok) return subject.line;
+  return `目标 ${subject.targetId}｜快照 ${subject.snapshotDigest}｜库存修订 ${String(subject.inventoryRevision)}｜已批准契约 ${String(subject.contracts.length)} 份可勾`;
+}
+
+export type PlanDraft = { ok: true; body: JsonObject } | { ok: false; line: string };
+
+export function planDraftOf(input: {
+  csrf: string;
+  targetId: string | null;
+  target: InspectTargetRead | null;
+  inventoryRevision: number | null;
+  contracts: readonly string[] | null;
+  chosenContractIds: readonly string[];
+  inventoryIds: readonly string[];
+  rows: readonly PlanExclusionRow[];
+}): PlanDraft {
+  const gate = sessionGate(input.csrf);
+  if (!gate.ok) return { ok: false, line: gate.line };
+  const subject = planSubjectOf({
+    targetId: input.targetId,
+    target: input.target,
+    inventoryRevision: input.inventoryRevision,
+    contracts: input.contracts,
+  });
+  if (!subject.ok) return { ok: false, line: subject.line };
+  if (input.chosenContractIds.length === 0) return { ok: false, line: PLAN_CONTRACT_UNSELECTED_LINE };
+  if (input.chosenContractIds.some((id) => !subject.contracts.includes(id))) return { ok: false, line: PLAN_CONTRACT_UNLISTED_LINE };
+  // The list travels in the journal's order, never the click order: §8's request digest is computed over
+  // this body, so two clicking sequences for one set of contracts must be one identity, not two.
+  const contractRevisionIds = subject.contracts.filter((id) => input.chosenContractIds.includes(id));
+  const exclusions: JsonObject[] = [];
+  const seen: string[] = [];
+  for (const [index, row] of input.rows.entries()) {
+    const built = planExclusionOf(row, index, input.inventoryIds, seen);
+    if (!built.ok) return { ok: false, line: built.failure.line };
+    exclusions.push(built.exclusion);
+    seen.push(row.vectorId);
+  }
+  // A successor that is itself in this list is a contradiction the page can see without knowing anything
+  // about required cases: one row claims "这一行被 M 取代", another claims M is out of scope. Per-row
+  // checking cannot catch it (the successor may be a later row), so it is checked over the whole list -
+  // the same reason §7.4's own `inventoryCounts` refuses to be a per-entry predicate.
+  const excludedIds = new Set(exclusions.map((exclusion) => exclusion.vectorId as string));
+  for (const exclusion of exclusions) {
+    if (exclusion.reasonCode !== "superseded") continue;
+    const successor = exclusion.supersededBy;
+    if (typeof successor === "string" && excludedIds.has(successor)) {
+      return { ok: false, line: `有一条排除说它被 ${successor} 取代，而那一行自己也在这份排除里：两条说法不能同时成立（§7.4 的 successor 要留在被选中的一边）。` };
+    }
+  }
+  return {
+    ok: true,
+    body: {
+      targetId: subject.targetId,
+      snapshotDigest: subject.snapshotDigest,
+      contractRevisionIds,
+      exclusions,
+      expectedInventoryRevision: subject.inventoryRevision,
+    },
+  };
+}
+
+// The plan door answers with a commit receipt (§8 line 289 pictures a VerificationPlan; the deviation is
+// already recorded on #58), so the sentence says the three numbers the plan was cut with and the fact
+// that it is a **draft** - a plan nobody approved is not yet a blueprint's basis, and "已建计划" alone
+// would read like the review had happened.
+export function planBuildLine(record: {
+  planId?: unknown;
+  selectedCount?: unknown;
+  excludedCount?: unknown;
+  reviewStatus?: unknown;
+  auditSeq?: unknown;
+}): string {
+  const planId = typeof record.planId === "string" ? record.planId : null;
+  if (planId === null) return "计划已被接受，但回包没带 planId";
+  const counts = typeof record.selectedCount === "number" && typeof record.excludedCount === "number"
+    ? `｜选中 ${String(record.selectedCount)}｜排除 ${String(record.excludedCount)}`
+    : "｜两个计数没带回来";
+  const status = record.reviewStatus === "draft" ? "草稿（还要 §8 line 291 的批准）" : String(record.reviewStatus);
+  const audit = typeof record.auditSeq === "number" ? `｜日志 seq ${String(record.auditSeq)}` : "｜日志 seq 没给";
+  return `已造计划 ${planId}（${status}）${counts}${audit}。`;
 }

@@ -16,7 +16,7 @@ import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 // The page's own draft builders, driven from real replies: a test of the door alone cannot show that
 // what this UI would send is something the door accepts, and a unit test of the builders alone cannot
 // show that the three reads they consume say what the page assumes they say.
-import { CAPTURE_TARGET_NOT_URL_LINE, captureDraftOf, captureProfileOptionsOf, inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, NO_SESSION_LINE, relayData, targetDraftOf, targetReceiptLine } from "../../apps/web/ui/view-model.ts";
+import { approvedContractIds, CAPTURE_TARGET_NOT_URL_LINE, captureDraftOf, captureProfileOptionsOf, inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, journalEntriesOf, NO_SESSION_LINE, planBuildLine, planDraftOf, relayData, samplesPageOf, targetDraftOf, targetReceiptLine } from "../../apps/web/ui/view-model.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectPageSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
@@ -2389,6 +2389,95 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     expect(((relayData(JSON.parse(view.text) as JsonValue) as { targetIds: string[] }).targetIds).length).toBe(1);
   });
 
+  // §8 line 289 from the page's own builders (issue #58's next handle). The three reads this control
+  // depends on are the ones the page already performs - the target row (whose snapshot digest names the
+  // inventory the plan binds), §8 line 302's journal (which contracts are approved; §8 has no contract
+  // list route) and the sample page (the inventory revision and the rows an exclusion may name) - so the
+  // body below is assembled exactly the way a click would assemble it and then sent through the real door.
+  it("builds a plan the door accepts from the reads the page makes, and lets the door own requiredCases", async () => {
+    // The fixture walks the chain over HTTP: seed, then approve sample / contract / plan through the
+    // three review doors. What the page then finds is only the *contract* approval, and a second plan
+    // over an already-planned contract is a new row, not a rewrite (§7.4).
+    const { session, seeded } = await chain("plan-page-draft", true);
+
+    const journalRead = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/audit?limit=100`, { headers: { host: host(), cookie: session.cookie } });
+    expect(journalRead.status, journalRead.text).toBe(200);
+    const contracts = approvedContractIds(journalEntriesOf(JSON.parse(journalRead.text) as JsonValue));
+    // Read back, not remembered: the page finds the contract from the journal's own `contract-approved`
+    // allows, and the plan approval in the same window must not leak into this list.
+    expect(contracts).toEqual([String(seeded.contractId)]);
+
+    const targetRead = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/targets/${String(seeded.targetId)}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(targetRead.status, targetRead.text).toBe(200);
+    const target = inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, seeded.targetId);
+    // The snapshot digest travels in the same read as the kind, because they are one record: an imported
+    // target carries the digest a plan binds, and §8 line 274's `null` is what a declared URL gives back.
+    expect(target).toEqual({ ok: true, kind: "har", snapshotDigest: seeded.snapshotDigest });
+    if (!target.ok) return;
+
+    const vectorsRead = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/vectors?targetId=${String(seeded.targetId)}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(vectorsRead.status, vectorsRead.text).toBe(200);
+    const listed = samplesPageOf(JSON.parse(vectorsRead.text) as JsonValue);
+    expect(listed.rows.map((row) => row.vectorId)).toEqual([String(seeded.vectorId)]);
+
+    const drafted = planDraftOf({
+      csrf: session.csrf,
+      targetId: String(seeded.targetId),
+      target,
+      inventoryRevision: listed.inventoryRevision,
+      contracts,
+      chosenContractIds: [String(seeded.contractId)],
+      inventoryIds: listed.rows.map((row) => row.vectorId),
+      rows: [],
+    });
+    expect(drafted.ok).toBe(true);
+    if (!drafted.ok) return;
+    // Five keys, and they are the door's five: §8 line 289 names `expectedGraphRevision` (which the door
+    // refuses by name - §7.4 makes the plan bind the graph the service reads) and does not name
+    // `snapshotDigest` (which the door requires). The composer follows the door, and the deviation is
+    // recorded on #58 rather than papered over by sending a field nothing reads.
+    expect(Object.keys(drafted.body).sort()).toEqual(["contractRevisionIds", "exclusions", "expectedInventoryRevision", "snapshotDigest", "targetId"]);
+
+    const built = await call("POST", `${API_PREFIX}/projects/${String(session.projectId)}/verification-plans`, {
+      body: JSON.stringify(drafted.body),
+      headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "content-type": "application/json", "x-csrf-token": session.csrf, "idempotency-key": "plan-page-draft-1" },
+    });
+    expect(built.status, built.text).toBe(201);
+    const receipt = planCommitReceiptSchema.safeParse(relayData(JSON.parse(built.text) as JsonValue));
+    if (!receipt.success) throw new Error(built.text);
+    expect(receipt.data.reviewStatus).toBe("draft");
+    expect(receipt.data.selectedCount).toBe(1);
+    expect(receipt.data.excludedCount).toBe(0);
+    const line = planBuildLine(receipt.data);
+    expect(line).toContain(String(receipt.data.planId));
+    expect(line).toContain("草稿（还要 §8 line 291 的批准）");
+    expect(line).toContain("选中 1");
+    expect(line).not.toContain("undefined");
+
+    // The other half of the split: which cases a plan *requires* is a function of the approved contracts
+    // (§7.4), and nothing the page reads discloses that set - so an exclusion that names a required case
+    // cannot be honestly pre-checked by the composer. It sends, and the door answers with the vector's
+    // own id. This is the same division of labour as the capture's start-URL scope rule.
+    const against = planDraftOf({
+      csrf: session.csrf,
+      targetId: String(seeded.targetId),
+      target,
+      inventoryRevision: listed.inventoryRevision,
+      contracts,
+      chosenContractIds: [String(seeded.contractId)],
+      inventoryIds: listed.rows.map((row) => row.vectorId),
+      rows: [{ vectorId: String(seeded.vectorId), reasonCode: "outside-scope", reason: "这一版不算它", excludedBehavior: "GET /api/cart", supersededBy: "" }],
+    });
+    expect(against.ok).toBe(true);
+    if (!against.ok) return;
+    const refused = await call("POST", `${API_PREFIX}/projects/${String(session.projectId)}/verification-plans`, {
+      body: JSON.stringify(against.body),
+      headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "content-type": "application/json", "x-csrf-token": session.csrf, "idempotency-key": "plan-page-draft-2" },
+    });
+    expect(refused.status, refused.text).toBe(422);
+    expect(refused.text).toContain(`vector-both-selected-and-excluded:${String(seeded.vectorId)}`);
+  });
+
   it("reads a frozen blueprint back over HTTP with the plan id for this role (§8 line 293)", async () => {
     const { session, seeded } = await chain("freeze-read", true);
     const frozen = await send(session, { verificationPlanId: String(seeded.planId) }, "freeze-read-1");
@@ -4303,7 +4392,7 @@ describe("the job request door (§8 line 275 / issue #58)", () => {
 
     const facts = { targetId: fix.targetId, claimIds: graph.claims.map((claim) => claim.claimId) };
     const target = inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, fix.targetId);
-    expect(target).toEqual({ ok: true, kind: "url" });
+    expect(target).toEqual({ ok: true, kind: "url", snapshotDigest: null });
     const draft = inspectDraftOf({
       csrf: fix.session.csrf,
       graph: facts,
@@ -4346,7 +4435,7 @@ describe("the job request door (§8 line 275 / issue #58)", () => {
     const profiles = captureProfileOptionsOf(relayData(JSON.parse(healthRead.text) as JsonValue));
     expect(profiles?.map((option) => option.id)).toContain("har-capture");
     const target = inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, fix.targetId);
-    expect(target).toEqual({ ok: true, kind: "url" });
+    expect(target).toEqual({ ok: true, kind: "url", snapshotDigest: null });
     if (profiles === null) throw new Error(healthRead.text);
 
     const draft = captureDraftOf({
@@ -4399,7 +4488,7 @@ describe("the job request door (§8 line 275 / issue #58)", () => {
     const draft = captureDraftOf({
       csrf: fix.session.csrf,
       targetId: fix.targetId,
-      target: { ok: true, kind: "url" },
+      target: { ok: true, kind: "url", snapshotDigest: null },
       graphRevision: 0,
       profiles,
       profileId: "har-capture",
