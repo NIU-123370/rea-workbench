@@ -1806,6 +1806,46 @@ network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待
 我没有为它加新读数；`audit_entries.reason_code` 也**没有**纳入这条谓词——它的值来自各服务的字面量，
 要不要把具名列一起纳入，等你一句话。第 6 格勾上的是"enforce ＋ 可证"，不是"列成空白"。
 
+发布门禁·第三十四轮（2026-10-18 07:41–07:48，**§8 line 261 那句"八种创建用 Idempotency-Key"也变成一条对账门**）：
+
+- 现读的缺口：上一条门量的是"挂了哪些门"，这条量的是**挂上的门各自要不要具名键**。§8 line 261 用**词**点名
+  （import/job/vector/plan/blueprint/candidate/verification/export），而 `apps/web/api.ts` 的表用**布尔旗标**声明
+  （`requiresIdempotencyKey: true|false`）——中间没有任何东西对过账。现读旗标为真的是 **9 扇门**，
+  其中 `POST /projects` **不在这八个词里**：门多要一个调用方必须发的头，而文档那一行只写 `{name:string}`。
+- 落地（`infra/release/docs-check.mjs`，文档一字未动）：**两个方向都查**。
+  少要键＝一句未兑现的承诺（`idempotency-key-required-unenforced`），**多要键＝改了调用方必须发什么**
+  （`idempotency-key-enforced-unlisted`）——后者更容易漏，因为没有任何客户端会报错，只会莫名其妙地被拒。
+  八个词到路径模板的映射写死在本文件里（文档给的是词，不是路径），并且**逐条断言那道门确实挂着**
+  （`idempotency-door-unmounted`）：门改名或被拆掉，这条门会红，
+  而不是悄悄少查一条。行级要求另走一路——**现读那一行第二列里的「需幂等键」**（§8 line 279 的清理重排就是这一路），
+  所以这里没有第二份表格。豁免表照旧**自我否证**（`idempotency-deviation-stale`），
+  一个词配不上模板也是具名失败（`idempotency-word-unmapped`），测试用一个额外的词真把它读出来过。
+- **本轮量出的两条偏差都记在同一张豁免表里，并且都指向 #58**：
+  ① `POST /projects/:p/exports` 不要键——§8 line 261 把 export 列为具名键创建，而 §5 的 `exports` 那行写
+  **不覆盖旧包**，一次重放因此必须是第二个包而不是重播第一个；代码跟了 §5。**这两句文档互相冲突，裁哪一句是你的话**。
+  ② `POST /projects` 要键——§8 那一行的请求字段只有 `{name:string}`。要么文档补这一格，要么门放开，同样等你点。
+- `--probe-routes` 扩到两条对账：探针同时挂一条**没有文档的门**和一条**没人要求的键要求**，
+  那次 run 必须**只**因这两条红。把任一条 `reasons.push` 注释掉，探针就红（K1、K12 两支实测）。
+- 新增用例 **6** 条（`test:unit` 707→**713**／39 files；`test:integration` **546 passed + 6 skipped**，本轮 0 新增）。
+- 变异 **12 支全红、0 存活**：K1 整条对账不推入原因／K2 豁免被忽略／K3 判过度严格时不看文档清单／
+  K4 stale 判据取反／K5 行级读串换成一个没人写的词／K6 漏挂的具名创建被静默跳过／
+  **K7 把 `keyed` 从 `requiresSession` 那一列读**（读错列不会崩，只会安静地全对）／K8 一律当作要键／
+  K9 删掉"表格读不出来就早退"的守卫／K10 未映射的词静默跳过／**K11 树级：真把生成门的旗标改成 false**／
+  K12 探针门只喂给其中一条对账。
+- 又被自己的闸逮到一次（第三次，形状相同）：测试夹具里那句**期望字符串**写着 `§8 line 279`，
+  锚点扫描不区分夹具与文档，当场把它判成 `design-anchor-outside-section`。三行都补了 `docs-check-ignore`
+  并写明"这是夹具自己的行号，不是 DESIGN 引用"。
+- 末态闸门：typecheck 0／lint **213 文件 0 条**／`review` 206 文件命中 **0**／`test:unit` **713/39**／
+  `test:integration` **546 passed + 6 skipped**／`docs:check` exit 0（设计锚点 **406** 处、
+  路由 §8 40 条 · 挂载 41 条 · 已记偏差 3 条 / 具名键 8 词 · 已记幂等偏差 2 条）。
+
+**这轮仍然没做的**：本轮把"挂了哪些"和"要不要具名键"两条都钉住了，但**还没钉"每扇门是否真有过一次成功回包"**——
+现读的结果是**有 5 扇挂好的门在任何 HTTP 测试里都没有 2xx 读数**（`POST /candidates`、`GET /candidates/:c`、
+`GET /candidates/:c/files/:f`、`POST /exports`、`GET /exports/:e/download`）：它们的服务侧都有成功用例，
+中间那一跳从没走过，这正是第廿五轮那条"`GET /health` 必 503"的同一形状，只是这次是一整条交付路径。
+另有两条门**没有回包体契约**可解析（`GET /events` 的帧由 `encodeSseFrame` 自己规定，下载门回的是字节）。
+这两件事是下一条要交的账，本轮只把刻度写清楚，不顺手改行为。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
