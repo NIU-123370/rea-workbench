@@ -1133,6 +1133,34 @@ runner 的，见下文"这轮没做浏览器"）：
   反面证据又应一次）。这一轮**没有**动上一轮遗留的 4310/4496 那两个进程（不属于本轮，也不该顺手停）。
 
 
+浏览器实测·第十九轮（2026-10-18 01:54–01:56，同一套生产构建 rig，端口 4312/4499；这一轮测的是**上一条读数里
+那条无障碍建议修没修**）：
+
+- 第十八轮那一条 `A form field element should have an id or name attribute (count: 3)` 现在**不再出现**：
+  重新 `next build` + `next start`、重新配对、打开同一个项目页并点进「样本」页签之后，
+  `list_console_messages` 的读数是 `<no console messages found>`（**0 条**，含 error/warning/issue 全空）。
+- 页面上当时挂载的 **18 个表单控件全部有名**：`input/select/textarea` 里既无 `name` 又无 `id` 的是 **0 个**；
+  名字逐条是 `capture-file / capture-kind / capture-deadline / upload-sensitive / inspect-question /
+  inspect-scope / declare-url / capture-profile / capture-start-url / capture-kind-0 / capture-locator-0 /
+  capture-role-0 / capture-name-0 / capture-request-body / capture-response-body / capture-header-values /
+  capture-timeout / capture-sensitive`。
+- 补的是 6 格（上传四格 + 两个勾组），其余 12 格本来就有名——**所以 Chrome 报 3 与"页面缺 6"不矛盾**：
+  它只统计当下挂载且没有 label 关联的那几格。
+- 我自己在这轮里造出来又当场抓到的一个错：第一次给上传那格敏感值起名时我写了 `capture-sensitive`，
+  而采集编排组里**已经有一个同名格**（页内 18 格清单里出现两次）——浏览器里读出来的重复名，不是我审代码看出来的。
+  改成 `upload-sensitive` 之后新增一条守卫断「字面 `name=` 不许重名」。`name` 重名在这页不会污染请求
+  （FormData 是逐格手建的），会污染的是读屏播报与自动填充的对应关系，所以这条按"名字必须能指回一个字段"来要求。
+- 一次字符串手术又差点漏出去：我用"锚点前插一行"的办法加属性，第一个锚点命中了 `<ul data-plan-contracts>`
+  的复数形式，把 `name=` 插进了 JSX 的三元分支里 ⇒ typecheck 立刻两条语法错（`TS2657/TS1005`）。
+  **判据仍然有效：插入式补丁要断言锚点唯一且断到具体元素属性上**，跑一次 typecheck 比看 diff 便宜。
+- 新守卫是**扫源码而不是扫一次渲染**（`tests/unit/ui-accessible-names.test.ts`）：页面上的控件分属不同页签，
+  静态渲染只看得见当前挂着的那一页，守卫就会有一个"看不见的洞"。它同时要求"至少找到 25 个控件"，
+  否则一条扫不到任何东西的守卫会永远绿。变异 4 支全杀：删掉 file 的 name、把 name 写成空串、
+  把插值 id 写成 `id={""}`、删掉勾组的 name。
+- rig 收尾：worker 收 `worker stopped`、`worker.lock` 与 `worker.rpc.sock` 自己消失；web 收 `web stopped`；
+  4312/4499 两个端口都释放。**上一轮遗留的 4310/4496 两个进程仍然没动**（不是我的，也不该顺手停）。
+
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
