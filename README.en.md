@@ -24,6 +24,8 @@ REA Workbench is a **local, single-user, evidence-driven software archaeology wo
 
 ## REA Workbench in 30 seconds
 
+https://github.com/user-attachments/assets/75f4bc4e-ae89-4c88-91d1-c50555f0b98b
+
 <div align="center">
 
 [▶ Play the 30-second promo](docs/assets/rea-workbench-promo-30s.mp4) · 1920 × 1080 · silent
