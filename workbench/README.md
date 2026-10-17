@@ -196,12 +196,19 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   `backup-manifest-shape`、`snapshot-schema-newer-than-build`、
   `artifact-files-do-not-match-the-manifest`、`restored-schema-unplannable`。旧的 `-wal` /
   `-shm` 随被替换的库一起删——留着就等于让 SQLite 有机会重放刚被退役的状态。
-- **T17 只是本地测量，不是 A13 达标**：`npm run perf:t17` 用固定 fixture（1000 条记录 → 200 可见
-  节点 + 400 边）量 `buildMiddlePanel` + `listView`，暖态 ≥30 次、nearest-rank p95；本机
-  10-16 那轮 p50 0.16 ms / p95 0.27 ms / max 0.48 ms（40 个样本）。但记录里
-  `gateHostSatisfied=false`，并且写明三件没量：浏览器渲染（这里没有真浏览器 lane）、HAR 导入耗时
-  （需要 REA provider）、采集/模型等待。A13 要求 Linux x64 + 真浏览器，本仓未在真宿主上跑过，
-  CI 也只把这条记录当 advisory 上传。
+- **T17 的闸门原来会在没量过浏览器的跑次上报「A13 达标」**：`npm run perf:t17` 用固定 fixture
+  （1000 条记录 → 200 可见节点 + 400 边）量 `buildMiddlePanel` + `listView`，暖态 ≥30 次、nearest-rank
+  p95；本机 10-17 那轮 p50 0.19 ms / p95 0.37 ms / max 0.66 ms（40 个样本），`gateHostSatisfied=false`
+  因为宿主是 darwin/arm64。**但 CI 那份记录不是**：`gh run download 39054251044 -n t17-record` 取回的
+  文件写着 `hostIsLinuxX64:true`、`browserLane:false`、`unmeasured` 三条里第一条就是"浏览器渲染没量"，
+  而 `gateHostSatisfied` 仍是 `true`——谓词读了它正在写的四个字段里的三个。A13 的句子是「从 worker
+  原子提交到浏览器图/列表完成更新」，终点在浏览器，所以一个只量到视图模型的跑次永远不该算达标。
+  现在记录多了一个 `lane` 块（`{driven:false}`，或被驱动时的每次测量 + p50/p95/max/cold + 浏览器版本
+  + 它到底量的是哪份 fixture），谓词把 lane 的暖态样本数、lane 自己的 p95、以及 fixture 摘要必须与
+  本次计数的那份一致都算进去；`ci.yml` 那条注释原本写"闸门在 lane 存在之前会报 false"，按制品读数是
+  反的，一并改掉，并加了一步把这台 Linux 宿主的浏览器与 CPU 事实打印出来（lane 运行器要按实测的二进制
+  名写，不猜）。**这一笔只把闸门改对，没有把 A13 变成达标**：真浏览器 lane 还不存在，因此 CI 上现在
+  如实报 `gateHostSatisfied=false`，A13 与 #23 都仍未勾选。
 
 ASAR 静态支路（F12 / D05 / issue #24）的边界值得单独说清：
 
