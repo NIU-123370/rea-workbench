@@ -256,7 +256,7 @@ describe("import creates the trio atomically (DESIGN §5, §8)", () => {
       ),
     );
     expect(again.reused).toBe(true);
-    expect(again.jobId).toBe(receipt.jobId);
+    expect(again.job.id).toBe(receipt.job.id);
     expect(again.targetId).toBe(receipt.targetId);
 
     const before = projectRows("targets", projectId).length;
@@ -332,18 +332,18 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
       await ingestion.runInspection(
         projectId,
         inspectorActor,
-        { projectId, jobId: receipt.jobId, expectedJobState: "queued" },
+        { projectId, jobId: receipt.job.id, expectedJobState: "queued" },
         emptyContext,
       ),
     );
     expect(failure.reason).toBe("declaration-context-unavailable");
-    expect(String(db.prepare("SELECT state FROM jobs WHERE id = ?").get(receipt.jobId)?.["state"])).toBe("queued");
+    expect(String(db.prepare("SELECT state FROM jobs WHERE id = ?").get(receipt.job.id)?.["state"])).toBe("queued");
     expect(projectRows("evidence_records", projectId).length).toBe(0);
   });
 
   it("persists the returned envelope and closes the loop into a usable vector", async () => {
     const done = unwrapAsync(
-      await ingestion.runInspection(projectId, inspectorActor, { projectId, jobId: receipt.jobId, expectedJobState: "queued" }, context),
+      await ingestion.runInspection(projectId, inspectorActor, { projectId, jobId: receipt.job.id, expectedJobState: "queued" }, context),
     );
     expect(done.jobState).toBe("succeeded");
     expect(done.evidenceIds).toEqual([evidenceId]);
@@ -354,10 +354,10 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
     expect(stored.length).toBe(1);
     expect(String(stored[0]?.["id"])).toBe(evidenceId);
     expect(String(stored[0]?.["operation"])).toBe("inspect_web_network_capture");
-    const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(receipt.jobId) as Record<string, unknown>;
+    const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(receipt.job.id) as Record<string, unknown>;
     expect(String(job["result_ref"])).toBe(evidenceId);
     expect(String(job["cleanup_state"])).toBe("complete");
-    const lease = db.prepare("SELECT * FROM resource_leases WHERE job_id = ?").get(receipt.jobId) as Record<string, unknown>;
+    const lease = db.prepare("SELECT * FROM resource_leases WHERE job_id = ?").get(receipt.job.id) as Record<string, unknown>;
     expect(String(lease["cleanup_state"])).toBe("complete");
     expect(projectRows("events", projectId).map((row) => String(row["type"]))).toContain("evidence.committed");
 
@@ -423,7 +423,7 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
 
   it("refuses an inspection whose expected job state no longer holds", async () => {
     const failure = failureOf(
-      await ingestion.runInspection(projectId, inspectorActor, { projectId, jobId: receipt.jobId, expectedJobState: "queued" }, context),
+      await ingestion.runInspection(projectId, inspectorActor, { projectId, jobId: receipt.job.id, expectedJobState: "queued" }, context),
     );
     expect(failure.reason).toBe("job-state-changed");
   });
@@ -431,12 +431,12 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
   it("does not replay a job recovery marked interrupted (§11, D25)", async () => {
     // Recovery marks a lost executor `interrupted`; the state machine gives that
     // state no outgoing edge, so a replay needs a new job, not a re-driven one.
-    db.prepare("UPDATE jobs SET state = 'interrupted' WHERE project_id = ? AND id = ?").run(projectId, receipt.jobId);
+    db.prepare("UPDATE jobs SET state = 'interrupted' WHERE project_id = ? AND id = ?").run(projectId, receipt.job.id);
     const failure = failureOf(
-      await ingestion.runInspection(projectId, inspectorActor, { projectId, jobId: receipt.jobId, expectedJobState: "queued" }, context),
+      await ingestion.runInspection(projectId, inspectorActor, { projectId, jobId: receipt.job.id, expectedJobState: "queued" }, context),
     );
     expect(failure.reason).toBe("job-state-changed");
-    expect(String(db.prepare("SELECT state FROM jobs WHERE id = ?").get(receipt.jobId)?.["state"])).toBe("interrupted");
+    expect(String(db.prepare("SELECT state FROM jobs WHERE id = ?").get(receipt.job.id)?.["state"])).toBe("interrupted");
     // The one Evidence record this project holds is still the one that was already
     // persisted: nothing was re-parsed behind the refusal.
     expect(projectRows("evidence_records", projectId).length).toBe(1);
@@ -465,7 +465,7 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
       await constrainedIngestion.runInspection(
         otherProjectId,
         inspectorActor,
-        { projectId: otherProjectId, jobId: staged.jobId, expectedJobState: "queued" },
+        { projectId: otherProjectId, jobId: staged.job.id, expectedJobState: "queued" },
         context,
       ),
     );
@@ -497,7 +497,7 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
     ).map((row) => row.id);
     expect(stored.length).toBeGreaterThan(0);
     expect(view.evidenceIds).toEqual(stored);
-    expect(view.importJobId).toBe(receipt.jobId);
+    expect(view.importJobId).toBe(receipt.job.id);
 
     const builder = { actorId: "builder-agent", actorKind: "builder" } as const;
     const refused = targets.read(projectId, builder, asId(receipt.targetId));

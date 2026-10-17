@@ -13,6 +13,16 @@ export type HttpRequest = {
   query: Record<string, string>;
   headers: Record<string, string | undefined>;
   body: string;
+  // The same bytes before anything decoded them. `body` is what a JSON route parses, and
+  // it round-trips for text; an upload does not. A multipart file part is arbitrary
+  // bytes, and every byte sequence that is not valid UTF-8 would have been replaced on
+  // the way through a string - so the route that accepts a file reads this field and
+  // never the other (§8 line 272, §12: 先计量再分配).
+  //
+  // `ArrayBuffer`-backed rather than the default view type, because the platform's own
+  // multipart reader takes a body whose buffer is an `ArrayBuffer`; a view over a Node
+  // `Buffer` pool would be a type error at the one place that needs to hand bytes over.
+  bodyBytes: Uint8Array<ArrayBuffer>;
 };
 
 export type EventPump = {

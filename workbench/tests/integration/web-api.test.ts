@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { request as rawRequest } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { bootWorker, EVIDENCE_INLINE_LIMIT_BYTES, type WorkerHandle } from "../.
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { startWorkerRpc, type RpcServer } from "../../apps/worker/rpc-server.ts";
 import { createWorkerClient } from "../../apps/web/worker-client.ts";
-import { createApiHandler, API_PREFIX } from "../../apps/web/api.ts";
+import { createApiHandler, API_PREFIX, MAX_UPLOAD_FILE_BYTES } from "../../apps/web/api.ts";
 import { runWebProcess } from "../../apps/web/main.ts";
 import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
@@ -23,13 +23,14 @@ import { targetCreatedSchema, targetViewSchema } from "../../packages/contracts/
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { cleanupRetryReceiptSchema, JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
+import { harImportHttpResponseSchema } from "../../packages/contracts/imports.ts";
 import { IdempotencyJournal, MAX_IDEMPOTENCY_KEY_LENGTH } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
 import { SESSION_COOKIE_NAME } from "../../packages/application/session.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { asId, asInstant, newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
-import { asDigest } from "../../packages/domain/canonical-json.ts";
+import { asDigest, digestBytes } from "../../packages/domain/canonical-json.ts";
 import { hex } from "../support/blueprint-seed.ts";
 import { seedReviewChain } from "../support/review-chain.ts";
 import { seedVerifiedScenario } from "../support/verification-seed.ts";
@@ -114,7 +115,11 @@ function env(): Record<string, string | undefined> {
     WB_HOST: "127.0.0.1",
     WB_PORT: "4313",
     WB_DATA_DIR: dataDir,
-    WB_REA_ENTRYPOINT: path.join(dataDir, "rea-entry.mjs"),
+    // The upload door needs the worker's ingestion service, and that service is only built once a
+    // provider session exists (`ingestionService` -> `providerSession`). This is the recorded-shape
+    // MCP fixture rather than a real provider: it makes the *transport and projection* under test
+    // real, and it says nothing about REA itself (issue #14's fixture/real split still stands).
+    WB_REA_ENTRYPOINT: path.join(ROOT, "tests", "fixtures", "rea-mcp-fixture.mjs"),
     WB_MODEL_ENDPOINT: "",
     WB_SANDBOX_PROFILE: "har-capture",
     WB_BROKER_SOCKET: brokerSocket,
@@ -125,7 +130,10 @@ async function call(method: string, target: string, init: Record<string, unknown
   const response = await fetch(`${baseUrl}${target}`, {
     method,
     headers: (init.headers as Record<string, string>) ?? {},
-    ...(init.body === undefined ? {} : { body: init.body as string }),
+    // `BodyInit` rather than a string, because one route takes a file: a FormData body is what the
+    // browser sends, and hand-writing the boundary would test my own parser's guesswork instead of
+    // the platform's multipart encoder meeting the platform's multipart decoder.
+    ...(init.body === undefined ? {} : { body: init.body as string | FormData }),
     redirect: "manual",
   });
   const text = await response.text();
@@ -3154,5 +3162,414 @@ describe("the verification request door (§8 line 297 / issue #58)", () => {
       (job) => job.kind === "verify" && job.state === "queued",
     );
     expect(queued).toHaveLength(0);
+  });
+});
+
+
+// §8 line 272 over HTTP: a multipart upload that atomically lands a file target, an inspect job and
+// an owned staging lease, and answers 202 with `{targetId, job}`. The rig's provider is the recorded
+// -shape MCP fixture, so the rows, the digests and the projections below are real while nothing here
+// claims anything about REA itself (issue #14's split still holds: `capture.importHar` has never
+// been driven against a live provider, and these tests do not change that).
+describe("the import door (§8 line 272 / issue #58)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `create-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  const HAR_TEXT = JSON.stringify({ log: { version: "1.2", creator: { name: "fixture", version: "1" }, entries: [] } });
+  const uploadPath = (projectId: Id) => `${API_PREFIX}/projects/${String(projectId)}/imports`;
+
+  function formOf(fields: {
+    bytes?: Uint8Array | string;
+    filename?: string;
+    mediaType?: string;
+    kind?: string;
+    deadlineAt?: string;
+    sensitiveValues?: string[];
+    extra?: Record<string, string>;
+    fileAsText?: string;
+    twoFiles?: boolean;
+    noFile?: boolean;
+  }): FormData {
+    const form = new FormData();
+    if (fields.noFile !== true) {
+      if (fields.fileAsText !== undefined) {
+        form.set("file", fields.fileAsText);
+      } else {
+        const bytes = typeof fields.bytes === "string" ? new TextEncoder().encode(fields.bytes) : (fields.bytes ?? new TextEncoder().encode(HAR_TEXT));
+        const file = new File([bytes], fields.filename ?? "cart.har", { type: fields.mediaType ?? "application/json" });
+        form.set("file", file);
+        if (fields.twoFiles === true) form.append("file", new File([bytes], "second.har", { type: "application/json" }));
+      }
+    }
+    if (fields.kind !== undefined) form.set("kind", fields.kind);
+    if (fields.deadlineAt !== undefined) form.set("deadlineAt", fields.deadlineAt);
+    for (const value of fields.sensitiveValues ?? []) form.append("sensitiveValues", value);
+    for (const [name, value] of Object.entries(fields.extra ?? {})) form.set(name, value);
+    return form;
+  }
+
+  function upload(session: Session, projectId: Id, form: FormData, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    // No content-type is set on purpose: the platform's fetch writes the boundary, and a hand-made
+    // header would test my guess about the framing instead of the parser meeting the encoder.
+    return call("POST", uploadPath(projectId), { body: form, headers });
+  }
+
+  function reasonOf(text: string): Record<string, unknown> {
+    return (JSON.parse(text) as { error: { details: Record<string, unknown> } }).error.details;
+  }
+
+  // Names anywhere under the data directory. Used to show a caller-named file was never created:
+  // the assertion is about the absence of a name, so it has to walk the tree rather than trust a key.
+  function walkNames(dir: string): string[] {
+    const found: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      found.push(entry.name);
+      if (entry.isDirectory()) found.push(...walkNames(path.join(dir, entry.name)));
+    }
+    return found;
+  }
+
+  function rowCount(table: string, projectId: Id): number {
+    const outcome = worker.writeConnection.transact((tx) => tx.listJobsByStates(["queued", "running", "succeeded"], 10_000));
+    if (!outcome.ok) throw new Error(JSON.stringify(outcome.error));
+    if (table === "jobs") return outcome.value.filter((job) => job.projectId === projectId).length;
+    throw new Error(`unsupported table ${table}`);
+  }
+
+  it("lands the target, the job and the owned lease, and answers 202 with §8's two fields", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-happy");
+    const uploaded = await upload(session, projectId, formOf({ kind: "har" }), "import-key-1");
+    expect(uploaded.status, uploaded.text).toBe(202);
+    const parsed = harImportHttpResponseSchema.safeParse(JSON.parse(uploaded.text) as JsonValue);
+    if (!parsed.success) throw new Error(`${JSON.stringify(parsed.error.issues)}\n${uploaded.text}`);
+    expect(parsed.data.job.kind).toBe("inspect");
+    expect(parsed.data.job.state).toBe("queued");
+    expect(parsed.data.job.cleanupState).toBe("pending");
+    // §8's third column names exactly `{targetId,job}`: the lease and the source artifact the
+    // service also minted are real, but they do not leave this door.
+    expect(Object.keys(JSON.parse(uploaded.text) as Record<string, unknown>).sort()).toEqual(["job", "targetId"]);
+
+    const targetId = asId(parsed.data.targetId);
+    const target = worker.writeConnection.transact((tx) => tx.getTarget(projectId, targetId));
+    if (!target.ok || target.value === null) throw new Error("the target row is missing");
+    expect(target.value.kind).toBe("har");
+    // §4: for a file target the snapshot identity is the content digest of what arrived.
+    expect(target.value.snapshotDigest).toBe(digestBytes(new TextEncoder().encode(HAR_TEXT)));
+    // A *file* target's locator is the display name the caller chose, run through the store's own
+    // basename rule - this is the row, not the view (§5 keeps `locator` out of the view for every
+    // kind, and the test below the door reads that separately).
+    expect(target.value.originalLocator).toBe("cart.har");
+
+    const job = worker.writeConnection.transact((tx) => tx.getJob(projectId, asId(parsed.data.job.id)));
+    if (!job.ok || job.value === null) throw new Error("the job row is missing");
+    expect(job.value.targetId).toBe(targetId);
+    expect(job.value.idempotencyKey).toBe("import-key-1");
+
+    // The lease is the third thing §8 line 272 says this call allocates, and §5 is what makes it
+    // *owned*: a cleanup may only reclaim staging this workbench can show it minted.
+    const lease = worker.writeConnection.transact((tx) => tx.getLeaseByJob(projectId, asId(parsed.data.job.id)));
+    if (!lease.ok || lease.value === null) throw new Error("the staging lease is missing");
+    expect(JSON.stringify(lease.value.ownershipProofJson)).toContain("har-import");
+
+    const evidence = worker.writeConnection.transact((tx) => tx.listEvidenceIdsForTarget(projectId, targetId, 10));
+    if (!evidence.ok) throw new Error(JSON.stringify(evidence.error));
+    // Import stages and indexes; it does not decode. Evidence arrives with the inspection.
+    expect(evidence.value).toEqual([]);
+  });
+
+  it("answers the same job the job read door reads (§8's one projection)", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-cross-door");
+    const uploaded = await upload(session, projectId, formOf({ kind: "har" }), "import-key-2");
+    const body = JSON.parse(uploaded.text) as { job: Record<string, unknown>; targetId: string };
+    const read = await call("GET", `${uploadPath(projectId).replace("/imports", "")}/jobs/${String(body["job"]?.["id"])}`, {
+      headers: { host: host(), cookie: session.cookie },
+    });
+    expect(read.status, read.text).toBe(200);
+    expect(read.text).toBe(JSON.stringify(body["job"]));
+
+    // And the target read door names the job it imported with.
+    const targetRead = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/targets/${body.targetId}`, {
+      headers: { host: host(), cookie: session.cookie },
+    });
+    expect(targetRead.status, targetRead.text).toBe(200);
+    const view = targetViewSchema.safeParse(JSON.parse(targetRead.text) as JsonValue);
+    if (!view.success) throw new Error(targetRead.text);
+    expect(view.data.importJobId).toBe(String(body["job"]?.["id"]));
+    expect(view.data.evidenceIds).toEqual([]);
+    expect(view.data.snapshotDigest).not.toBeNull();
+  });
+
+  it("replays the key to the same answer and imports once", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-replay");
+    const first = await upload(session, projectId, formOf({ kind: "har" }), "import-key-3");
+    expect(first.status, first.text).toBe(202);
+    const jobs = rowCount("jobs", projectId);
+    const again = await upload(session, projectId, formOf({ kind: "har" }), "import-key-3");
+    expect(again.status, again.text).toBe(202);
+    expect(again.text).toBe(first.text);
+    expect(rowCount("jobs", projectId)).toBe(jobs);
+
+    const audit = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/audit?limit=50`, { headers: { host: host(), cookie: session.cookie } });
+    const actions = ((JSON.parse(audit.text) as { entries?: { action: string }[] }).entries ?? []).map((entry) => entry.action);
+    expect(actions.filter((action) => action === "har.import")).toHaveLength(1);
+
+    // The same key with different bytes is a different request: §8 line 261 says 不同非敏感 payload
+    // 返回 409, and the file's digest is the part that says which upload this is.
+    const other = await upload(session, projectId, formOf({ kind: "har", bytes: '{"log":{"version":"1.2"}}' }), "import-key-3");
+    expect(other.status, other.text).toBe(409);
+    expect(reasonOf(other.text)["reason"]).toBe("idempotency-key-reused");
+  });
+
+  it("refuses a body that is not a single readable file part", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-shapes");
+
+    const jsonBody = await call("POST", uploadPath(projectId), {
+      body: JSON.stringify({ kind: "har" }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "content-type": "application/json",
+        "idempotency-key": "import-key-4",
+      },
+    });
+    expect(jsonBody.status, jsonBody.text).toBe(400);
+    expect(reasonOf(jsonBody.text)["reason"]).toBe("import-multipart-required");
+
+    const malformed = await call("POST", uploadPath(projectId), {
+      body: "this is not multipart at all",
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "content-type": "multipart/form-data; boundary=none",
+        "idempotency-key": "import-key-5",
+      },
+    });
+    expect(malformed.status, malformed.text).toBe(400);
+    expect(reasonOf(malformed.text)["reason"]).toBe("import-multipart-malformed");
+
+    for (const [fields, reason] of [
+      [{ noFile: true }, "import-file-part-missing"],
+      [{ fileAsText: "just a text field" }, "import-file-part-not-file"],
+      [{ twoFiles: true }, "import-file-part-duplicated"],
+    ] as const) {
+      const refused = await upload(session, projectId, formOf(fields), `import-key-${reason}`);
+      expect(refused.status, refused.text).toBe(400);
+      expect(reasonOf(refused.text)["reason"]).toBe(reason);
+    }
+    expect(rowCount("jobs", projectId)).toBe(0);
+  });
+
+  it("refuses what §8 line 272 does not name, by name and without values", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-names");
+
+    // The worker's own command accepts a `recordOrdinals` selection; this route's row does not
+    // list it, so the door refuses it rather than becoming where undocumented fields arrive.
+    const extra = await upload(session, projectId, formOf({ kind: "har", extra: { recordOrdinals: "1" } }), "import-key-6");
+    expect(extra.status, extra.text).toBe(400);
+    expect(reasonOf(extra.text)["rejectedKeys"]).toEqual(["recordOrdinals"]);
+
+    const noKind = await upload(session, projectId, formOf({}), "import-key-7");
+    expect(noKind.status, noKind.text).toBe(400);
+    expect(JSON.stringify(reasonOf(noKind.text)["allowed"])).toContain("har");
+
+    const wrongKind = await upload(session, projectId, formOf({ kind: "pcap" }), "import-key-8");
+    expect(wrongKind.status, wrongKind.text).toBe(400);
+    expect(reasonOf(wrongKind.text)["reason"]).toBe("import-kind-unsupported");
+
+    const wrongMedia = await upload(session, projectId, formOf({ kind: "har", mediaType: "image/png" }), "import-key-9");
+    expect(wrongMedia.status, wrongMedia.text).toBe(422);
+    expect(reasonOf(wrongMedia.text)["mediaType"]).toBe("image/png");
+    expect(JSON.stringify(reasonOf(wrongMedia.text)["allowed"])).toContain("application/x-ndjson");
+
+    const badDeadline = await upload(session, projectId, formOf({ kind: "har", deadlineAt: "tomorrow" }), "import-key-10");
+    expect(badDeadline.status, badDeadline.text).toBe(400);
+    expect(reasonOf(badDeadline.text)["reason"]).toBe("import-deadline-malformed");
+    // The rejected text is named as a shape, never echoed.
+    expect(badDeadline.text).not.toContain("tomorrow");
+  });
+
+  it("answers an ASAR upload the two ways §8 distinguishes", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-asar");
+
+    const bare = await upload(session, projectId, formOf({ kind: "asar" }), "import-key-11");
+    expect(bare.status, bare.text).toBe(503);
+    expect(reasonOf(bare.text)["reason"]).toBe("import-asar-not-wired");
+
+    // §8 line 272 names this 422 itself (ASAR 携带 sensitiveValues 返回 422, 不伪称上游支持), and it
+    // is the answer the caller can act on, so it comes before "this build has no ASAR path at all".
+    const declared = await upload(session, projectId, formOf({ kind: "asar", sensitiveValues: ["sesecret"] }), "import-key-12");
+    expect(declared.status, declared.text).toBe(422);
+    expect(reasonOf(declared.text)["reason"]).toBe("import-asar-sensitive-values-unsupported");
+    expect(declared.text).not.toContain("sesecret");
+  });
+
+  it("measures the upload before it allocates: empty, oversized and beyond the transport", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-sizes");
+
+    const empty = await upload(session, projectId, formOf({ kind: "har", bytes: new Uint8Array(0) }), "import-key-13");
+    expect(empty.status, empty.text).toBe(400);
+    expect(reasonOf(empty.text)["reason"]).toBe("import-file-empty");
+
+    const oversize = new Uint8Array(MAX_UPLOAD_FILE_BYTES + 1).fill(97);
+    const tooBig = await upload(session, projectId, formOf({ kind: "har", bytes: oversize }), "import-key-14");
+    expect(tooBig.status, tooBig.text).toBe(413);
+    const details = reasonOf(tooBig.text);
+    expect(details["reason"]).toBe("import-file-too-large");
+    // Both numbers, so the operator can decide instead of guessing which limit was hit.
+    expect(details["byteLength"]).toBe(MAX_UPLOAD_FILE_BYTES + 1);
+    expect(details["maxBytes"]).toBe(MAX_UPLOAD_FILE_BYTES);
+
+    // Above the multipart budget the request never reaches any door: the transport counts while it
+    // reads (§12), which is the only reason a 6 MiB body cannot become a 6 MiB allocation first.
+    // Big enough that the *whole* multipart body passes the transport's own budget, so this is the
+    // limit that answers first - and the door never runs.
+    const huge = new Uint8Array(MAX_UPLOAD_FILE_BYTES + 1_600_000).fill(98);
+    const overTransport = await upload(session, projectId, formOf({ kind: "har", bytes: huge }), "import-key-15");
+    expect(overTransport.status, overTransport.text).toBe(413);
+    expect(overTransport.text).toContain("body-too-large");
+
+    expect(rowCount("jobs", projectId)).toBe(0);
+  });
+
+  it("treats the filename as display text and the declaration as short-lived", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-names-are-text");
+
+    const traversing = await upload(session, projectId, formOf({ kind: "har", filename: "../../../../etc/passwd" }), "import-key-16");
+    expect(traversing.status, traversing.text).toBe(202);
+    const targetId = asId((JSON.parse(traversing.text) as { targetId: string }).targetId);
+    const target = worker.writeConnection.transact((tx) => tx.getTarget(projectId, targetId));
+    if (!target.ok || target.value === null) throw new Error("the target row is missing");
+    const sourceArtifactId = target.value.sourceArtifactId;
+    if (sourceArtifactId === null) throw new Error("the target names no source artifact");
+    const artifact = worker.writeConnection.transact((tx) => tx.getArtifact(projectId, sourceArtifactId));
+    if (!artifact.ok || artifact.value === null) throw new Error("the artifact row is missing");
+    // The stored key is content-addressed inside the project, and the name the caller typed is not
+    // in it - which is the checkable form of §5's "the bytes arrive here, the name is display text".
+    expect(artifact.value.storageKey).toBe(`projects/${String(projectId)}/artifacts/inspector/${artifact.value.sha256}.bin`);
+    expect(artifact.value.storageKey).not.toContain("passwd");
+    expect(walkNames(dataDir).some((name) => name.includes("passwd"))).toBe(false);
+
+    // A declared value that also appears in the filename is refused by the diagnostic filter, and
+    // the answer never repeats the value (§5: 声明只在任务内存; §12.1 publishes names, not values).
+    const leaked = await upload(session, projectId, formOf({ kind: "har", filename: "sesecret-cart.har", sensitiveValues: ["sesecret"] }), "import-key-17");
+    expect(leaked.status, leaked.text).toBe(422);
+    expect(leaked.text).not.toContain("sesecret");
+    expect(reasonOf(leaked.text)["reason"]).not.toBeUndefined();
+    // And the refused upload left nothing behind.
+    expect(rowCount("jobs", projectId)).toBe(1);
+  });
+
+  // The reason this route reads `bodyBytes` and not `body`: a file part is arbitrary bytes, and
+  // every sequence that is not valid UTF-8 would already be a replacement character by the time a
+  // text view reached the worker. §8 line 272's `application/octet-stream` is that case by name.
+  it("carries a binary upload through without rewriting it", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-binary");
+    const raw = new Uint8Array(65_536);
+    for (let index = 0; index < raw.length; index += 1) raw[index] = index % 256;
+    const uploaded = await upload(session, projectId, formOf({ kind: "har", bytes: raw, mediaType: "application/octet-stream", filename: "sample.asar-ish.bin" }), "import-key-binary");
+    expect(uploaded.status, uploaded.text).toBe(202);
+    const targetId = asId((JSON.parse(uploaded.text) as { targetId: string }).targetId);
+    const target = worker.writeConnection.transact((tx) => tx.getTarget(projectId, targetId));
+    if (!target.ok || target.value === null) throw new Error("the target row is missing");
+    // The digest the store holds is the digest of the bytes that were sent - not of the text they
+    // would have become, which is the difference between an archive and a guess about one.
+    expect(target.value.sourceSha256).toBe(digestBytes(raw));
+    expect(target.value.snapshotDigest).toBe(digestBytes(raw));
+    const sourceArtifactId = target.value.sourceArtifactId;
+    if (sourceArtifactId === null) throw new Error("the target names no source artifact");
+    const artifact = worker.writeConnection.transact((tx) => tx.getArtifact(projectId, sourceArtifactId));
+    if (!artifact.ok || artifact.value === null) throw new Error("the artifact row is missing");
+    expect(artifact.value.byteLength).toBe(raw.byteLength);
+    expect(artifact.value.mediaType).toBe("application/octet-stream");
+  });
+
+  // §12.1: a declared value is filtered out of every message, detail and log line the request can
+  // produce. This door's own refusal repeats the media type it rejected, so a caller who declared
+  // that string as sensitive has to be able to trust it does not come back.
+  it("never echoes a value the caller declared sensitive", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-echo");
+    const refusedUpload = await upload(session, projectId, formOf({
+      kind: "har",
+      mediaType: "image/png",
+      sensitiveValues: ["image/png"],
+    }), "import-key-echo");
+    expect(refusedUpload.status, refusedUpload.text).toBeLessThan(500);
+    expect(refusedUpload.text).not.toContain("image/png");
+  });
+
+  it("keeps §14's gate order in front of the upload", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-gates");
+
+    const anonymous = await call("POST", uploadPath(projectId), {
+      body: formOf({ kind: "har" }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+
+    const noCsrf = await call("POST", uploadPath(projectId), {
+      body: formOf({ kind: "har" }),
+      headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "idempotency-key": "import-key-18" },
+    });
+    expect(noCsrf.status, noCsrf.text).toBe(403);
+
+    const noKey = await upload(session, projectId, formOf({ kind: "har" }), null);
+    expect(noKey.status, noKey.text).toBe(400);
+    expect(reasonOf(noKey.text)["reason"]).toBe("idempotency-key-required");
+    // The key's own wording belongs to the pipeline, not to the worker behind it.
+    expect((JSON.parse(noKey.text) as { error: { message: string } }).error.message).toBe("this creation needs an Idempotency-Key header");
+
+    const unknownProject = await upload(session, asId(newId()), formOf({ kind: "har" }), "import-key-19");
+    expect(unknownProject.status, unknownProject.text).toBe(404);
   });
 });

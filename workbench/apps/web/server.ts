@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { MAX_REQUEST_BODY_BYTES, type ApiHandler } from "./api.ts";
+import { MAX_REQUEST_BODY_BYTES, MAX_UPLOAD_BODY_BYTES, type ApiHandler } from "./api.ts";
 import type { ApiResponse, HttpRequest } from "./types.ts";
 
 // The loopback mount for the API pipeline (§14 / D30). It exists as its own file so
@@ -54,19 +54,43 @@ function parseQuery(url: string): Record<string, string> {
   return out;
 }
 
-function readBody(message: IncomingMessage, limit: number): Promise<string | null> {
+// The two budgets are separate because what they bound is separate (§12: 上传长度、解压展开…
+// 分别预留容量). A multipart upload carries a file, so it needs room a JSON body would never
+// be given, and reading them under one number would mean either refusing every realistic HAR
+// or holding JSON routes to a megabyte budget they have no reason to trust.
+function bodyBudget(headers: Record<string, string | undefined>): number {
+  return (headers["content-type"] ?? "").toLowerCase().startsWith("multipart/form-data")
+    ? MAX_UPLOAD_BODY_BYTES
+    : MAX_REQUEST_BODY_BYTES;
+}
+
+// Bytes first, text as a view of them. The budget is counted while the stream arrives rather
+// than after, and an overflow stops accumulating immediately - a caller that streams 4 GiB is
+// cut off inside the budget (§11, §12).
+function readBody(message: IncomingMessage, limit: number): Promise<{ text: string; bytes: Uint8Array<ArrayBuffer> } | null> {
   return new Promise((resolve) => {
-    let text = "";
+    const chunks: Buffer[] = [];
+    let received = 0;
     let overflow = false;
     message.on("data", (chunk: Buffer) => {
       if (overflow) return;
-      text += chunk.toString("utf8");
-      // Counted as it arrives: a caller that streams 4 GiB must be cut off inside
-      // the budget rather than after the whole body is in memory (§11, §12).
-      if (Buffer.byteLength(text, "utf8") > limit) overflow = true;
+      received += chunk.byteLength;
+      if (received > limit) {
+        overflow = true;
+        return;
+      }
+      chunks.push(chunk);
     });
-    message.on("end", () => resolve(overflow ? null : text));
-    message.on("error", () => resolve(overflow ? null : text));
+    const finish = (): void => {
+      if (overflow) {
+        resolve(null);
+        return;
+      }
+      const joined = Buffer.concat(chunks);
+      resolve({ text: joined.toString("utf8"), bytes: new Uint8Array(joined) });
+    };
+    message.on("end", finish);
+    message.on("error", finish);
   });
 }
 
@@ -94,7 +118,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 async function handle(options: WebServerOptions, message: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = message.url ?? "/";
   const path = url.split("?")[0] ?? url;
-  const body = await readBody(message, MAX_REQUEST_BODY_BYTES);
+  const headers = headerMap(message);
+  const body = await readBody(message, bodyBudget(headers));
   if (body === null) {
     // The handler never sees a body it could not have validated.
     response.writeHead(413, { "content-type": "application/json; charset=utf-8" });
@@ -105,8 +130,9 @@ async function handle(options: WebServerOptions, message: IncomingMessage, respo
     method: message.method ?? "GET",
     path,
     query: parseQuery(url),
-    headers: headerMap(message),
-    body,
+    headers,
+    body: body.text,
+    bodyBytes: body.bytes,
   };
   const outcome = await options.handler(request);
   write(outcome, response);

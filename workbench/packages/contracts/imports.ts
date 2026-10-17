@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { digestSchema, idSchema, instantSchema, jsonValueSchema, limitSchema, nonEmptyString } from "./primitives.ts";
+import { jobRecordSchema } from "./jobs.ts";
 
 // HAR ingestion contract (DESIGN §8 ingestion, §5 targets/jobs, D25, PRD F02/A01).
 //
@@ -37,15 +38,25 @@ export const harImportFieldsSchema = harImportCommandSchema.extend({
 
 export const harImportReceiptSchema = z.strictObject({
   targetId: idSchema,
-  jobId: idSchema,
+  // §8 line 272 answers `{targetId,job:JobRecord}`. The job is named by the same schema the job
+  // read doors use, because it is the same row: a receipt that re-listed `jobId` and `jobState`
+  // beside it would be two names for one fact, and the pair could drift.
+  job: jobRecordSchema,
   leaseId: idSchema,
   sourceArtifactId: idSchema,
   // A file target's snapshot identity is its content digest, stated rather than
   // guessed: the snapshot exists before any producer has looked inside.
   snapshotDigest: digestSchema,
   byteLength: z.int().nonnegative(),
-  jobState: z.enum(["queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"]),
   reused: z.boolean(),
+});
+
+// The HTTP body §8 line 272 names, spelled out as a contract so the door answers exactly that and
+// not the receipt's internal fields. `leaseId` and `sourceArtifactId` are real, but this route's
+// third column does not list them, so they stay on the service-side receipt.
+export const harImportHttpResponseSchema = z.strictObject({
+  targetId: idSchema,
+  job: jobRecordSchema,
 });
 
 export const inspectionCommandSchema = z.strictObject({

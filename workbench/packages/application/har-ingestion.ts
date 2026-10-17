@@ -5,7 +5,7 @@ import { asId, isReaEvidenceId, newId, nowInstant } from "../domain/identity.ts"
 import type { Id } from "../domain/identity.ts";
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
-import { transition } from "./job-queue.ts";
+import { projectJobRecord, transition } from "./job-queue.ts";
 import { harImportCommandSchema, inspectionCommandSchema } from "../contracts/imports.ts";
 import type { HarImportReceipt, InspectionReceipt } from "../contracts/imports.ts";
 import { reaEvidenceSchema } from "../contracts/rea-evidence.ts";
@@ -235,12 +235,13 @@ export class HarIngestionService {
             kind: "committed",
             value: {
               targetId: existingTarget.id,
-              jobId: prior.id,
+              // §8 line 272's answer is the job the key already owns, named the same way the job
+              // read doors name it - one projection, so a replay and a later read cannot disagree.
+              job: projectJobRecord(prior, tx.listLeasesForJobs(projectId, [prior.id])),
               leaseId,
               sourceArtifactId: existingTarget.sourceArtifactId ?? sourceArtifactId,
               snapshotDigest: existingTarget.snapshotDigest,
               byteLength: command.byteLength,
-              jobState: prior.state,
               reused: true,
             },
           };
@@ -277,7 +278,7 @@ export class HarIngestionService {
         };
         tx.insertTarget(target);
 
-        const createdJob = tx.insertJob({
+        const job: JobRow = {
           id: jobId,
           projectId,
           targetId,
@@ -293,7 +294,8 @@ export class HarIngestionService {
           retryAt: null,
           createdAt: created,
           updatedAt: created,
-        });
+        };
+        const createdJob = tx.insertJob(job);
         if (createdJob.outcome !== "inserted") {
           // A concurrent writer took the key between the read above and this
           // insert. BEGIN IMMEDIATE serialises writers, so reaching here means the
@@ -335,12 +337,13 @@ export class HarIngestionService {
           kind: "committed",
           value: {
             targetId,
-            jobId,
+            // The job as §8 line 272 names it, read back from the row and the lease this same
+            // transaction just wrote - not a copy of the fields the caller happened to send.
+            job: projectJobRecord(job, tx.listLeasesForJobs(projectId, [jobId])),
             leaseId,
             sourceArtifactId,
             snapshotDigest: measured,
             byteLength: command.byteLength,
-            jobState: "queued",
             reused: false,
           },
         };
