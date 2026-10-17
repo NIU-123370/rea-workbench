@@ -73,6 +73,16 @@ async function readPage(
 
 export type OpenedStream = { ok: true; backlog: string[]; window: EventWindow; afterSeq: number } | { ok: false; failure: GateFailure };
 
+// The first thing written to every stream, before any event.
+//
+// A route handler that forwards a body chunk by chunk - which is what the UI relay does (§2) -
+// does not write the response head until the first chunk arrives, so an open-but-idle stream
+// leaves the browser's `EventSource` waiting for its `open` event forever: the connection is
+// live and tailing, and the panel says it is still connecting (issue #85's browser reading).
+// An SSE line beginning with `:` is a comment the client must ignore, so this carries no state
+// and cannot be mistaken for an event; it only proves the bytes are flowing.
+export const STREAM_PREAMBLE = ": stream-open\n\n";
+
 // Cursor judgement, shared by the open and by the re-read a client may force.
 export function judgeCursor(window: EventWindow, request: StreamRequest) {
   return resolveCursor({ lastEventId: request.lastEventId, after: request.after }, window);
@@ -108,7 +118,7 @@ export async function openEventStream(
 
   let lastSeq = afterSeq;
   for (const event of backlog.page.events) lastSeq = Math.max(lastSeq, event.seq);
-  const queue = [...frames.value];
+  const queue = [STREAM_PREAMBLE, ...frames.value];
   let stopped = false;
   return {
     kind: "stream",
@@ -119,26 +129,35 @@ export async function openEventStream(
         stopped = true;
       },
       async take(): Promise<string | null> {
-        const next = queue.shift();
-        if (next !== undefined) return next;
-        if (stopped) return null;
-        await deps.sleep(deps.pollMs);
-        if (stopped) return null;
-        const page = await readPage(deps, request.projectId, lastSeq, MAX_EVENT_PAGE);
-        if (!page.ok) {
-          // The stream is closed rather than continued on a guess: the client's own
-          // Last-Event-ID makes the gap recoverable, a silently skipped page would not.
-          stopped = true;
-          return null;
+        // A poll that found nothing is not the end of a stream: this loop is what keeps one open
+        // subscriber waiting for the next commit. Returning null here on an empty page ended every
+        // idle connection, and the browser's reconnect churn is what made a live tail indistinguishable
+        // from a dead one (issue #85's reading: the door worked, the panel could not tell).
+        for (;;) {
+          // The close is checked before the queue: a stream the caller ended is not going to hand out
+          // one more frame "because it was already committed", and the writer on the other side of this
+          // call is a response that has been finished. Delivering into a finished response is not
+          // silence - Node reports it as `ERR_STREAM_WRITE_AFTER_END`.
+          if (stopped) return null;
+          const next = queue.shift();
+          if (next !== undefined) return next;
+          await deps.sleep(deps.pollMs);
+          if (stopped) return null;
+          const page = await readPage(deps, request.projectId, lastSeq, MAX_EVENT_PAGE);
+          if (!page.ok) {
+            // The stream is closed rather than continued on a guess: the client's own
+            // Last-Event-ID makes the gap recoverable, a silently skipped page would not.
+            stopped = true;
+            return null;
+          }
+          const encoded = encodeSseFrames(page.page.events, deps.declaration);
+          if (!encoded.ok) {
+            stopped = true;
+            return null;
+          }
+          for (const event of page.page.events) lastSeq = Math.max(lastSeq, event.seq);
+          queue.push(...encoded.value);
         }
-        const encoded = encodeSseFrames(page.page.events, deps.declaration);
-        if (!encoded.ok) {
-          stopped = true;
-          return null;
-        }
-        for (const event of page.page.events) lastSeq = Math.max(lastSeq, event.seq);
-        queue.push(...encoded.value);
-        return queue.shift() ?? null;
       },
     },
   };

@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { asId, instantToEpochMs, newId } from "../../packages/domain/identity.ts";
 import type { Id, Instant } from "../../packages/domain/identity.ts";
 import { apiErrorSchema } from "../../packages/contracts/errors.ts";
+import { eventPageSchema } from "../../packages/contracts/events.ts";
 import { jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
@@ -350,6 +351,19 @@ describe("the runner executes the queue it finds (§11)", () => {
     // The request this failure answers is the key the caller carried - not a number the runner made
     // up, and not the row's own id, which would say nothing about which request is being answered.
     expect(error.requestId).toBe("0d2e4f6a-8b0c-4d2e-4f6a-8b0c2d4e6f81");
+
+    // The event the same settle wrote has to stay inside §8.1's payload contract. This is not
+    // cosmetic: the backlog read parses every row, so one event carrying a key the contract does not
+    // name makes `GET /events` refuse the project's whole stream from then on - a failed job would
+    // silently kill the feed every later job depends on.
+    const page = unwrap(await ask("events.after", { projectId, afterSeq: 0, limit: 100 }, inspector));
+    const parsedPage = eventPageSchema.safeParse(page);
+    expect(parsedPage.success).toBe(true);
+    if (!parsedPage.success) return;
+    const states = parsedPage.data.events
+      .filter((event) => event.type === "job.updated" && event.aggregateId === third.id)
+      .map((event) => [event.payload.state, event.payload.reasonCode]);
+    expect(states).toEqual([["queued", undefined], ["running", undefined], ["failed", "generation-budget-exhausted"]]);
   });
 
   it("leaves a cancelled job alone instead of resurrecting it (§11 终态不复活)", async () => {

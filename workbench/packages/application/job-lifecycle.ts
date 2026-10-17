@@ -73,6 +73,20 @@ export class JobLifecycleService {
         // decoration, and the table is the owner.
         const moved = requestCancel(row, nowInstant());
         tx.updateJob(moved);
+        // §13's `job.updated` is how any other subscriber learns this row moved, and the page's
+        // sentence "作业状态由 job.updated 推送" is only true if the doors that move a row commit the
+        // event too - not only the runner. A cancel asked twice moves nothing the second time
+        // (`requestCancel` hands back the same row), and an event for a row that did not change
+        // would be the outbox inventing a transition §11 refused.
+        if (moved.state !== row.state) {
+          tx.appendEvent({
+            projectId,
+            type: "job.updated",
+            aggregateId: jobId,
+            payloadJson: { resourceIds: [jobId], state: moved.state },
+            createdAt: nowInstant(),
+          });
+        }
         return { kind: "committed", value: projectJobRecord(moved, tx.listLeasesForJobs(projectId, [jobId])) };
       },
     });

@@ -392,6 +392,18 @@ describe("named commands and the local RPC (§14)", () => {
     const lease = worker.writeConnection.transact((tx) => tx.getLeaseByJob(projectId, RECOVERY_JOB_ID));
     if (!lease.ok || lease.value === null) throw new Error("lease missing");
     expect(lease.value.cleanupState).toBe("pending");
+
+    // The mark is a fact §13 has to carry, not just a row this process re-reads: recovery runs in a
+    // process whose subscribers were open before the crash, so the outbox is the only thing that can
+    // tell them the row moved (issue #85).
+    const events = worker.writeConnection.transact((tx) => tx.eventsAfter(projectId, 0, 10));
+    if (!events.ok) throw new Error(JSON.stringify(events.error));
+    const announced = events.value
+      .filter((row) => row.type === "job.updated" && row.aggregateId === RECOVERY_JOB_ID)
+      // The port types `payloadJson` as a JsonValue, so naming the state has to say which shape the
+      // read expects instead of assuming the column is an object.
+      .map((row) => (row.payloadJson !== null && typeof row.payloadJson === "object" && !Array.isArray(row.payloadJson) ? row.payloadJson["state"] : null));
+    expect(announced).toEqual(["interrupted"]);
   });
 
   // §8 line 294 as issue #57 redrew it: the request may name a blueprint and at most a deadline, and

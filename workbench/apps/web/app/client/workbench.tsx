@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, uploadDraftOf } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, jobUpdateSignalOf, streamLineOf, uploadDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
@@ -296,6 +296,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [uploadDeadline, setUploadDeadline] = useState("");
   const [uploadSensitive, setUploadSensitive] = useState("");
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const [stream, setStream] = useState<{ state: "connecting" | "open" | "closed"; seq: number | null }>({ state: "connecting", seq: null });
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [inquiries, setInquiries] = useState<DirectedInquiry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -407,6 +408,34 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     },
     [csrf, props.projectId, samples, samplesTarget],
   );
+
+  // §13's stream, subscribed while the session is paired (issue #85). Before this the panel could
+  // only be as fresh as its own last read, so a job the worker finished between two clicks stayed on
+  // screen as `queued` - true of a snapshot, misleading as a status. One frame re-reads the whole
+  // page rather than patching the row: the read doors are the page's only source of state, and a
+  // panel that edited itself from an event would be showing what the event implied instead of what
+  // the server will answer.
+  useEffect(() => {
+    if (session !== "paired") {
+      setStream({ state: "connecting", seq: null });
+      return;
+    }
+    const source = new EventSource(`/api/v1/projects/${props.projectId}/events`);
+    source.addEventListener("open", () => setStream((previous) => ({ ...previous, state: "open" })));
+    source.addEventListener("job.updated", (event) => {
+      const signal = jobUpdateSignalOf((event as MessageEvent).data as string);
+      if (signal === null) {
+        // A frame the page cannot read is treated as a stream that stopped: the sentence below then
+        // says the rows are a snapshot, which is the honest alternative to pretending nothing came.
+        setStream((previous) => ({ ...previous, state: "closed" }));
+        return;
+      }
+      setStream({ state: "open", seq: signal.seq });
+      void load();
+    });
+    source.onerror = () => setStream((previous) => ({ ...previous, state: "closed" }));
+    return () => source.close();
+  }, [load, props.projectId, session]);
 
   // §8 lines 278-279: the two lifecycle doors, asked about one row at a time.
   //
@@ -864,6 +893,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
             })}
           </ul>
         )}
+        <p data-jobs-stream>{streamLineOf(stream.state, stream.seq)}</p>
         {jobsNotice === null || jobs === null ? null : <p data-jobs-line>{jobsNotice}</p>}
       </section>
       {mode === "list" ? (

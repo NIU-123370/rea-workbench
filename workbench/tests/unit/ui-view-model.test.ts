@@ -13,7 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
-  blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, importReceiptLine, NO_SESSION_LINE, projectDraftOf, PROJECT_NAME_EMPTY_LINE, projectCreateLine, sessionGate, uploadDraftOf, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, UPLOAD_NO_FILE_LINE, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
+  blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, importReceiptLine, NO_SESSION_LINE, projectDraftOf, PROJECT_NAME_EMPTY_LINE, projectCreateLine, sessionGate, uploadDraftOf, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, jobUpdateSignalOf, STREAM_LINE, streamLineOf, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, UPLOAD_NO_FILE_LINE, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
 
@@ -811,5 +811,50 @@ describe("what a control is allowed to send, decided before the socket (§14)", 
     if (!withDeadline.ok) return;
     expect(withDeadline.form.getAll("deadlineAt")).toEqual(["2026-10-17T09:00:00.000Z"]);
     expect(withDeadline.form.getAll("sensitiveValues")).toEqual([]);
+  });
+});
+
+// §13's frames are the only way this page learns that a job moved without being asked (issue #85),
+// so the two things worth pinning are: a frame that is not a `job.updated` is not a signal, and the
+// panel's sentence distinguishes "live" from "a snapshot you should not trust".
+describe("the job stream a panel subscribes to (§13, issue #85)", () => {
+  function frame(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      seq: 7,
+      projectId: "p-1",
+      type: "job.updated",
+      aggregateId: "j-1",
+      createdAt: "2026-10-17T08:00:00.000Z",
+      payload: { resourceIds: ["j-1"], state: "succeeded" },
+      ...overrides,
+    });
+  }
+
+  it("reads the row and cursor out of a job.updated frame", () => {
+    expect(jobUpdateSignalOf(frame())).toEqual({ seq: 7, jobId: "j-1", state: "succeeded", kind: null });
+    // A frame whose payload names no state still names the job whose row must be re-read.
+    expect(jobUpdateSignalOf(frame({ payload: { resourceIds: ["j-1"] } }))).toEqual({
+      seq: 7,
+      jobId: "j-1",
+      state: null,
+      kind: null,
+    });
+  });
+
+  it("treats anything it cannot read as no signal", () => {
+    expect(jobUpdateSignalOf("not json")).toBeNull();
+    expect(jobUpdateSignalOf(frame({ type: "audit.appended" }))).toBeNull();
+    expect(jobUpdateSignalOf(frame({ seq: "7" }))).toBeNull();
+    expect(jobUpdateSignalOf(frame({ aggregateId: 12 }))).toBeNull();
+    expect(jobUpdateSignalOf("{}")).toBeNull();
+  });
+
+  it("says whether the rows on screen are being kept up to date", () => {
+    expect(streamLineOf("connecting", null)).toBe(STREAM_LINE.connecting);
+    expect(streamLineOf("open", null)).toBe(STREAM_LINE.open);
+    expect(streamLineOf("open", 12)).toContain("seq 12");
+    expect(streamLineOf("closed", 12)).toContain("快照");
+    expect(STREAM_LINE.connecting).not.toBe(STREAM_LINE.open);
+    expect(STREAM_LINE.closed).not.toBe(STREAM_LINE.open);
   });
 });

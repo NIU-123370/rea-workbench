@@ -829,3 +829,41 @@ export function uploadDraftOf(input: { file: File | null; kind: string; deadline
   }
   return { ok: true, form };
 }
+
+// --- §13's event stream, read by the job panel (issue #85) -------------------------------------
+//
+// A frame is six fields of data plus the cursor in `id:`. The page only needs three of them, and it
+// needs to be able to say "this frame is not shaped like an event" rather than refresh on whatever
+// arrived: a stream that cannot be parsed is the same as a stream that stopped, and the panel below
+// has to know which of the two it is showing.
+export type JobUpdateSignal = { seq: number; jobId: string; state: string | null; kind: string | null };
+
+export function jobUpdateSignalOf(raw: string): JobUpdateSignal | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const frame = parsed as { seq?: unknown; aggregateId?: unknown; payload?: { state?: unknown; resourceIds?: unknown } } | null;
+  const type = (parsed as { type?: unknown } | null)?.type;
+  if (frame === null || typeof frame !== "object" || type !== "job.updated") return null;
+  if (typeof frame.seq !== "number" || typeof frame.aggregateId !== "string") return null;
+  const payload = frame.payload ?? {};
+  const state = typeof payload.state === "string" ? payload.state : null;
+  // `resourceIds` is what the doors write beside `state`; the aggregate id is the job itself, so a
+  // frame with no resource list still names the row to refresh.
+  return { seq: frame.seq, jobId: frame.aggregateId, state, kind: null };
+}
+
+export const STREAM_LINE: Record<"connecting" | "open" | "closed", string> = {
+  connecting: "作业状态：正在接 §13 的事件流，还没有连上。",
+  open: "作业状态由 §13 的 job.updated 推送。",
+  closed: "事件流已断开：下面这些行是上一次读到的快照，不是现在的状态。",
+};
+
+// Why the sentence is on the panel at all: without it, a row that stopped moving and a row that is
+// simply slow look identical, and an operator reads the first as the second.
+export function streamLineOf(state: "connecting" | "open" | "closed", lastSeq: number | null): string {
+  return lastSeq === null ? STREAM_LINE[state] : `${STREAM_LINE[state]}（最后一条 seq ${String(lastSeq)}）`;
+}

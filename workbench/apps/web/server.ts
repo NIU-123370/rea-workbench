@@ -29,6 +29,22 @@ export type WebServerOptions = {
   onError: (reason: string) => void;
 };
 
+// A stream is the one response whose lifetime the *client* decides (§13): it stays open until the
+// worker's tail has something to say. `server.close()` stops listening but waits for open sockets,
+// so once the page subscribed, stopping the web process meant waiting for a browser tab that had no
+// reason to close - the process printed nothing and stayed. Ending a stop is therefore this layer's
+// job: it stops the pump and finishes the response, so `close()` means stopped.
+type LiveStream = { response: ServerResponse; pump: Extract<ApiResponse, { kind: "stream" }>["pump"] };
+
+function stopStream(entry: LiveStream): void {
+  // The pump is closed first, so the loop cannot hand out another frame into a finished response -
+  // and the two halves are not interchangeable because Node treats them differently, which was
+  // measured rather than assumed: a second `end()` neither throws nor emits an error, while a
+  // `write()` after end arrives as `ERR_STREAM_WRITE_AFTER_END` on the socket's error channel.
+  entry.pump.close();
+  entry.response.end();
+}
+
 function headerMap(message: IncomingMessage): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(message.headers)) {
@@ -95,8 +111,9 @@ function readBody(message: IncomingMessage, limit: number): Promise<{ text: stri
 }
 
 export async function startWebServer(options: WebServerOptions): Promise<WebServer> {
+  const live = new Set<LiveStream>();
   const server = createServer((request, response) => {
-    void handle(options, request, response);
+    void handle(options, request, response, live);
   });
   // One listen failure is a start failure: a web API that silently binds nowhere
   // would leave the operator staring at a pairing code with nothing to paste it into.
@@ -110,12 +127,16 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     port: (server.address() as AddressInfo).port,
     close: () =>
       new Promise<void>((resolve) => {
+        // Whatever the clients were doing is ended here, so `close()` does not inherit their
+        // idea of when a conversation is over. The loop ends each entry's own response, and the
+        // set is not mutated synchronously by that call.
+        for (const entry of live) stopStream(entry);
         server.close(() => resolve());
       }),
   };
 }
 
-async function handle(options: WebServerOptions, message: IncomingMessage, response: ServerResponse): Promise<void> {
+async function handle(options: WebServerOptions, message: IncomingMessage, response: ServerResponse, live: Set<LiveStream>): Promise<void> {
   const url = message.url ?? "/";
   const path = url.split("?")[0] ?? url;
   const headers = headerMap(message);
@@ -135,7 +156,7 @@ async function handle(options: WebServerOptions, message: IncomingMessage, respo
     bodyBytes: body.bytes,
   };
   const outcome = await options.handler(request);
-  write(outcome, response);
+  write(outcome, response, live);
 }
 
 // `HttpHeaders` is a pair list so a header can appear more than once (two
@@ -152,29 +173,53 @@ function foldHeaders(pairs: [string, string][]): Record<string, string | string[
   return out;
 }
 
-function write(outcome: ApiResponse, response: ServerResponse): void {
+function write(outcome: ApiResponse, response: ServerResponse, live: Set<LiveStream>): void {
   if (outcome.kind === "response") {
     response.writeHead(outcome.status, foldHeaders(outcome.headers));
     response.end(outcome.body ?? "");
     return;
   }
+  const entry: LiveStream = { response, pump: outcome.pump };
+  live.add(entry);
   response.writeHead(outcome.status, foldHeaders(outcome.headers));
   response.flushHeaders();
-  void pump(outcome, response);
+  void pump(entry, live);
 }
 
-async function pump(outcome: Extract<ApiResponse, { kind: "stream" }>, response: ServerResponse): Promise<void> {
+// The frame loop, kept apart from the socket it writes to so its one rule can be pointed at.
+//
+// `ended` is read from the caller because it is the caller's fact: a response the stop already
+// finished must not be written into again, and that is not a matter of tone - Node reports a write
+// after end as `ERR_STREAM_WRITE_AFTER_END` arriving on the response's error channel, and an
+// unhandled `error` there takes the process down. The window is the tick between the loop taking a
+// frame and the loop writing it, which on a real socket means racing a stop against a frame already
+// in flight; no integration test wins that race, so the rule is asserted where the race can be set
+// up on purpose (issue #85's mutation reading: deleting the check left every gate green).
+export async function writeStreamFrames(input: {
+  take: () => Promise<string | null>;
+  ended: () => boolean;
+  write: (frame: string) => void;
+}): Promise<void> {
   try {
     for (;;) {
-      const frame = await outcome.pump.take();
-      if (frame === null) break;
-      response.write(frame);
+      const frame = await input.take();
+      if (frame === null) return;
+      if (input.ended()) return;
+      input.write(frame);
     }
   } catch {
     // A broken stream is not a place to invent a status code; the client re-reads a
     // snapshot, which is what EVENT_CURSOR_EXPIRED already told it to do.
-  } finally {
-    outcome.pump.close();
-    response.end();
   }
+}
+
+async function pump(entry: LiveStream, live: Set<LiveStream>): Promise<void> {
+  await writeStreamFrames({
+    take: () => entry.pump.take(),
+    ended: () => entry.response.writableEnded,
+    write: (frame) => entry.response.write(frame),
+  });
+  entry.pump.close();
+  entry.response.end();
+  live.delete(entry);
 }

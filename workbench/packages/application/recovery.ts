@@ -24,11 +24,22 @@ export type RecoveryReport = {
 export function recoverJobs(tx: StorageTransaction, limit: number): RecoveryReport {
   const report: RecoveryReport = { interruptedJobIds: [], retainedLeaseIds: [], unprovableLeaseIds: [] };
   for (const job of tx.listJobsByStates(RECOVERABLE_STATES, limit)) {
-    const moved = transition(job, "interrupted", nowInstant());
+    const at = nowInstant();
+    const moved = transition(job, "interrupted", at);
     // No outgoing edge means the state machine does not allow this transition;
     // pretending otherwise would rewrite history rather than record the loss.
     if (moved === null) continue;
     tx.updateJob(moved);
+    // The row moved, so §13's outbox has to say so: a mark of lost work is exactly the kind of
+    // fact a subscriber cannot be expected to notice by re-reading, and recovery runs in a process
+    // whose page may be holding a stream open from before the crash.
+    tx.appendEvent({
+      projectId: job.projectId,
+      type: "job.updated",
+      aggregateId: job.id,
+      payloadJson: { resourceIds: [job.id], state: "interrupted" },
+      createdAt: at,
+    });
     report.interruptedJobIds.push(job.id);
   }
   for (const lease of tx.listOpenLeases(OPEN_CLEANUP_STATES, limit)) {

@@ -447,12 +447,38 @@ describe("the SSE read side (§8)", () => {
     });
     expect(stream.status).toBe(200);
     expect(stream.headers.get("content-type")).toContain("text/event-stream");
-    const text = await stream.text();
+    // Reading this body to its end is no longer what a stream does (§13, issue #85): the backlog is
+    // followed by an open tail, so the chunks are collected until both committed events have arrived
+    // and then the caller closes the connection itself.
+    const reader = stream.body?.getReader();
+    if (reader === undefined) throw new Error("the stream carried no body");
+    const decoder = new TextDecoder();
+    let text = "";
+    let ended = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const got = await Promise.race([reader.read(), new Promise<"idle">((resolve) => setTimeout(() => resolve("idle"), 500))]);
+      if (got === "idle") continue;
+      if (got.done === true) {
+        ended = true;
+        break;
+      }
+      text += decoder.decode(got.value, { stream: true });
+      if (text.includes("id: 1\n") && text.includes("id: 2\n")) break;
+    }
     expect(text).toContain("id: ");
     expect(text).toContain("event: job.updated");
+    // The first bytes on any stream are the comment that flushes the head through the UI relay, and
+    // it carries no event name: a client must be able to ignore it.
+    expect(text.startsWith(": stream-open\n\n")).toBe(true);
     const seqs = [...text.matchAll(/^id: (\d+)$/gm)].map((match) => Number(match[1]));
     expect(seqs).toEqual([...seqs].sort((left, right) => left - right));
     expect(new Set(seqs).size).toBe(seqs.length);
+    // The tail: after the backlog, an empty poll is silence rather than an end of body. Before the
+    // loop in `event-stream.ts` this is where every idle subscriber was closed.
+    expect(ended, "the stream ended while it should have kept tailing").toBe(false);
+    const idle = await Promise.race([reader.read(), new Promise<"idle">((resolve) => setTimeout(() => resolve("idle"), 600))]);
+    expect(idle).toBe("idle");
+    await reader.cancel();
     // The data line is exactly the six §8 names, and no body text rides along.
     const dataLines = [...text.matchAll(/^data: (.*)$/gm)].map((match) => match[1]);
     for (const line of dataLines) {
@@ -825,6 +851,62 @@ describe("the web process entrypoint (DESIGN §3, §14 / issue #18)", () => {
     } finally {
       await run.close();
     }
+  });
+
+  // §13's stream is what changed how this process stops (issue #85's blast radius): a response whose
+  // lifetime the client decides is not an idle keep-alive socket, so `server.close()` waited for a
+  // browser tab that had no reason to close - the old process printed nothing and stayed. A stop has
+  // to end the responses it opened.
+  it("ends a live stream when the process is stopped, instead of waiting for the client", async () => {
+    const port = await freePort();
+    const run = await runWebProcess({ env: webEnv(port), nodeVersion: "24.18.0", log: () => undefined, pollMs: 5 });
+    expect(run.ok).toBe(true);
+    if (!run.ok) return;
+    const origin = `http://127.0.0.1:${String(port)}`;
+    const code = worker.mintPairingCode();
+    const paired = await fetch(`${origin}${API_PREFIX}/session`, {
+      method: "POST",
+      headers: { host: `127.0.0.1:${String(port)}`, origin, "content-type": "application/json" },
+      body: JSON.stringify({ bootstrapToken: code.token }),
+    });
+    expect(paired.status).toBe(201);
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    const pairedBody = JSON.parse(await paired.text()) as Record<string, JsonValue>;
+    const csrf = ((pairedBody["data"] ?? pairedBody) as Record<string, string>)["csrfToken"] ?? "";
+    const created = await fetch(`${origin}${API_PREFIX}/projects`, {
+      method: "POST",
+      headers: { host: `127.0.0.1:${String(port)}`, origin, cookie, "x-csrf-token": csrf, "idempotency-key": "stop-with-stream", "content-type": "application/json" },
+      body: JSON.stringify({ name: "stop-with-stream" }),
+    });
+    expect(created.status).toBe(201);
+    const project = JSON.parse(await created.text()) as { id?: string; data?: { id: string } };
+    const projectId = project.data?.id ?? project.id ?? "";
+
+    const stream = await fetch(`${origin}${API_PREFIX}/projects/${projectId}/events`, {
+      headers: { host: `127.0.0.1:${String(port)}`, cookie, accept: "text/event-stream" },
+    });
+    expect(stream.status).toBe(200);
+    const reader = stream.body?.getReader();
+    if (reader === undefined) throw new Error("the stream carried no body");
+    // Read the preamble so the tail is genuinely open, then leave the connection exactly as a
+    // subscribed page leaves it: held.
+    const stalled = new Promise<"stalled">((resolve) => setTimeout(() => resolve("stalled"), 2000));
+    const opened = await Promise.race([reader.read(), stalled]);
+    expect(opened === "stalled" ? "no head" : "head").toBe("head");
+
+    const pending = reader.read();
+    const startedAt = Date.now();
+    await run.close();
+    const stopMs = Date.now() - startedAt;
+    expect(stopMs, `the stop waited ${String(stopMs)}ms for the client`).toBeLessThan(2000);
+    // A fresh deadline: a race against a timer that already fired would report a stall no client hit.
+    const stillOpen = new Promise<"stalled">((resolve) => setTimeout(() => resolve("stalled"), 2000));
+    const got = await Promise.race([pending, stillOpen]);
+    expect(got === "stalled" ? "the client's stream stayed open after the stop" : "ended").toBe("ended");
+    if (got === "stalled") return;
+    // The body ends with the process that opened it, and the client is told so rather than left
+    // holding a socket: `done`, not a refusal and not a truncation it cannot see.
+    expect(got.done).toBe(true);
   });
 
   it("reads only the three §14 names this process is given, from one declared list", () => {
@@ -2759,6 +2841,50 @@ describe("the job lifecycle doors (§8 lines 278-279 / issue #58)", () => {
     const again = await post(session, path, {}, null);
     expect(again.status, again.text).toBe(202);
     expect((jobRecordSchema.parse(JSON.parse(again.text) as JsonValue) as { state: string }).state).toBe("cancelled");
+  });
+
+  // §13's push is what makes the page's sentence "作业状态由 job.updated 推送" true, and the sentence is
+  // only true if every door that moves a row commits the event rather than only the runner. Found by
+  // the browser pass: the cancelled row refreshed because the *click* re-read, while the open stream
+  // sat at the same seq - a second tab would have kept showing `queued` and claimed it was pushed.
+  it("a cancel is delivered to an open stream, and a cancel that moved nothing is not", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "lifecycle-cancel-stream");
+    const jobId = insertJob(projectId, "queued");
+    const path = `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`;
+    const silence = (ms: number) => new Promise<"silent">((resolve) => setTimeout(() => resolve("silent"), ms));
+
+    const stream = await fetch(`${baseUrl}${API_PREFIX}/projects/${String(projectId)}/events`, {
+      headers: { host: host(), cookie: session.cookie },
+    });
+    expect(stream.status).toBe(200);
+    const reader = stream.body?.getReader();
+    if (reader === undefined) throw new Error("the stream carried no body");
+
+    const cancelled = await post(session, path, {}, null);
+    expect(cancelled.status, cancelled.text).toBe(202);
+
+    const decoder = new TextDecoder();
+    let text = "";
+    for (let attempt = 0; attempt < 20 && !text.includes('"state":"cancelled"'); attempt += 1) {
+      const got = await Promise.race([reader.read(), silence(400)]);
+      if (got === "silent") continue;
+      if (got.done === true) break;
+      text += decoder.decode(got.value, { stream: true });
+    }
+    expect(text, "the open stream never heard about the cancel").toContain('"state":"cancelled"');
+    expect(text).toContain("event: job.updated");
+    // One frame, naming the row that moved, carrying only fields §8.1 knows.
+    const framed = [...text.matchAll(/^data: (.*)$/gm)].map((match) => JSON.parse(match[1] ?? "{}") as { aggregateId: string; payload: Record<string, JsonValue> });
+    expect(framed.map((row) => row.aggregateId)).toEqual([jobId]);
+    expect(framed[0]?.payload).toEqual({ resourceIds: [jobId], state: "cancelled" });
+
+    // The row did not move the second time, so the outbox stays quiet: an event for a state that did
+    // not change would tell the subscriber a transition happened that §11 refused.
+    const again = await post(session, path, {}, null);
+    expect(again.status, again.text).toBe(202);
+    expect(await Promise.race([reader.read(), silence(600)])).toBe("silent");
+    await reader.cancel();
   });
 
   it("a running job is asked to stop, not declared dead", async () => {
