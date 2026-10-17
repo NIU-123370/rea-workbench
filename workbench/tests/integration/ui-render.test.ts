@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { WorkbenchColumns } from "../../apps/web/ui/panels.tsx";
-import { buildMiddlePanel, buildRightTabs, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { buildMiddlePanel, buildRightTabs, FREEZE_EMPTY_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { Workbench } from "../../apps/web/app/client/workbench.tsx";
 import { ProjectList } from "../../apps/web/app/client/project-list.tsx";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
 import { newId } from "../../packages/domain/identity.ts";
@@ -253,5 +254,18 @@ describe("the landing list before any read has happened", () => {
     expect(html).toContain('data-panel="project-list"');
     // No link is rendered to a project nobody has read yet.
     expect(html).not.toContain("/project/");
+  });
+});
+
+// The freeze and generate panels' first paint (issues #58 and #57). The static render has run no
+// effect, so this is the *initial* state and nothing else: what it proves is that neither panel
+// offers a button or claims an empty list before the journal has been read.
+describe("the contract tab before its journal has been read", () => {
+  it("names the missing read instead of an empty plan list", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toContain('data-panel="blueprint-freeze"');
+    expect(html).toContain(FREEZE_EMPTY_LINE["no-journal"]);
+    expect(html).not.toContain("data-blueprint-freeze=");
+    expect(html).not.toContain("data-candidate-generate=");
   });
 });

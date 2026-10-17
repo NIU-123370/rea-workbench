@@ -13,7 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
-  evidenceMetaLine, isSessionReason, jobActionLine, jobActions, PROJECTS_EMPTY_LINE, pickCandidateSource, projectLine, projectsNotice, projectsPageOf, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, verificationRequestLine,
+  blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
 
@@ -23,6 +23,10 @@ import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.
 // step the reason actually implies.
 
 const COMPLETE: Coverage = { state: "complete", examined: null, total: null, reasons: [] };
+
+// The two §8 doors that answer with a queued job row (§8 lines 294 and 297).
+const VERIFY_QUEUE = { kind: "verify", done: "已排入验证队列" };
+const BUILD_QUEUE = { kind: "build", done: "已排队生成" };
 
 function claim(overrides: Partial<ClaimEvidenceState> = {}): ClaimEvidenceState {
   return {
@@ -547,16 +551,20 @@ describe("the lifecycle controls on a job row (DESIGN §11, §8 lines 278-279)",
 
 describe("the verification request from the page (§8 line 297)", () => {
   it("names the job it queued and says it is only queued", () => {
-    const line = verificationRequestLine({ id: "job-9", state: "queued", kind: "verify" });
+    const line = queuedJobLine({ id: "job-9", state: "queued", kind: "verify" }, VERIFY_QUEUE);
     expect(line).toContain("job-9");
     expect(line).toContain("queued");
     expect(line).toContain("队列");
   });
 
   it("does not turn a missing id into a success, nor a foreign kind into a verification", () => {
-    expect(verificationRequestLine({ state: "queued" })).toContain("没带作业 id");
-    expect(verificationRequestLine({ id: "x", kind: "build" })).toContain("不是 verify");
-    expect(verificationRequestLine({ id: "x" })).toContain("已排入验证队列：作业 x");
+    expect(queuedJobLine({ state: "queued" }, VERIFY_QUEUE)).toContain("没带作业 id");
+    expect(queuedJobLine({ id: "x", kind: "build" }, VERIFY_QUEUE)).toContain("不是 verify");
+    expect(queuedJobLine({ id: "x" }, VERIFY_QUEUE)).toContain("已排入验证队列：作业 x");
+    // The same owner answers §8 line 294, and the two sentences are not one sentence twice: a
+    // generation has produced a queue entry, not a verdict, and the page says which door answered.
+    expect(queuedJobLine({ id: "j2", state: "queued", kind: "build" }, BUILD_QUEUE)).toBe("已排队生成：作业 j2（queued）");
+    expect(queuedJobLine({ id: "j2", kind: "verify" }, BUILD_QUEUE)).toContain("不是 build");
   });
 });
 
@@ -617,5 +625,116 @@ describe("one owner for how a refusal reads (§12.1)", () => {
       refusalLine("决定被拒", "inventory-revision-conflict", { expected: 4, actual: 5 }),
     );
     expect(samplesRefusalLine("read", "vector-cursor", {})).toBe("库存读取被拒：vector-cursor");
+  });
+});
+
+// The 契约 tab's freeze and generate controls (issue #58's handle list, issue #57's last box).
+// §8 gives no list route for plans or blueprints, so everything the page can offer comes out of the
+// project's own decision journal - which makes the journal's *shape* the thing worth pinning here.
+describe("what the journal says is freezable (§8 lines 291-292, 294 / §12.2)", () => {
+  function entry(overrides: Record<string, unknown> = {}) {
+    return {
+      seq: 1,
+      action: "plan.review",
+      resourceType: "plan",
+      resourceId: "plan-1",
+      decision: "allow",
+      reasonCode: "plan-approved",
+      safeMetadata: {},
+      ...overrides,
+    };
+  }
+
+  it("reads the journal through the relay's own envelope and drops what it cannot name", () => {
+    const listed = journalEntriesOf({ data: { entries: [entry(), { seq: 2 }, null, entry({ seq: 3, resourceId: null })] } });
+    // `{seq:2}` has no action and no decision, and an entry without a resource id cannot be turned
+    // into a button. Both are dropped rather than rendered with a guessed identity.
+    // `{seq:2}` has no action and no decision, so it is not a decision, and `null` is not a row: both
+    // are dropped rather than rendered with a guessed identity. An entry whose `resourceId` is null
+    // stays — the reader is not the place that decides what is freezable.
+    expect(listed.map((row) => [row.seq, row.resourceId])).toEqual([
+      [1, "plan-1"],
+      [3, null],
+    ]);
+    expect(journalEntriesOf(null)).toEqual([]);
+    expect(journalEntriesOf({ data: { entries: "not-a-page" } })).toEqual([]);
+  });
+
+  it("offers a plan once and stops offering it after a freeze consumed it", () => {
+    expect(freezablePlanIds([entry()])).toEqual(["plan-1"]);
+    // The journal is a window, so the same approval can arrive twice on one page.
+    expect(freezablePlanIds([entry(), entry({ seq: 2 })])).toEqual(["plan-1"]);
+    expect(freezablePlanIds([entry(), entry({ seq: 2, decision: "deny", reasonCode: "role-may-not-decide" })])).toEqual(["plan-1"]);
+    expect(
+      freezablePlanIds([
+        entry(),
+        entry({ seq: 3, action: "blueprint.freeze", resourceType: "blueprint", resourceId: "bp-1", reasonCode: "blueprint-frozen", safeMetadata: { planId: "plan-1" } }),
+      ]),
+    ).toEqual([]);
+    // A freeze of a *different* plan does not make this one unfreezable: the subtraction is by the
+    // plan the receipt names, not by "any freeze ever happened".
+    expect(
+      freezablePlanIds([
+        entry(),
+        entry({ seq: 3, action: "blueprint.freeze", resourceId: "bp-1", reasonCode: "blueprint-frozen", safeMetadata: { planId: "plan-other" } }),
+      ]),
+    ).toEqual(["plan-1"]);
+    expect(freezablePlanIds([entry({ decision: "deny" })])).toEqual([]);
+    expect(freezablePlanIds([entry({ resourceId: null })])).toEqual([]);
+    // A deny of a freeze says nothing about whether the plan is frozen.
+    expect(
+      freezablePlanIds([
+        entry(),
+        entry({ seq: 3, action: "blueprint.freeze", decision: "deny", reasonCode: "blueprint-blocked", safeMetadata: { planId: "plan-1" } }),
+      ]),
+    ).toEqual(["plan-1"]);
+  });
+
+  it("lists frozen blueprints newest-first without repeating one", () => {
+    const frozen = (seq: number, id: string) => entry({ seq, action: "blueprint.freeze", resourceType: "blueprint", resourceId: id, reasonCode: "blueprint-frozen" });
+    expect(frozenBlueprintIds([frozen(1, "bp-1"), frozen(2, "bp-2"), frozen(3, "bp-2")])).toEqual(["bp-2", "bp-1"]);
+    expect(frozenBlueprintIds([entry()])).toEqual([]);
+    expect(frozenBlueprintIds([entry({ seq: 4, action: "blueprint.freeze", resourceId: "bp-4", reasonCode: "blueprint-blocked", decision: "deny" })])).toEqual([]);
+  });
+
+  it("says what a freeze proved, and what it did not bring back", () => {
+    expect(blueprintFreezeLine({ blueprintId: "bp-1", publicVectorCount: 9, holdoutVectorCount: 4, contractCount: 2, auditSeq: 31 })).toBe(
+      "已冻结蓝图 bp-1｜公开 9｜保留 4｜契约 2｜日志 seq 31",
+    );
+    expect(blueprintFreezeLine({ blueprintId: "bp-1" })).toBe("已冻结蓝图 bp-1｜三个计数没带回来");
+    expect(blueprintFreezeLine({ blueprintId: "bp-1", publicVectorCount: 9, holdoutVectorCount: 4, contractCount: 2 })).toBe(
+      "已冻结蓝图 bp-1｜公开 9｜保留 4｜契约 2",
+    );
+    // A receipt without the id is the case the page must not paper over: there is then nothing to
+    // ask a generation about, and "已冻结" alone would read as a fact the server never gave.
+    expect(blueprintFreezeLine({})).toContain("没带蓝图 id");
+    expect(blueprintFreezeLine({ publicVectorCount: 1, holdoutVectorCount: 2, contractCount: 3 })).toContain("没带蓝图 id");
+  });
+
+  it("tells a panel that read nothing apart from one that found nothing", () => {
+    const approved = [entry()];
+    expect(freezePanelOf(null)).toEqual({ state: "no-journal", plans: [] });
+    expect(freezePanelOf([])).toEqual({ state: "no-plan", plans: [] });
+    expect(freezePanelOf(approved)).toEqual({ state: "ready", plans: ["plan-1"] });
+    expect(
+      freezePanelOf([
+        ...approved,
+        entry({ seq: 9, action: "blueprint.freeze", resourceType: "blueprint", resourceId: "bp-1", reasonCode: "blueprint-frozen", safeMetadata: { planId: "plan-1" } }),
+      ]),
+    ).toEqual({ state: "all-frozen", plans: [] });
+    // A journal of only denials is still "no approved plan", not "all frozen" - the second one tells
+    // the operator to go freeze something, and nothing here was ever approvable.
+    expect(freezePanelOf([entry({ decision: "deny", reasonCode: "role-may-not-decide" })])).toEqual({ state: "no-plan", plans: [] });
+    expect(generatePanelOf(null)).toEqual({ state: "no-journal", blueprints: [] });
+    expect(generatePanelOf(approved)).toEqual({ state: "no-blueprint", blueprints: [] });
+    expect(
+      generatePanelOf([entry({ seq: 9, action: "blueprint.freeze", resourceType: "blueprint", resourceId: "bp-1", reasonCode: "blueprint-frozen" })]),
+    ).toEqual({ state: "ready", blueprints: ["bp-1"] });
+  });
+
+  it("keeps the three emptinesses of the freeze panel apart", () => {
+    expect(FREEZE_EMPTY_LINE["no-journal"]).not.toBe(FREEZE_EMPTY_LINE["no-plan"]);
+    expect(FREEZE_EMPTY_LINE["no-plan"]).not.toBe(FREEZE_EMPTY_LINE["all-frozen"]);
+    expect(GENERATE_EMPTY_LINE["no-blueprint"]).toContain("冻结");
   });
 });
