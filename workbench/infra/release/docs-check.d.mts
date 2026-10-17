@@ -52,3 +52,31 @@ export declare function checkSourceReferences(references: SourceIdReference[], d
 export declare function reconcile(input: ReconcileInput): string[];
 
 export declare function checkDocs(testplan: string, prd: string): string[];
+
+/** One row of either route table: §8's, or the web adapter's. */
+export type RouteRow = { method: string; target: string; line: number };
+
+/**
+ * The differences this build ships with, each naming the issue that records it. Declared with its
+ * keys spelled out because a waiver table that type-checked as `Record<string, string>` would let
+ * a test index a key the table never had and read `undefined` back as if it were a waiver.
+ */
+export declare const ROUTE_DEVIATIONS: {
+  "GET /projects/:p/jobs/:j/preview": string;
+  "GET /comparator-policies": string;
+  "GET /projects/:p/exports": string;
+};
+
+export declare const WEB_API_FILE: string;
+
+export declare function parseDesignRoutes(markdown: string, sections: DesignSection[]): RouteRow[];
+
+export declare function parseMountedRoutes(text: string): RouteRow[];
+
+export declare function canonicalRoute(method: string, target: string): string;
+
+export declare function checkRoutes(
+  design: RouteRow[],
+  mounted: RouteRow[],
+  deviations: Record<string, string>,
+): string[];

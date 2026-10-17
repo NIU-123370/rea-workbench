@@ -1,19 +1,24 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  canonicalRoute,
   checkDocs,
+  checkRoutes,
   checkSectionAnchors,
   checkSourceReferences,
   findIdReferences,
   findSectionAnchors,
   parseAcceptanceRows,
   parseDecisionRows,
+  parseDesignRoutes,
   parseDesignSections,
+  parseMountedRoutes,
   parseTestCaseRows,
   reconcile,
+  ROUTE_DEVIATIONS,
 } from "../../infra/release/docs-check.mjs";
 
 // The release gate that keeps the two documents honest with each other (TESTPLAN §6 /
@@ -207,6 +212,151 @@ describe("a section citation has to land in the section it names", () => {
   });
 });
 
+describe("§8's route table is reconciled with the doors the web adapter mounts", () => {
+  // Shaped like the real document: a backticked first cell in three tables, only one of which is
+  // §8, and a `METHOD /path` row sitting in a section that is not §8. A parser that read every
+  // such row would turn §3's module table or §7's field table into promised endpoints. The head is
+  // nine lines, so §8's first row is line 10 and a reason can name the line it came from.
+  const HEAD = [
+    "## 7. 模块与字段",
+    "",
+    "| `packages/domain` | 语义 | 依赖 |",
+    "| `POST /not-a-promise` | 这一行不是路由 |",
+    "",
+    "## 8. API 契约",
+    "",
+    "| 路由 | 请求 | 响应 |",
+    "| ---- | ---- | ---- |",
+  ];
+  const TAIL = ["", "## 9. 下一节", "| `DELETE /not-a-promise` | 这一行也不算 |"];
+  const ROWS = [
+    "| `GET /health` | 无；需本地会话 | 200 |",
+    "| `POST /projects/:p/jobs` | `{task}` | 202 JobRecord |",
+    "| `GET /projects/:p/jobs/:j/preview` | query `frame?:integer` | 200 |",
+  ];
+  const design = (rows: string[] = ROWS) => [...HEAD, ...rows, ...TAIL].join("\n");
+  const designRows = (rows: string[] = ROWS) => {
+    const text = design(rows);
+    return parseDesignRoutes(text, parseDesignSections(text));
+  };
+
+  // The adapter's table as api.ts writes it: one door per line, the prefix interpolated rather
+  // than spelled out. Lines 2-5 below are the four doors.
+  const door = (method: string, template: string) =>
+    `  { method: "${method}", template: \`\${API_PREFIX}${template}\`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },`;
+  const api = (extra: string[] = []) =>
+    [
+      "const ROUTES: readonly RouteSpec[] = [",
+      door("GET", "/health"),
+      door("POST", "/projects/:projectId/jobs"),
+      door("GET", "/projects/:projectId/exports"),
+      door("GET", "/comparator-policies"),
+      ...extra,
+      "];",
+    ].join("\n");
+
+  it("reads §8's rows with their line numbers, and nothing from the neighbouring tables", () => {
+    expect(designRows()).toEqual([
+      { method: "GET", target: "/health", line: 10 },
+      { method: "POST", target: "/projects/:p/jobs", line: 11 },
+      { method: "GET", target: "/projects/:p/jobs/:j/preview", line: 12 },
+    ]);
+    // A document with no §8 heading yields no rows, which the caller turns into
+    // `design-routes-unreadable` rather than into an empty comparison.
+    expect(parseDesignRoutes(HEAD.slice(0, 4).join("\n"), parseDesignSections(HEAD.slice(0, 4).join("\n")))).toEqual([]);
+  });
+
+  it("reads the adapter's table by its line shape", () => {
+    expect(parseMountedRoutes(api())).toEqual([
+      { method: "GET", target: "/health", line: 2 },
+      { method: "POST", target: "/projects/:projectId/jobs", line: 3 },
+      { method: "GET", target: "/projects/:projectId/exports", line: 4 },
+      { method: "GET", target: "/comparator-policies", line: 5 },
+    ]);
+    // The failure this pins: a door reformatted onto several lines stops being readable here, and
+    // since §8 still names it, it reappears as `design-route-unmounted` instead of as a green scan
+    // over a shrunken table.
+    expect(parseMountedRoutes("const ROUTES: readonly RouteSpec[] = [\n  {\n    method: \"GET\",\n    template: `${API_PREFIX}/health`,\n  },\n];")).toEqual([]);
+    expect(parseMountedRoutes("const ROUTES = [];")).toEqual([]);
+  });
+
+  it("folds a parameter's name and nothing else", () => {
+    expect(canonicalRoute("GET", "/projects/:p/jobs/:j/preview")).toBe(canonicalRoute("GET", "/projects/:projectId/jobs/:jobId/preview"));
+    // A parameter never swallows its neighbours: a page and one of its rows are two routes.
+    expect(canonicalRoute("GET", "/projects/:p")).not.toBe(canonicalRoute("GET", "/projects/:p/jobs"));
+    // Methods distinguish, too.
+    expect(canonicalRoute("POST", "/projects/:p")).not.toBe(canonicalRoute("GET", "/projects/:p"));
+  });
+
+  it("names an unmet promise and an undeclared door as two different faults", () => {
+    expect(checkRoutes(designRows(), parseMountedRoutes(api()), {})).toEqual([
+      "design-route-unmounted:GET /projects/:/jobs/:/preview(§8 line 12)", // docs-check-ignore: the fixture §8's own line, not a DESIGN citation
+      "mounted-route-unlisted:GET /projects/:/exports(api.ts:4)",
+      "mounted-route-unlisted:GET /comparator-policies(api.ts:5)",
+    ]);
+  });
+
+  it("says nothing when the two sides and the waiver table agree", () => {
+    // The three differences this fixture holds are the three the shipped table owns, in the same
+    // directions, so this is the waiver table read against a difference set.
+    expect(checkRoutes(designRows(), parseMountedRoutes(api()), ROUTE_DEVIATIONS)).toEqual([]);
+  });
+
+  it("keeps a waiver that has stopped covering a difference", () => {
+    // Both sides now name the exports door: the waiver describes something that is no longer true,
+    // and a table of waivers nobody re-reads is how the gate decays back into a one-off count.
+    expect(checkRoutes(designRows([...ROWS, "| `GET /projects/:p/exports` | 无 | 201 |"]), parseMountedRoutes(api()), ROUTE_DEVIATIONS)).toEqual([
+      `route-deviation-stale:GET /projects/:p/exports(两侧已对上，删掉这条记录) ${ROUTE_DEVIATIONS["GET /projects/:p/exports"]}`,
+    ]);
+    // A waiver for a route neither side has is stale the same way — the table is not a wishlist.
+    expect(checkRoutes(designRows(), parseMountedRoutes(api()), { "GET /gone/:x": "issue #0 — 两侧都没有" })).toContain(
+      "route-deviation-stale:GET /gone/:x(两侧都没有这条路由) issue #0 — 两侧都没有",
+    );
+  });
+
+  it("refuses two waivers that turn out to name the same route", () => {
+    // The table is keyed by §8's spelling, so an entry written with the code's parameter name
+    // would otherwise sit beside it as a second waiver nobody reads — and the first one would
+    // still silence the difference, so the pair is invisible until someone deletes one.
+    expect(checkRoutes(designRows(), parseMountedRoutes(api()), {
+      "GET /projects/:p/exports": "issue #58 — 第一条",
+      "GET /projects/:projectId/exports": "issue #58 — 第二条",
+    })).toEqual([
+      "route-deviation-duplicate:GET /projects/:projectId/exports 与 GET /projects/:p/exports 是同一条路由",
+      "design-route-unmounted:GET /projects/:/jobs/:/preview(§8 line 12)", // docs-check-ignore: the fixture's §8 line numbers, not a DESIGN citation
+      "mounted-route-unlisted:GET /comparator-policies(api.ts:5)",
+    ]);
+  });
+
+  it("catches the same promise written twice", () => {
+    // Two §8 rows for one canonical route: the second is a different contract that nobody
+    // reconciles with the first, and a checker that keyed by route alone would report whichever
+    // row it kept as the unmet promise.
+    expect(checkRoutes(designRows([...ROWS, "| `GET /health` | 第二行 | 同一个承诺 |"]), parseMountedRoutes(api()), ROUTE_DEVIATIONS)).toEqual([
+      "design-route-duplicate:GET /health(§8 line 10,13)", // docs-check-ignore: the fixture's own line numbers, not a DESIGN citation
+    ]);
+  });
+
+  it("catches the two doors that a parameter rename folds into one", () => {
+    // `matchRoute` answers a collision with whichever entry came first, so the second door is
+    // shadowed rather than mounted, and nothing else in the tree notices.
+    const collide = ["const ROUTES: readonly RouteSpec[] = [", door("GET", "/projects/:projectId"), door("GET", "/projects/:id"), "];"].join("\n");
+    expect(checkRoutes(designRows(["| `GET /projects/:p` | 无 | 200 |"]), parseMountedRoutes(collide), {})).toEqual([
+      "mounted-route-duplicate:GET /projects/:(api.ts:2,api.ts:3)",
+    ]);
+  });
+
+  it("refuses a table it cannot read rather than passing an empty scan", () => {
+    expect(checkRoutes([], parseMountedRoutes(api()), {})).toEqual([
+      "design-routes-unreadable:§8 没有一行 | `METHOD /path` | 表格，或那一节换了形状",
+    ]);
+    expect(checkRoutes(designRows(), [], {})).toEqual([
+      "mounted-routes-unreadable:apps/web/api.ts 的 ROUTES 一条都没读出来",
+    ]);
+    expect(checkRoutes([], [], {})).toHaveLength(2);
+  });
+});
+
 describe("the committed documents pass the gate they describe", () => {
   it("npm run docs:check exits clean against docs/PRD.md and docs/TESTPLAN.md", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
@@ -229,5 +379,25 @@ describe("the committed documents pass the gate they describe", () => {
     // a reader of this line can tell "nothing is wrong" from "nothing was read".
     expect(output).toMatch(/设计锚点 \d{3,} 处（DESIGN \d{2} 节）/);
     expect(output).not.toContain("- design-");
+    // The route side: 40 rows is what §8 declares today (issue #58's title counts them), and the
+    // mounted side is pinned with a floor because doors keep landing. A printed count that fell to
+    // zero would read as a clean line, so the shape of the number is part of the assertion.
+    expect(output).toContain("路由 §8 40 条");
+    expect(output).toMatch(/· 挂载 4\d 条 ·/);
+    expect(output).not.toContain("- design-route-");
+    expect(output).not.toContain("- mounted-route-");
+    expect(output).not.toContain("- route-deviation-");
+    expect(output).not.toContain("- web-api-module-");
+  });
+
+  it("names the door nobody documented, on a run no clean tree can fake", () => {
+    // The green run above cannot distinguish "the reconciliation found nothing" from "the
+    // reconciliation was never called", because the tree is genuinely clean today. `--probe-routes`
+    // mounts a door §8 does not name and the whole path has to refuse it by that name, alone.
+    const root = fileURLToPath(new URL("../..", import.meta.url));
+    const probe = spawnSync(process.execPath, ["infra/release/docs-check.mjs", "--probe-routes"], { cwd: root, encoding: "utf8" });
+    expect(probe.status).not.toBe(0);
+    expect(probe.stdout).toContain("mounted-route-unlisted:GET /probe-routes-not-a-door(api.ts:0)");
+    expect(probe.stdout.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(1);
   });
 });

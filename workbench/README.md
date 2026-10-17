@@ -334,6 +334,12 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 recommended、不重排序**：两条里 alphabetically 排第一的恰好是松的那档，而 §10 禁的正是把松的一档当默认。
 页面上原来那个手打的输入框因此换成从这份清单里选（首项是"还没有选"，页面不预选任何一档）。
 
+这组刻度（**§8 声明 40 条 / 本仓挂上其中 39 条 / 缺 preview 那 1 条 / 另有 2 条文档表没写**）从第三十二轮起
+不再靠手数：`npm run docs:check` 每次现算 §8 那张表与 `apps/web/api.ts` 的 `ROUTES` 的差集（参数名按段折叠，
+`/projects/:p` 与 `/projects/:projectId` 是同一条），每一条偏差必须写进 `ROUTE_DEVIATIONS` 并点名登记它的 issue
+（preview→#79、comparator-policies→#82、exports 列表→#58）。这张豁免表**自己也会被否证**：一条已经被两侧对上的
+记录、或一条两侧都没有的记录，都会让门禁变红——所以它不会长成一份没人重读的例外清单。
+
 **query 面也按同一把尺子量了（issue #63）**。上面那段说的是"路由有没有挂"，这一节管的是"挂上的那条
 收哪些参数"：路由表旁边多了一张 `ROUTE_QUERY`，逐条列出 §8 那一行点名的 query 名字，**表里没有的名字一律
 具名拒绝**（`vectors-query-unknown` / `jobs-query-unknown` / `audit-query-unknown` / `graph-query-unknown` /
@@ -1627,6 +1633,46 @@ network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待
 不是真 Chrome 里的一次点击；要在页面上真看到那行「被拒：RESOURCE_LIMIT / generation-budget-exhausted
 （attempt 4 · maxAttempts 3）」，需要一次能把生成预算跑穿的 rig（profile 的 `maxAttemptsPerBlueprint` 打到 1，
 再连点两次「发起生成」）。这条挂在下一次的浏览器轮里做，本轮不把 #59 最后一格按「已浏览器验证」读。
+
+发布门禁·第三十二轮（2026-10-18 06:41–06:52，**§8 的路由表与 `ROUTES` 的差集变成一条门，不再靠手数**）：
+
+- 现读的缺口：上一段那句「40 条声明／39 条挂上／缺 1 条／多 2 条」在这轮之前是**我手工对着两张表数出来的**，
+  仓里没有任何东西在做这个比较。这正是 #58 能从 13 门长到 41 门却没人喊停的原因——差集只在有人重数的那一刻存在，
+  而项目里"我们挂了什么"很快会变成大家的记忆，那份写着 40 条的文档反倒读起来像过期。
+- 落地（全在 `infra/release/docs-check.mjs`，文档一字未动）：`parseDesignRoutes` 只在 **§8 那一节**的行范围里找
+  `| \`METHOD /path\` |`（§3 的模块表、§7 的字段表同样以反引号开头，方法名枚举 + 分节范围两道一起才挡住）；
+  `parseMountedRoutes` 按 `ROUTES` 现有的**一行一门**形状读，并丢掉 `${API_PREFIX}` 这一段（§8 的行不写前缀，门这边也就不代入）。
+  `canonicalRoute` **逐段**折叠参数名——`:p` 与 `:projectId` 是同一条，但 `/projects/:p` 与 `/projects/:p/jobs` 必须不是。
+- 原因分四类，外加**这条门自己也要被否证**的那一类：`design-route-unmounted`（文档承诺、没有门）、
+  `mounted-route-unlisted`（有门、文档没写）、`design-route-duplicate` / `mounted-route-duplicate`
+  （后者钉的是"改个参数名就把两扇门折叠成一条"，`matchRoute` 只会回先出现的那条，第二扇门是被遮蔽而不是被挂上）、
+  `route-deviation-stale`（一条已经被两侧对上、或两侧都没有的豁免记录）。
+  `ROUTE_DEVIATIONS` 三条：preview→#79、comparator-policies→#82、exports 列表→#58，每条把 issue 写在值里。
+  两条 `*-routes-unreadable` 守卫在任一侧读出 0 条时先返回，绿色行不能靠一张读不出来的表换来。
+- `--probe-routes`：往挂载侧塞一条文档里不存在的门（`GET /probe-routes-not-a-door`），要求整条 run **只**因它而红。
+  加它的原因是这条门面对的是一个当前干净的树——干净树分不出"没有缺陷"和"没做检查"，把 `reasons.push` 整行删掉，
+  普通 run 的绿行照样打印。探针把「读文件→解析→比对→点名→非零退出」整条路一次跑通。
+- 新增用例 **11** 条（`test:unit` 696→**707**／39 files；`test:integration` 543+6 skipped／27 files，本轮 0 新增）：
+  分节范围、行形状、参数折叠的三条正反、未挂与未列各点名一次、豁免表覆盖差集时全绿、被对上／两侧都没有／两条折叠成一条
+  三种 stale、§8 与挂载两侧各自的 unreadable、以及探针那条 run 的退出码与"恰好一行 `- `"。
+- 变异 **16 支全红，0 存活**：豁免被忽略（设计侧／挂载侧各一支）、stale 判据取反、参数不折叠、折叠成空段、
+  §8 范围丢失（整篇扫）、两侧 unreadable 守卫各删一支、两侧 duplicate 循环各关一支、`reasons.push` 整行注释、
+  探针门不喂进检查、树级挂一门、删一条豁免记录、豁免折叠重名检查关掉、`WEB_API_FILE` 指向不存在的文件。
+- 两处自己被这条门逮到的事，记在这里而不是抹掉：
+  ① 我最初写的 fixture 断言里有字符串 `…(§8 line 12)`，`docs:check` 当场把它判成 `design-anchor-outside-section`
+  ——锚点扫描不区分文档和测试夹具，两行都补了 `docs-check-ignore` 并写明"这是 fixture 自己的行号，不是 DESIGN 引用"；
+  ② `docs-check.d.mts` 是**手写的类型镜像**，新增五个导出名必须同步补进去，否则 `typecheck` 直接报
+  `has no exported member`。豁免表那份声明刻意写成三个具名键而不是 `Record<string, string>`：后者会让测试索引一个
+  表里根本没有的键、把 `undefined` 当成一条豁免读回来。
+- 末态闸门：typecheck 0／lint **213 文件 0 条**／`review` 206 文件命中 **0**／`test:unit` **707/39**／
+  `test:integration` **543 passed + 6 skipped / 27 files**／`perf:t17` 记录如常（p95 0.377ms，`gateHostSatisfied:false`
+  仍是因为宿主不是 Linux x64）／`docs:check` exit 0（源码引用 276 处／206 文件、设计锚点 **396** 处、
+  路由 §8 40 条 · 挂载 41 条 · 已记偏差 3 条）。
+
+**这轮仍然没做的**：#58 待裁决的那条没动——`GET /projects/:p/exports` 是文档该延伸、还是这道门该收，是你的那句话，
+现在它被门钉在豁免表里而不是散在注释里；`GET /projects/:p/jobs/:j/preview`（#79）照旧没有门，因为它缺的不是路由；
+第三十一轮那条**真浏览器读数**照旧欠着（#59 最后一格的 DOM 断言仍是 `renderToStaticMarkup`）；
+这条门本身只跑在发布检查与单元层，没有新增集成用例（它不改变任何运行态行为）。
 
 ## 还没有的东西
 
