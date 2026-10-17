@@ -32,6 +32,7 @@ import type { Actor } from "../../packages/application/actor.ts";
 import { gateFail, type GateFailure } from "../../packages/application/gate-failure.ts";
 import { commitDecision, recordDeny } from "../../packages/application/decision.ts";
 import type { Step } from "../../packages/application/decision.ts";
+import { isIdempotencyKey } from "../../packages/application/idempotency.ts";
 import { BootstrapTokenVault, SessionService } from "../../packages/application/session.ts";
 import type { PairingCode } from "../../packages/application/session.ts";
 import { normalizeEventLimit, toStreamEvents } from "../../packages/application/event-stream.ts";
@@ -141,6 +142,10 @@ export const COMMAND_NAMES = [
   // The report read (§8 line 298). One name for the control-plane view of a stored report;
   // `blueprint.handoff`'s Builder-facing summary is a different projection with different rules.
   "verification.read",
+  // Asking for a verification (§8 line 297). Separate from `candidate.generate` because it is a
+  // different actor's decision: the Builder submits, the control plane decides what is compared
+  // and against which named comparator.
+  "verification.request",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -762,6 +767,16 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const refused = missing(verificationId);
       if (refused !== null) return refused;
       return relay(await verifications.read(projectIdOr(payload), actor, verificationId as Id));
+    },
+    // §8 line 297. The key travels on the frame rather than being minted here because the jobs row
+    // is what enforces it: §5 gives (project, idempotency_key) a unique index, so the worker owns
+    // the replay and a second caller cannot slip an unkeyed verification past it.
+    "verification.request": (payload, actor) => {
+      const key = pickString(payload, "idempotencyKey");
+      if (key === null || !isIdempotencyKey(key)) {
+        return gateFail("INVALID_INPUT", "idempotency-key-required", "a verification request carries an Idempotency-Key (§8 line 261)");
+      }
+      return relay(verifications.request(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {}, key));
     },
     "blueprint.freeze": async (payload, actor) =>
       relay(await blueprints.freeze(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),

@@ -1,4 +1,4 @@
-import { digestBytes } from "../domain/canonical-json.ts";
+import { canonicalJson, digestBytes } from "../domain/canonical-json.ts";
 import type { CanonicalLimits, Digest } from "../domain/canonical-json.ts";
 import { asDigest } from "../domain/canonical-json.ts";
 import { asId, newId, nowInstant } from "../domain/identity.ts";
@@ -12,9 +12,11 @@ const INVENTORY_BOUND = 5_000;
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
 import type { EvaluatorCompletion } from "../contracts/verification.ts";
-import { evaluatorCompletionSchema, verificationReportSchema } from "../contracts/verification.ts";
+import { evaluatorCompletionSchema, INSTALLED_COMPARATOR_POLICIES, verificationReportSchema, verificationRequestSchema } from "../contracts/verification.ts";
 import { findComparatorPolicy } from "../contracts/verification.ts";
-import type { EventDraft } from "./ports.ts";
+import type { JobRecord } from "../contracts/jobs.ts";
+import { projectJobRecord } from "./job-queue.ts";
+import type { EventDraft, JobRow } from "./ports.ts";
 import type {
   ArtifactPort,
   BlueprintRow,
@@ -45,7 +47,7 @@ import {
 import type { VectorSetEntry } from "../domain/report.ts";
 import type { TestVector } from "../domain/vector.ts";
 import type { Actor } from "./actor.ts";
-import { isBuilder } from "./actor.ts";
+import { isBuilder, isControlPlane } from "./actor.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, issueNames, type Err, type GateFailure } from "./gate-failure.ts";
 import { planContentOf } from "./plan-service.ts";
@@ -534,6 +536,120 @@ export class VerificationService {
         })
       : ["inventory-unreadable"];
     return { ok: true, value: { report, staleness } };
+  }
+
+  // §8 line 297: the operator asks for a verification. This creates a *job* and nothing else -
+  // a report exists only once the trusted evaluator answers (§10), and no path through this
+  // method can make one, which is the whole point of §7.3's separation.
+  //
+  // The comparator is named, never supplied: `findComparatorPolicy` reads a list this build
+  // installs, so an id that is not on it is refused rather than executed. §8 says 不接受代码, and
+  // a schema with no field for a policy body is the checkable form of that.
+  request(
+    projectId: Id,
+    actor: Actor,
+    input: unknown,
+    idempotencyKey: string,
+  ): Result<JobRecord, GateFailure> {
+    if (!isControlPlane(actor)) {
+      recordDeny(this.storage, {
+        projectId,
+        actor,
+        resourceType: "verification",
+        action: "verification.request",
+        resourceId: null,
+        decision: "deny",
+        reasonCode: "role-may-not-request-verification",
+        metadata: {},
+      });
+      return gateFail("ACCESS_DENIED", "role-may-not-request-verification", "only the control plane asks for a verification (§7.3)", {
+        actorKind: actor.actorKind,
+      });
+    }
+    const parsed = verificationRequestSchema.safeParse(input);
+    if (!parsed.success) {
+      return gateFail("INVALID_INPUT", "verification-request", "the verification request was rejected", {
+        fields: parsed.error.issues.map((issue) => issue.path.join(".")),
+        rejectedKeys: parsed.error.issues.flatMap((issue) => (issue as { keys?: string[] }).keys ?? []),
+      });
+    }
+    if (findComparatorPolicy(parsed.data.comparatorPolicyId) === null) {
+      return gateFail(
+        "INVALID_INPUT",
+        "comparator-policy-not-installed",
+        "the named comparator policy is not one this build installs (§8 line 297)",
+        { declaredCount: INSTALLED_COMPARATOR_POLICIES.length },
+      );
+    }
+    const committed = commitDecision(this.storage, {
+      projectId,
+      actor,
+      resourceType: "verification",
+      action: "verification.request",
+      resourceId: null,
+      allowReason: "verify-job-queued",
+      metadata: { comparatorPolicyId: parsed.data.comparatorPolicyId },
+      work: (tx): Step<JobRecord> => {
+        const candidate = tx.getCandidate(projectId, asId(parsed.data.candidateId));
+        if (candidate === null) {
+          return { kind: "failure", failure: gateFail("NOT_FOUND", "candidate-unknown", "no such candidate in this project") };
+        }
+        const at = nowInstant();
+        const job: JobRow = {
+          id: newId(),
+          projectId,
+          targetId: null,
+          kind: "verify",
+          state: "queued",
+          cleanupState: "pending",
+          inputJson: { candidateId: candidate.id, comparatorPolicyId: parsed.data.comparatorPolicyId },
+          resultRef: null,
+          errorJson: null,
+          idempotencyKey,
+          // The digest is of the request that was made, not a placeholder: two different
+          // candidates under one key must not look like the same request (§8 line 261).
+          requestDigest: asDigest(
+            digestBytes(
+              new TextEncoder().encode(
+                canonicalJson(
+                  {
+                    candidateId: candidate.id,
+                    comparatorPolicyId: parsed.data.comparatorPolicyId,
+                    deadlineAt: parsed.data.deadlineAt ?? null,
+                  },
+                  this.limits,
+                ),
+              ),
+            ),
+          ),
+          deadlineAt: parsed.data.deadlineAt ?? null,
+          retryAt: null,
+          createdAt: at,
+          updatedAt: at,
+        };
+        const outcome = tx.insertJob(job);
+        if (outcome.outcome === "divergent") {
+          return { kind: "failure", failure: gateFail("IDEMPOTENCY_CONFLICT", "idempotency-key-reused", "that key already carries a different verification request") };
+        }
+        // The key is the identity of the request, so a job that is already there is the answer -
+        // the row this call would have written is not written twice.
+        const row = outcome.outcome === "existing" ? outcome.job : job;
+        // A replay of the same key is not a state change, so it writes no second event: the stream
+        // already carried the `job.updated` the first request made (§13).
+        if (outcome.outcome !== "existing") {
+          tx.appendEvent({
+            projectId,
+            type: "job.updated",
+            aggregateId: row.id,
+            payloadJson: { resourceIds: [row.id], state: "queued" },
+            createdAt: at,
+          } satisfies EventDraft);
+        }
+        return { kind: "committed", value: projectJobRecord(row, tx.listLeasesForJobs(projectId, [row.id])) };
+      },
+    });
+    if (!committed.ok) return committed;
+    return { ok: true, value: committed.value.value };
   }
 
   // What a Builder may see (§10: 契约级类别与安全 diff). Sample ids, holdout

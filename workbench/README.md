@@ -275,8 +275,15 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **35 条**，仍缺 **5 条**。
-这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **36 条**，仍缺 **4 条**——
+`POST /projects/:p/imports`（272）、`POST /projects/:p/jobs`（275）、`POST /projects/:p/candidates`（294）、
+`GET /projects/:p/jobs/:j/preview`（304）；前两条与 294 卡在同一个缺项上（#57 的生成预算与作业发起方），
+imports 卡的是二进制穿过 `HttpRequest.body: string` 与 8 MiB RPC 帧这条路。
+这个刻度是现算的：把 §8 表里每行的 `METHOD 路径` 抽出来，与 `api.ts` 路由表的
+`method + template` 逐字比（`:p/:v/:j/...` 按上一段名词展开成路由里的那个参数名），
+另外还多出 **1 条**路由是文档表里没有的——`GET /projects/:p/exports`（交付清单），
+它是 #22 交付时补的读门，记在偏离里。
+这 36 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
 现在能由一个配对会话里的 HTTP 请求走完（浏览器实测见下）。每个记录类型只有**一份投影**
@@ -297,6 +304,26 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 这一轮把它抬成控制面也能读的一扇门（`blueprint.read`），并只按 §8 那一列多给一个 `verificationPlanId`——
 **而 Builder 拿不到它**（计划是 holdout 的另一半）。回包 schema 里根本没有能装 source manifest
 或 holdout 清单的字段，这是那句「所有角色均不经此接口读取」的可检查版本。
+`POST /projects/:p/verifications`（§8 line 297）是这一面第五扇**写**门，也是第一条回 **202** 的创建门：
+它造的是一个还没跑的作业，不是一份报告。命令名 `verification.request`，请求体就是
+`verificationRequestSchema` 自己（§8 那三个字段早就写好了，门不再抄一份会漂的副本），而这份 schema
+里**没有能装比较策略代码的字段**——「不接受代码」于是是可检查的：这道门能发出去的东西只剩一个名字。
+名字还得是 `INSTALLED_COMPARATOR_POLICIES` 里有的，否则 **400 `comparator-policy-not-installed`**，
+`details.declaredCount` 是本 build 真的装了几个（浏览器读数 2）。候选不在本项目 → **404
+`candidate-unknown`**，而角色闸门在查行之前：Builder / evaluator 拿一个不存在的候选来问，得到的也是
+`role-may-not-request-verification`，这道门不能用来试探某个 id 是否存在。
+`request_digest` 是对 `{candidateId, comparatorPolicyId, deadlineAt}` 的 canonicalJson 求摘要，不是占位值：
+同一个幂等键换候选就是 **409 `idempotency-key-reused`**，两次不同候选落在不同摘要上。
+作业落成为 `state=queued`、`cleanup_state=pending`、`target_id=null`、`result_ref=null`，
+`verifications` 表一行都不许多（§10：报告是可信 evaluator 的产物）。
+两层幂等各管一件事：HTTP 日志替同键重发答「那次决定」（命令只跑一次，日志里只有一条 allow），
+worker 的 `UNIQUE (project_id, idempotency_key)` 替换键重发兜底。**这条分工是被变异逼出来的**：
+把路由的 `requiresIdempotencyKey` 关掉（P12），整套测试仍然全绿——worker 边界把同一句拒绝补上了，
+两个 owner 报同一个 `code`＋`reason`，只有措辞不同；补上「无键那次 400 必须由 HTTP 流水线先说」
+这条断言才把两者分开。反过来 worker 侧那道键检查（P15/P16）不是装饰：没有它，空键会带着
+`NOT_FOUND` 之外的答案走到存储、超长键会安静地写进一个 §14 说 200 字符上限的列里。
+一处**故意没有加**的闸门：deadline 过期不在这里拒——§11 的作业状态机是唯一持有者
+（`tests/unit/job-queue.test.ts:91` 已经证过 `deadline-expired`），再写一道就是第二份会漂移的裁决。
 三个创建门各有一处 §8 偏离，都是「文档给了字段而实现无处安放」：vector 的 `sensitiveValues`、
 plan／contract 的 `expectedGraphRevision`（§7.4 让计划自己绑图版本）都由门**具名拒收**，
 而 contract 不在 §8 line 261 的幂等清单里，所以那扇门没有键——浏览器实测同键重发拿到的是
@@ -449,6 +476,41 @@ Next 中继，读数逐条对过——无 `targetId` 与 `targetId=not-a-uuid` *
 仍然分得开（404 `vector-unknown`）。库存正文与 409 那条**不在这个 socket 上重测**：它需要真的
 样本行，证明在 `vector-service.test.ts` 里（27 条，其中这个路由 8 条），那里有行。
 
+浏览器实测·第六轮（2026-10-17 02:05–02:09，同一套三个真进程：worker＋`npm run web`（4310）＋
+`next dev`（4496）；开 rig 前照 #72 那条老毛病走了一遍——`data/worker.lock` 里写着 pid 55268，
+`ps -p 55268` 已不存在，`worker.rpc.sock` 用 `lsof` 确认没有活监听者，才把这两个陈旧文件删掉）：
+配对后 `GET /session` 给 200、`csrfToken` 43 字符、`reviewerId=64cd4e19…`。同源 `fetch` 走这一扇新门：
+
+- 先由 §8 line 295 那扇门确认候选是真的：`GET /projects/:p/candidates/7a03f405…` → **200**，
+  键集合 `[blueprintId, digest, files, id]`。
+- `POST /projects/:p/verifications`（键 `browser-verify-1`，体只有 §8 那三个字段）→ **202**，
+  回包恰好 9 个键：`{id:e046b176…, kind:"verify", state:"queued", cleanupState:"pending",
+  deadlineAt:null, retryAt:null, cleanupRetryAt:null, resultRef:null, error:null}`，
+  `x-request-id 5740904a…`。
+- **同键同体重发** → 回包与第一次**逐字节相同**，而 `x-request-id` 换成 `9289d49a…`：重放的是那次决定；
+  日志里 `verification.request` 的 allow 只有**一条**（seq 20），命令确实只跑了一次。
+- 同一行从读门回来：`GET /projects/:p/jobs/e046b176…` → **200**，与 202 的回包逐字节相同
+  （一道投影，两扇门）；作业列表从 3 行变 4 行，新那行在最前。
+- 拒绝侧四条各有形状：无键 **400** `idempotency-key-required`（message 是流水线那句
+  "this creation needs an Idempotency-Key header"，不是 worker 的措辞）；体里塞 `comparatorCode`
+  → **400** `rejectedKeys:["comparatorCode"]`；形状合法但不存在的候选 → **404** `candidate-unknown`；
+  `comparatorPolicyId:"close-enough-v0"` → **400** `comparator-policy-not-installed`
+  带 `declaredCount:2`；同一个键换一个候选 → **409** `idempotency-key-reused`。
+- 磁盘侧独立核（第二个连接，`readOnly:true`，worker 仍持写锁）：那一行 `idempotency_key=browser-verify-1`、
+  `request_digest=269eb29f…18a5`、`target_id=NULL`、`created_at=updated_at=02:05:45.597Z`；本项目
+  `kind='verify'` 只有 **2** 行（播种那行 `succeeded` ＋ 我这行 `queued`）；`verifications` 计数仍是 **1**
+  ——这一句是「请求造不出报告」的读数，不是注释；`events` 里那个 aggregate 只有 **1** 条
+  `job.updated`，payload 是 `{"resourceIds":[e046b176…],"state":"queued"}`；`audit_entries`
+  seq 20 的 `safe_metadata_json` 记的是 `{"comparatorPolicyId":"exact-http-v1"}`（记名字，不记体），
+  seq 21 是那条 deny；被 404 的那个候选 id 在 `jobs` 里没有任何行。
+- 页面自己读到的：重新加载后（`会话：paired`）左栏两行变成 `任务 e046b176-efd3-49ce-9047-7cd8a0d0b328`
+  与 `清理 pending`——这一轮**没有加任何按钮**，作业页的第一行本来就是这么来的。
+- 这一轮**没做也没法做的**：这个 `queued` 作业在本 build 里没有任何执行者。§10 说的可信 evaluator
+  是另一个容器，它把 completion 交回 worker 的那条「具名 RPC」在封闭命令表里**还没有名字**
+  （`VerificationService.complete` 至今只被测试调用），所以这道门造的是一份没人认领的工作。
+  这不是门的问题，是缺另一扇门，已单开 **issue #75** 记录（命令名、evaluator capability、
+  以及「谁把 queued 推到 running」三点等裁决）。
+
 浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
 把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：
 
@@ -499,7 +561,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 - 候选执行器容器与 evaluator 容器仍未实现，性能门禁 A13 未测量；`verification-service.ts`
   落的是**控制面这一侧**：它只接受 evaluator 提交的观测，`result`、`counts` 与八项绑定身份
   全部由 worker 从自己已有的行推导，因此候选自报 PASS、伪造报告、改写请求在 schema 里
-  根本没有可写的字段（DESIGN §10）。分容器与文件视图隔离本身在本机不可验证。受控 Web 采集的契约
+  根本没有可写的字段（DESIGN §10）。**由此产生的一条真实空缺**：`POST /projects/:p/verifications`
+  把作业排成 `queued` 之后，本 build 里没有任何执行者来认领它——§10 说的「具名 completion RPC」
+  在封闭命令表里还没有名字，`VerificationService.complete` 至今只被测试调用（缺口本身记在
+  **issue #75**；同一类空缺在 `candidates`/`jobs` 那两条创建路由上是 #57）。分容器与文件视图
+  隔离本身在本机不可验证。受控 Web 采集的契约
   与读回通路已在 `contracts/rea-web-capture.ts` + `adapters/rea/capture-inspection.ts`
   落地，但只在 fixture 上验证过，真 provider 会话仍归 issue #14。
 

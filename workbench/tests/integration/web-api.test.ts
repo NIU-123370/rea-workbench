@@ -2974,3 +2974,185 @@ describe("the project page (§8 line 270 / issue #58)", () => {
     expect(anonymous.status, anonymous.text).toBe(401);
   });
 });
+
+
+// §8 line 297 over HTTP: the operator asks for a verification and gets a *queued job* back, 202.
+// The door is where two things get proved at once — that this creation honours §8's Idempotency-Key
+// (both the 400 for its absence and the replay of an answer already given), and that the job it
+// makes is the same row the job read door reads, because the two answer through one schema.
+describe("the verification request door (§8 line 297 / issue #58)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `create-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  function post(session: Session, pathname: string, payload: Record<string, JsonValue>, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    return call("POST", pathname, { body: JSON.stringify(payload), headers });
+  }
+
+  function errorOf(text: string): { code: string; message: string; details: Record<string, unknown> } {
+    return (JSON.parse(text) as { error: { code: string; message: string; details: Record<string, unknown> } }).error;
+  }
+
+  // A real candidate, from the real Builder, on a target this API itself declared. Seeding one by
+  // hand would let the door pass against a row its own `candidates` read could not name.
+  async function seeded(name: string): Promise<{ session: Session; projectId: Id; candidateId: Id; path: string }> {
+    const session = await pairSession();
+    const projectId = await freshProject(session, name);
+    const declared = await post(session, `${API_PREFIX}/projects/${String(projectId)}/targets`, { kind: "url", url: "https://shop.example/cart" }, null);
+    expect(declared.status, declared.text).toBe(201);
+    const targetId = asId((targetCreatedSchema.parse(JSON.parse(declared.text) as JsonValue) as { id: string }).id);
+    const verified = await seedVerifiedScenario({
+      writer: worker.writeConnection,
+      store: new ArtifactStore(dataDir),
+      projectId,
+      targetId,
+      name,
+    });
+    return { session, projectId, candidateId: verified.candidateId, path: `${API_PREFIX}/projects/${String(projectId)}/verifications` };
+  }
+
+
+  it("queues a verification and answers 202 with the same record the job read gives", async () => {
+    const fix = await seeded("verify-door-queued");
+    const before = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/jobs`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(before.status, before.text).toBe(200);
+    const beforeJobs = ((JSON.parse(before.text) as { items: { id: string }[] }).items ?? []).length;
+
+    const asked = await post(fix.session, fix.path, { candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1" }, "verify-key-1");
+    expect(asked.status, asked.text).toBe(202);
+    const record = jobRecordSchema.safeParse(JSON.parse(asked.text) as JsonValue);
+    if (!record.success) throw new Error(asked.text);
+    expect(record.data.kind).toBe("verify");
+    expect(record.data.state).toBe("queued");
+    expect(record.data.resultRef).toBeNull();
+    // §10: the report is the evaluator's to produce. A request that could put a row in
+    // `verifications` would be a self-declared verdict wearing a job id.
+    const stored = worker.writeConnection.transact((tx) => tx.getJob(fix.projectId, asId(record.data.id)));
+    if (!stored.ok) throw new Error(JSON.stringify(stored.error));
+    if (stored.value === null) throw new Error("the queued job is not in the store");
+    expect(stored.value.state).toBe("queued");
+    expect(stored.value.idempotencyKey).toBe("verify-key-1");
+
+    // The same row through the read door, agreeing with what the request answered.
+    const readBack = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/jobs/${String(record.data.id)}`, {
+      headers: { host: host(), cookie: fix.session.cookie },
+    });
+    expect(readBack.status, readBack.text).toBe(200);
+    expect(jobRecordSchema.parse(JSON.parse(readBack.text) as JsonValue)).toMatchObject({ id: record.data.id, kind: "verify", state: "queued" });
+
+    const after = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/jobs`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(((JSON.parse(after.text) as { items: { id: string }[] }).items ?? []).length).toBe(beforeJobs + 1);
+  });
+
+  it("replays the key to the byte-identical answer and runs the command once", async () => {
+    const fix = await seeded("verify-door-replay");
+    const first = await post(fix.session, fix.path, { candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1" }, "verify-key-2");
+    expect(first.status, first.text).toBe(202);
+    const again = await post(fix.session, fix.path, { candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1" }, "verify-key-2");
+    expect(again.status, again.text).toBe(202);
+    expect(again.text).toBe(first.text);
+
+    // One job row, and one journal entry for the decision: the HTTP journal answers the replay
+    // without re-running the command, so a retried request cannot pile up queued work. The seed
+    // itself leaves a `verify` job behind (it is the job the stored report was produced under), so
+    // the count is of *queued* rows - the state this door is the only writer of.
+    const jobs = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/jobs`, { headers: { host: host(), cookie: fix.session.cookie } });
+    const verifyJobs = ((JSON.parse(jobs.text) as { items: { kind: string; state: string }[] }).items ?? []).filter(
+      (job) => job.kind === "verify" && job.state === "queued",
+    );
+    expect(verifyJobs).toHaveLength(1);
+    const audit = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/audit?limit=50`, { headers: { host: host(), cookie: fix.session.cookie } });
+    const actions = ((JSON.parse(audit.text) as { entries?: { action: string }[] }).entries ?? []).map((entry) => entry.action);
+    expect(actions.filter((action) => action === "verification.request")).toHaveLength(1);
+  });
+
+  it("takes the key before the body, and the session before both", async () => {
+    const fix = await seeded("verify-door-gates");
+    const noKey = await post(fix.session, fix.path, { candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1" }, null);
+    expect(noKey.status, noKey.text).toBe(400);
+    expect(errorOf(noKey.text).details["reason"]).toBe("idempotency-key-required");
+    // The pipeline's own wording, not the worker's. Both owners refuse a keyless request with the
+    // same code and reason, and that equivalence is exactly what a mutation exposed: with the
+    // route's `requiresIdempotencyKey` flag switched off the request still came back 400, because
+    // the command boundary refused it later. §14's gate order says the HTTP pipeline answers first.
+    expect(errorOf(noKey.text).message).toBe("this creation needs an Idempotency-Key header");
+
+    const anonymous = await call("POST", fix.path, {
+      body: JSON.stringify({ candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1" }),
+      headers: { host: host(), origin: `http://${host()}`, "content-type": "application/json", "idempotency-key": "verify-key-3" },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+
+    const noCsrf = await call("POST", fix.path, {
+      body: JSON.stringify({ candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1" }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: fix.session.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "verify-key-3",
+      },
+    });
+    expect(noCsrf.status, noCsrf.text).toBe(403);
+
+    // After the key: a body that names a fourth field is refused by name (§8 offers no code, and
+    // the schema has nowhere to put one).
+    const smuggled = await post(fix.session, fix.path, { candidateId: fix.candidateId, comparatorPolicyId: "exact-http-v1", comparatorCode: "return a === b" }, "verify-key-4");
+    expect(smuggled.status, smuggled.text).toBe(400);
+    expect(JSON.stringify(errorOf(smuggled.text).details)).toContain("comparatorCode");
+  });
+
+  it("refuses a candidate it cannot name and a comparator it does not install", async () => {
+    const fix = await seeded("verify-door-refused");
+    const unknown = await post(fix.session, fix.path, { candidateId: newId(), comparatorPolicyId: "exact-http-v1" }, "verify-key-5");
+    expect(unknown.status, unknown.text).toBe(404);
+    expect(errorOf(unknown.text).details["reason"]).toBe("candidate-unknown");
+
+    const notInstalled = await post(fix.session, fix.path, { candidateId: fix.candidateId, comparatorPolicyId: "close-enough-v0" }, "verify-key-6");
+    expect(notInstalled.status, notInstalled.text).toBe(400);
+    expect(errorOf(notInstalled.text).details["reason"]).toBe("comparator-policy-not-installed");
+
+    // Neither refusal queued anything: the job page still holds only the rows the seed wrote.
+    const jobs = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/jobs`, { headers: { host: host(), cookie: fix.session.cookie } });
+    const queued = ((JSON.parse(jobs.text) as { items: { kind: string; state: string }[] }).items ?? []).filter(
+      (job) => job.kind === "verify" && job.state === "queued",
+    );
+    expect(queued).toHaveLength(0);
+  });
+});
