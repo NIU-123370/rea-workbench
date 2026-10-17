@@ -1312,6 +1312,49 @@ runner 的，见下文"这轮没做浏览器"）：
 所以别把它们读成一个自洽的分解。DESIGN 之外文件的 `§` 引用（TESTPLAN／PRD 的节）今天全树
 **0 处带行号**，所以没为它们建解析器。
 
+发布门禁·第廿四轮（2026-10-18 03:55–04:03，**UI 中继的两个 origin 从"能用"变成"配错会具名拒"**）：
+
+- **两条独立测算撞出的洞**：把 `grep -oE 'WB_[A-Z0-9_]+' docs/DESIGN.md`（**7 个**）与代码里的 `WB_*`
+  字面量（**9 个**）做差 ⇒ 多出来的是 `WB_API_ORIGIN`／`WB_UI_ORIGIN`，都在 `apps/web/app/lib/relay.ts`。
+  §14 给 web 进程只列了 `WB_HOST`/`WB_PORT`/`WB_DATA_DIR`，而这两个属于 **Next 外壳那个进程**——
+  文档从没给它配过任何环境变量。这条名录差**开成 issue #119**（三个选项：补文档／换成一条读门／
+  就按现状标注），`docs/` 我没动。
+- **为什么不是"记一下就好"**：这两个值一个决定**拨到哪儿**、一个决定**只认谁的 Origin**，
+  而这个中继原样转发 `cookie` 与 `x-csrf-token`（`session-proxy.ts` 的 `FORWARDED_HEADERS`）。
+  实测到的最坏形状：**`WB_API_ORIGIN=http:4310` 用 `new URL()` 不报错**，`URL.host` 变成 `0.0.11.184`
+  ——一个谁都没写的可路由地址。原来那两行 `process.env.X ?? default` 会照它拨号。
+  另一类是**静默缩窄**：带 path／query／fragment／凭据的值都能解析，然后 `URL.origin` 把你写的那半丢掉
+  （`http://h:1/evil` 与 `http://h:1` 用起来是同一个地址，而你以为换了）。
+- **改法**：`resolveRelayOrigins(env)` 一条规则一个具名原因（`present-but-empty`／
+  `absolute-url-required`／`scheme-and-authority-required`／`scheme-must-be-http-or-https`／
+  `origin-must-not-carry-a-path|-credentials|-query|-fragment`），**尾部斜杠放过**（否则惩罚手滑的人）；
+  `relay()` 在拨号前回 **503 `CAPABILITY_UNAVAILABLE`**，`details.reason` 是
+  `WB_API_ORIGIN:scheme-and-authority-required` 这种"字段:原因"。
+  ⇒ 之前是**每个请求各回一次 403 `proxy-url-unparseable`**——把配置问题伪装成安全拒绝，
+  操作者读到的是"我被拒了"，真相是"这个 build 没配好"。
+- **两处形状上的旧账一起清了**：
+  ① `RELAYED_ORIGINS` 这个导出**只有测试在调**（生产代码用的是它旁边那两个模块常量）——#56 那条判据，
+  删掉，改由 `resolveRelayOrigins({})` 证默认值；
+  ② env 从**import 期读一次**改成**每请求读一次**。这不是为了省一次启动：读一次的话，
+  那条"配置错的拒绝路径"**在测试里永远走不到**（环境在 runner 导入模块前就固定了），
+  变异 Q7（改回 import 期读）当场把两条门前的用例打红。
+- **本轮我自己犯了刚被闸管住的那类错**：新注释里写「issue **#120** 的问题」，而实际开到的是 **#119**。
+  `issue #NN` 这一族**闸不核**（编号在 GitHub 那边，本地没有可对账的来源——同一判据里 `S##` 也是这个原因）。
+  已经在提交前改掉；记在这儿是因为它是"引用形状没有来源可核"的活样本。
+- **README 的三处假话顺手改了**（都在「还没有的东西」）：ASAR 的 `import-asar-not-wired` 503 那一支
+  #115 就删了（现读：`grep -rn` 在 `apps/`＋`packages/`＋`tests/` 里**0 处**，只剩历史轮次记录与
+  一句"此前这里回的是 503"的注释）；inspect 作业 #109 起 runner 会跑
+  （`RUNNABLE_JOB_KINDS = ["build","inspect"]`，`job-runner.ts:48`）；`WB_UI_ORIGIN` 那句
+  「只认启动时读到的那一个」按本轮改成"每请求读一次"并写明为什么。**空装配点那条仍然成立**：
+  `StaticAnalysisService` 在 `apps/` 里 **0 个**引用点＝#114。
+- 末态闸门：typecheck 0（两个 project）／lint **206 文件 0 条**／`test:unit` **686/39**
+  （`web-proxy-route.test.ts` 单档 **17** 条，本笔 +9）／`test:integration` **503 passed + 6 skipped / 25 files**／
+  `review` 0 命中／`docs:check` exit 0。变异 **8 支（Q1–Q8）全红**，无等义变异存活。
+
+**这轮仍然没做的**：**没做真浏览器读数**——本轮没有新路由、新控件，回包只多了一种 503 形状，
+而它要 `WB_API_ORIGIN` 被设成非法值才出现；那条路径的两条用例是真模块＋真 `Response`，
+但"配错了操作者看到什么"这句仍只有单测证据。真进程验证要等 #119 有答案（默认值是否算配置）。
+
 
 ## 还没有的东西
 
@@ -1425,15 +1468,24 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   `ApiError`，于是一个失败行不是「一行失败」，而是让那个项目**每一页作业都读不出来**；本轮由 V17 变异钉住
   （改回旧形状即红）。§11 里 `interrupted`／从没跑起来的行 `error` 是 null，不是空对象。
 
-- 换 UI 端口要同时换 `WB_UI_ORIGIN`：中继只认它启动时读到的那一个 own origin，浏览器用别的 host 或端口
+- 换 UI 端口要同时换 `WB_UI_ORIGIN`：中继只认它认得的那一个 own origin，浏览器用别的 host 或端口
   打开就拿到 403 `proxy-origin-mismatch`（第八轮那次先被拒、配上变量后同一次点击成功，就是这个形状）。
+  从第廿四轮起，这个值**每个请求读一次**而不是启动时读一次：读一次的话，那条拒绝路径在测试里
+  永远走不到（环境早在 runner 导入模块前就固定了），而配置错误的具名拒绝正是需要被测的那一半。
 
-- ASAR 的导入 ingestion job、目标行与 artifact 落库尚未由 worker 装配接线
-  （`apps/worker` 现在只注册 HAR 导入闭环，所以 `kind:"asar"` 的上传在门口就具名拒绝：
-  503 `import-asar-not-wired`，带声明时按 §8 先回 422）；HAR 上传这轮有了 HTTP 入口，
-  但**导入之后的解码跟进没有**——`capture.inspect` 不在封闭命令表里，作业会停在 `queued`
-  （与 #75 那半边是同一类空缺：造得出工作，接不了工作）。`static-analysis.ts` 只做准入闸门与
-  已持久化 envelope 的只读投影。
+- **`WB_API_ORIGIN`/`WB_UI_ORIGIN` 不在 §14 的 `WB_*` 名录里**（§14 给 web 的只有 `WB_HOST`/`WB_PORT`/`WB_DATA_DIR`，
+  而这两个属于 Next 外壳那个进程）——已开 **issue #119** 请你定：补文档 / 换成一条读门 / 就按现状标注。
+  代码侧本轮先按 §14 对每个具名字段的做法处理：**每条规则一个具名原因、能拨号前就拒**，
+  不再出现「每个请求各回一次 403 `proxy-url-unparseable`」这种把配置问题伪装成安全拒绝的形态。
+  最坏例子是实测过的：`WB_API_ORIGIN=http:4310` 里 `new URL()` **不报错**，host 变成 `0.0.11.184`，
+  而这个中继会原样转发 `cookie` 与 `x-csrf-token`。
+
+- ASAR 与 HAR 两个 kind 现在**都有生产者**（#115：门口 503 `import-asar-not-wired` 那一支已删掉，
+  `FILE_TARGET_KINDS` 是这两种的唯一所有者），runner 也**会跑 `inspect` 作业**（#109：
+  `RUNNABLE_JOB_KINDS = ["build","inspect"]`），所以"造得出工作、接不了工作"那半条已经闭合。
+  仍然没做的换了形状：ASAR 静态支路的**读侧**没有入口——`StaticAnalysisService` 在 `apps/` 里没有
+  装配点、封闭命令表里没有它的名字（**#114**）；`static-analysis.ts` 本身仍只做准入闸门与已持久化
+  envelope 的只读投影。
 - 只交付 `detail: "complete"` 的内联图。`detail: "summary"` 的 envelope 返回
   503 `CAPABILITY_UNAVAILABLE`，因为读回完整图需要 `inspect_analysis_view` 访问
   REA 的保留会话，本支路尚未接通。

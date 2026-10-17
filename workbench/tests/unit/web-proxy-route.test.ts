@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { RELAYED_ORIGINS, relay } from "../../apps/web/app/lib/relay.ts";
+import { relay, resolveRelayOrigins } from "../../apps/web/app/lib/relay.ts";
 
 // The Next relay route (DESIGN §2, §14 / issue #18).
 //
@@ -10,10 +10,10 @@ import { RELAYED_ORIGINS, relay } from "../../apps/web/app/lib/relay.ts";
 // global `Response`/`Headers` and a stubbed upstream, so a buffered event stream or a
 // dropped `set-cookie` is a red test rather than a page that hangs.
 
-// These are the route module's own defaults: `WB_UI_ORIGIN`/`WB_API_ORIGIN` are read at
-// import time, so a test cannot set them, and §14's documented loopback pair is what an
-// operator gets without configuring either. If the defaults move, this test moves with
-// them and says so loudly.
+// These are the relay's own defaults: §14's documented loopback pair is what an operator gets
+// without configuring either, and `resolveRelayOrigins({})` now proves it rather than asserting
+// a constant nobody but this file used. If the defaults move, the assertions below move with
+// them and say so loudly.
 const UI_ORIGIN = "http://localhost:3000";
 const API_ORIGIN = "http://127.0.0.1:4310";
 
@@ -48,6 +48,7 @@ function stubUpstream(reply: Upstream): { calls: { url: string; init: RequestIni
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("the relay's refusals", () => {
@@ -172,7 +173,81 @@ describe("the relay's copies", () => {
 
   it("relays to the documented loopback pair when the operator configured neither", () => {
     // The assertions above speak to these two addresses, so the tie to §14's defaults is
-    // stated rather than assumed: a changed default has to fail here first.
-    expect(RELAYED_ORIGINS).toEqual({ api: API_ORIGIN, own: UI_ORIGIN });
+    // stated rather than assumed: a changed default has to fail here first. It goes through
+    // the resolver now - the export this used to read had only this file as its caller.
+    expect(resolveRelayOrigins({})).toEqual({ ok: true, origins: { ownOrigin: UI_ORIGIN, apiOrigin: API_ORIGIN } });
+  });
+});
+
+describe("the relay's own configuration", () => {
+  // `URL.origin` - the only part this relay uses of what the operator sets - silently drops a
+  // path, a query, a fragment and credentials. Each rule below exists because "it parsed" is
+  // not "it means what you wrote": `WB_API_ORIGIN=http:4310` parses, and its host comes back
+  // `0.0.11.184` - on the far side of a `cookie` header this relay forwards.
+  const refused = (field: string, value: string, reason: string) =>
+    expect(resolveRelayOrigins({ [field]: value }), `${field}=${value}`).toEqual({ ok: false, failures: [{ field, reason }] });
+
+  it("refuses an empty value instead of quietly using the default", () => {
+    refused("WB_API_ORIGIN", "", "present-but-empty");
+    refused("WB_UI_ORIGIN", "", "present-but-empty");
+  });
+
+  it("refuses a value that is not a URL at all", () => {
+    refused("WB_API_ORIGIN", "127.0.0.1:4310", "absolute-url-required");
+  });
+
+  it("refuses a scheme without an authority, whose host URL invents from the remainder", () => {
+    refused("WB_API_ORIGIN", "http:4310", "scheme-and-authority-required");
+    refused("WB_UI_ORIGIN", "https:3000", "scheme-and-authority-required");
+  });
+
+  it("refuses a scheme this relay cannot speak", () => {
+    refused("WB_UI_ORIGIN", "ws://localhost:3000", "scheme-must-be-http-or-https");
+  });
+
+  it("names each part that URL.origin would drop on the floor", () => {
+    refused("WB_API_ORIGIN", "http://127.0.0.1:4310/evil", "origin-must-not-carry-a-path");
+    refused("WB_API_ORIGIN", "http://user:pass@127.0.0.1:4310", "origin-must-not-carry-credentials");
+    refused("WB_API_ORIGIN", "http://127.0.0.1:4310?next=1", "origin-must-not-carry-a-query");
+    refused("WB_API_ORIGIN", "http://127.0.0.1:4310#frag", "origin-must-not-carry-a-fragment");
+  });
+
+  it("accepts the trailing slash an operator would otherwise be punished for", () => {
+    expect(resolveRelayOrigins({ WB_API_ORIGIN: "http://127.0.0.1:4310/" })).toEqual({
+      ok: true,
+      origins: { ownOrigin: UI_ORIGIN, apiOrigin: API_ORIGIN },
+    });
+  });
+
+  it("reports both fields when both are wrong, and names which is which", () => {
+    expect(resolveRelayOrigins({ WB_UI_ORIGIN: "", WB_API_ORIGIN: "http://127.0.0.1:4310/evil" })).toEqual({
+      ok: false,
+      failures: [
+        { field: "WB_UI_ORIGIN", reason: "present-but-empty" },
+        { field: "WB_API_ORIGIN", reason: "origin-must-not-carry-a-path" },
+      ],
+    });
+  });
+
+  it("answers a mis-set relay with 503 and the field named, and never dials", async () => {
+    const upstream = stubUpstream({ status: 200, headers: {}, body: "must-not-be-reached" });
+    vi.stubEnv("WB_API_ORIGIN", "http:4310");
+    const response = await relay(browserRequest("projects"), paramsFor("projects"));
+    expect(response.status).toBe(503);
+    expect(upstream.calls).toHaveLength(0);
+    const body = (await response.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("CAPABILITY_UNAVAILABLE");
+    expect(body.error.details.reason).toBe("WB_API_ORIGIN:scheme-and-authority-required");
+  });
+
+  it("keeps the empty-value refusal visible at the door, not just in the resolver", async () => {
+    // Without a stubbed upstream a regression that dialled anyway would reach the network.
+    const upstream = stubUpstream({ status: 200, headers: {}, body: "must-not-be-reached" });
+    vi.stubEnv("WB_UI_ORIGIN", "");
+    const response = await relay(browserRequest("projects"), paramsFor("projects"));
+    expect(response.status).toBe(503);
+    expect(upstream.calls).toHaveLength(0);
+    const body = (await response.json()) as { error: { details: { reason: string } } };
+    expect(body.error.details.reason).toBe("WB_UI_ORIGIN:present-but-empty");
   });
 });

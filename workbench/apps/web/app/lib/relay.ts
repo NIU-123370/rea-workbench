@@ -7,12 +7,78 @@ import { decideProxy } from "./session-proxy.ts";
 // not importable by a test runner. Everything that decides what crosses the boundary is
 // therefore in a plain module, and the route file is the thin binding Next asks for.
 //
-// `decideProxy` makes every decision; this file only moves bytes.
+// `decideProxy` makes every decision about a request; this file owns the two values that
+// say *where* it may go, and then moves bytes.
+//
+// `WB_UI_ORIGIN` and `WB_API_ORIGIN` are not in §14's list - the document gives the web
+// process `WB_HOST`/`WB_PORT`/`WB_DATA_DIR` and says nothing about the Next shell's config,
+// which is issue #119's question. Whatever that answer is, this process dials one address
+// and echoes another back as the only Origin it will accept, so both values get the same
+// treatment §14 gives every field it does name: refuse a wrong one by name instead of
+// using it. The hazard is not hypothetical - `WB_API_ORIGIN=http:4310` parses as a valid
+// URL whose host is `0.0.11.184`, and this relay forwards `cookie`, so a typo would send a
+// live session to an address nobody typed.
 
-const API_ORIGIN = process.env.WB_API_ORIGIN ?? "http://127.0.0.1:4310";
-const OWN_ORIGIN = process.env.WB_UI_ORIGIN ?? "http://localhost:3000";
+const DEFAULT_ORIGINS = {
+  WB_UI_ORIGIN: "http://localhost:3000",
+  WB_API_ORIGIN: "http://127.0.0.1:4310",
+} as const;
 
-export const RELAYED_ORIGINS = { api: API_ORIGIN, own: OWN_ORIGIN } as const;
+export type RelayOriginField = keyof typeof DEFAULT_ORIGINS;
+
+export type RelayOrigins = { ownOrigin: string; apiOrigin: string };
+
+export type RelayConfig =
+  | { ok: true; origins: RelayOrigins }
+  | { ok: false; failures: { field: RelayOriginField; reason: string }[] };
+
+// Every rule below exists because `URL.origin` - the only part this relay uses - silently
+// *drops* the piece the operator wrote. A path, a query, a fragment and credentials all
+// parse, all pass a bare `new URL()` check, and all vanish at `.origin`: the value that gets
+// used is not the value that was set, and nothing says so.
+export function resolveRelayOrigins(env: Record<string, string | undefined>): RelayConfig {
+  const failures: { field: RelayOriginField; reason: string }[] = [];
+  const resolved: Partial<Record<RelayOriginField, string>> = {};
+  for (const field of Object.keys(DEFAULT_ORIGINS) as RelayOriginField[]) {
+    const raw = env[field];
+    if (raw === "") {
+      failures.push({ field, reason: "present-but-empty" });
+      continue;
+    }
+    const value = raw ?? DEFAULT_ORIGINS[field];
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      failures.push({ field, reason: "absolute-url-required" });
+      continue;
+    }
+    if (!value.includes("://")) {
+      // `localhost:3000` and `http:4310` both parse; the second becomes host `0.0.11.184`.
+      failures.push({ field, reason: "scheme-and-authority-required" });
+      continue;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      failures.push({ field, reason: "scheme-must-be-http-or-https" });
+      continue;
+    }
+    const dropped =
+      url.pathname !== "/" ? "origin-must-not-carry-a-path"
+      : url.username !== "" || url.password !== "" ? "origin-must-not-carry-credentials"
+      : url.search !== "" ? "origin-must-not-carry-a-query"
+      : url.hash !== "" ? "origin-must-not-carry-a-fragment"
+      : null;
+    if (dropped !== null) {
+      failures.push({ field, reason: dropped });
+      continue;
+    }
+    resolved[field] = url.origin;
+  }
+  const ownOrigin = resolved["WB_UI_ORIGIN"];
+  const apiOrigin = resolved["WB_API_ORIGIN"];
+  if (failures.length > 0 || ownOrigin === undefined || apiOrigin === undefined) return { ok: false, failures };
+  return { ok: true, origins: { ownOrigin, apiOrigin } };
+}
 
 // The API sets all of these itself, and a proxy that silently drops two of them turns a
 // `no-store` session answer into something the browser may keep: `cache-control` and
@@ -46,6 +112,26 @@ export type RelayContext = {
 };
 
 export async function relay(request: Request, context: RelayContext): Promise<Response> {
+  // Read per call, not at import: an import-time constant made the refusal path impossible to
+  // exercise from a test (the value was fixed before the runner could set it), and two `new URL`
+  // parses per request is not what a page load is waiting on.
+  const config = resolveRelayOrigins(process.env);
+  // A mis-set origin is this process's condition, not something the caller did, so it is a 503
+  // with the field named - not the 403 an unparseable `apiOrigin` looked like while every
+  // request was being refused one at a time with `proxy-url-unparseable`.
+  if (!config.ok) {
+    return Response.json(
+      {
+        error: {
+          code: "CAPABILITY_UNAVAILABLE",
+          message: "the UI relay is not configured",
+          details: { reason: config.failures.map((failure) => `${failure.field}:${failure.reason}`).join(",") },
+        },
+      },
+      { status: 503 },
+    );
+  }
+  const { ownOrigin, apiOrigin } = config.origins;
   const resolved = await context.params;
   const segments = resolved?.path ?? [];
   const path = segments.map((segment) => encodeURIComponent(segment)).join("/");
@@ -55,8 +141,8 @@ export async function relay(request: Request, context: RelayContext): Promise<Re
     requestUrl: `http://placeholder/api/v1/${path}${new URL(request.url).search}`,
     method: request.method,
     headers: flatHeaders(request),
-    ownOrigin: OWN_ORIGIN,
-    apiOrigin: API_ORIGIN,
+    ownOrigin,
+    apiOrigin,
     bodyBytes,
   });
   if (!decided.ok) {
