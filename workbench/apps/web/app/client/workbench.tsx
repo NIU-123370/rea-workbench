@@ -1028,6 +1028,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                       <label>
                         <input
                           type="checkbox"
+                          name="plan-contract"
                           data-plan-contract={id}
                           checked={planChosen.includes(id)}
                           onChange={(event) =>
@@ -1162,13 +1163,13 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           <>
             <section aria-label="上传采集" data-panel="capture-upload">
               <h3>上传一次采集（§8 line 272：文件、kind、可选期限与敏感值）</h3>
-              <input type="file" data-upload-file onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} />
-              <select aria-label="采集类型" data-upload-kind value={uploadKind} onChange={(event) => setUploadKind(event.target.value)}>
+              <input type="file" name="capture-file" data-upload-file onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} />
+              <select aria-label="采集类型" name="capture-kind" data-upload-kind value={uploadKind} onChange={(event) => setUploadKind(event.target.value)}>
                 <option value="har">har</option>
                 <option value="asar">asar</option>
               </select>
-              <input aria-label="截止时间" data-upload-deadline type="text" placeholder="deadlineAt（可空）" value={uploadDeadline} onChange={(event) => setUploadDeadline(event.target.value)} />
-              <input aria-label="敏感值" data-upload-sensitive type="text" placeholder="敏感值，逗号分隔（可空）" value={uploadSensitive} onChange={(event) => setUploadSensitive(event.target.value)} />
+              <input aria-label="截止时间" name="capture-deadline" data-upload-deadline type="text" placeholder="deadlineAt（可空）" value={uploadDeadline} onChange={(event) => setUploadDeadline(event.target.value)} />
+              <input aria-label="敏感值" name="upload-sensitive" data-upload-sensitive type="text" placeholder="敏感值，逗号分隔（可空）" value={uploadSensitive} onChange={(event) => setUploadSensitive(event.target.value)} />
               <button type="button" data-upload-send onClick={() => void uploadCapture()}>
                 上传
               </button>
@@ -1317,6 +1318,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                 <label>
                   <input
                     type="checkbox"
+                    name="inspect-claim"
                     data-inspect-claim={String(claim.claimId)}
                     checked={inspectChosen.includes(String(claim.claimId))}
                     onChange={(event) =>
