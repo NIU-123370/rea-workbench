@@ -65,8 +65,26 @@ export function entryNameDefects(name: string): string[] {
     if (segment === "..") reasons.push("entry-name-parent-segment");
     else if (segment === "." || segment.length === 0) reasons.push("entry-name-not-a-plain-segment");
   }
+  // The name length is a 16-bit field in both records. A longer name does not fail loudly: the header
+  // says `length mod 65536`, so the reader walks into the entry's own bytes. §5's storage keys are
+  // ASCII and well under this, which is exactly why the cap belongs in the validator and not in a
+  // comment - the writer cannot represent what the validator allows.
+  if (encodeName(name).byteLength > MAX_ENTRY_NAME_BYTES) reasons.push(`entry-name-over-length:${String(MAX_ENTRY_NAME_BYTES)}`);
   return reasons;
 }
+
+// APPNOTE 4.4.5: the file name is UTF-8 **only if** general-purpose bit 11 says so, otherwise readers
+// must decode it as CP437. `encodeName` has always written UTF-8 bytes, so a non-ASCII name was being
+// stored correctly and labelled incorrectly - Info-ZIP listed it as `????????????.txt` and Python's
+// zipfile gave `Σ╕¡µûçσÉìσ¡ù.txt`, while this repository's own reader round-tripped it happily.
+// A bundle that only its own reader can name is the defect; the fix is the bit, not the encoding.
+const UTF8_NAME_FLAG = 0x0800;
+
+function nameFlags(name: Uint8Array): number {
+  return name.some((byte) => byte > 0x7f) ? UTF8_NAME_FLAG : 0;
+}
+
+export const MAX_ENTRY_NAME_BYTES = 65535;
 
 function dosDateTime(instant: Instant): { date: number; time: number } {
   const ms = Date.parse(instant);
@@ -173,7 +191,7 @@ function writeLocalHeader(
 ): void {
   view.setUint32(offset, LOCAL_SIGNATURE, true);
   view.setUint16(offset + 4, VERSION, true);
-  view.setUint16(offset + 6, 0, true);
+  view.setUint16(offset + 6, nameFlags(name), true);
   view.setUint16(offset + 8, STORED_METHOD, true);
   view.setUint16(offset + 10, stamp.time, true);
   view.setUint16(offset + 12, stamp.date, true);
@@ -195,7 +213,7 @@ function writeCentralRecord(
   view.setUint32(offset, CENTRAL_SIGNATURE, true);
   view.setUint16(offset + 4, VERSION, true);
   view.setUint16(offset + 6, VERSION, true);
-  view.setUint16(offset + 8, 0, true);
+  view.setUint16(offset + 8, nameFlags(name), true);
   view.setUint16(offset + 10, STORED_METHOD, true);
   view.setUint16(offset + 12, stamp.time, true);
   view.setUint16(offset + 14, stamp.date, true);
