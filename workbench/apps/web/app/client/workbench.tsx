@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, queuedJobLine } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, uploadDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
@@ -88,7 +88,7 @@ function refusalOf(
 // A state change the operator asked for. The CSRF token is the one this session was issued,
 // read back over the same channel that reports whether it is paired: the API compares it against
 // the session it holds, so a page that sent anything else gets a 403 naming the header.
-async function postJson(
+export async function postJson(
   path: string,
   body: unknown,
   csrf: string,
@@ -97,16 +97,42 @@ async function postJson(
   // means "no header", not "empty header".
   key: string | null = null,
 ): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
+  return post(path, csrf, key, { "content-type": "application/json" }, JSON.stringify(body));
+}
+
+// The same POST for a multipart body (§8 line 272's door reads `form.getAll("file")`). It is a second
+// function only for the two headers: a `FormData` body must *not* carry a `content-type` written by
+// us, because the boundary the browser generates is the one the parser reads, and a JSON-shaped
+// header would ask the API to parse a file as a document.
+export async function postForm(
+  path: string,
+  form: FormData,
+  csrf: string,
+  key: string,
+): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
+  return post(path, csrf, key, {}, form);
+}
+
+// One owner for the request shape and the refusal parse of every write on this page: a second copy
+// would be a second chance to send a state change without the CSRF header, or to decide on its own
+// what a refusal is allowed to put on screen (§12.1, §14).
+async function post(
+  path: string,
+  csrf: string,
+  key: string | null,
+  extraHeaders: Record<string, string>,
+  body: BodyInit,
+): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
   const response = await fetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers: {
-      "content-type": "application/json",
       "x-csrf-token": csrf,
       accept: "application/json",
       ...(key === null ? {} : { "idempotency-key": key }),
+      ...extraHeaders,
     },
-    body: JSON.stringify(body),
+    body,
   });
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) return refusalOf(response.status, payload);
@@ -265,6 +291,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // means "not read", and the panel says so instead of offering an empty list.
   const [journal, setJournal] = useState<JournalEntryWire[] | null>(null);
   const [freezeNotice, setFreezeNotice] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadKind, setUploadKind] = useState("har");
+  const [uploadDeadline, setUploadDeadline] = useState("");
+  const [uploadSensitive, setUploadSensitive] = useState("");
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [inquiries, setInquiries] = useState<DirectedInquiry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -352,10 +383,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // hold. A refusal keeps the row as it was and says which side of the conflict it disagrees on.
   const decideSample = useCallback(
     async (row: SampleRow, decision: "approved" | "rejected") => {
-      if (csrf === "") {
-        setSamplesNotice("还没有可用的会话令牌，先完成配对。");
-        return;
-      }
+      const samplesNoticeGate = sessionGate(csrf);
+        if (!samplesNoticeGate.ok) {
+          setSamplesNotice(samplesNoticeGate.line);
+          return;
+        }
       const got = await postJson(
         `/api/v1/projects/${props.projectId}/vectors/${row.vectorId}/review`,
         { decision, expectedDigest: row.digest, expectedInventoryRevision: samples?.inventoryRevision ?? 0 },
@@ -385,8 +417,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // displaying a state it never received.
   const runJobAction = useCallback(
     async (row: JobLifecycleRow, action: LifecycleAction) => {
-      if (csrf === "") {
-        setJobsNotice("还没有可用的会话令牌，先完成配对。");
+      const gated = sessionGate(csrf);
+      if (!gated.ok) {
+        setJobsNotice(gated.line);
         return;
       }
       // The cleanup retry is keyed per click (§8 line 279), so a second click on a row whose first
@@ -415,10 +448,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // wrong name comes back as `comparator-policy-not-installed` with how many this build installs.
   const requestVerification = useCallback(
     async (candidateId: string) => {
-      if (csrf === "") {
-        setVerifyNotice("还没有可用的会话令牌，先完成配对。");
-        return;
-      }
+      const verifyNoticeGate = sessionGate(csrf);
+        if (!verifyNoticeGate.ok) {
+          setVerifyNotice(verifyNoticeGate.line);
+          return;
+        }
       const got = await postJson(
         `/api/v1/projects/${props.projectId}/verifications`,
         { candidateId, comparatorPolicyId: comparator },
@@ -436,6 +470,35 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     [comparator, csrf, props.projectId],
   );
 
+  // §8 line 272 from the browser: the file goes out as the multipart part the door names, with the
+  // four fields it lists and nothing else. No client-side size or type gate is added on top - the
+  // door answers a 5 MiB file with 413 naming `byteLength` and `maxBytes`, an unsupported media type
+  // with 422 naming the three it takes, and an ASAR with declarations by distinguishing those two
+  // cases itself - so the page shows the server's sentence rather than inventing an earlier one.
+  const uploadCapture = useCallback(async () => {
+    const gated = sessionGate(csrf);
+    if (!gated.ok) {
+      setUploadNotice(gated.line);
+      return;
+    }
+    const drafted = uploadDraftOf({ file: uploadFile, kind: uploadKind, deadlineAt: uploadDeadline, sensitiveValues: uploadSensitive });
+    if (!drafted.ok) {
+      setUploadNotice(drafted.line);
+      return;
+    }
+    const got = await postForm(`/api/v1/projects/${props.projectId}/imports`, drafted.form, csrf, crypto.randomUUID());
+    if (!got.ok) {
+      setUploadNotice(refusalLine("采集上传被拒", got.reason, got.facts));
+      return;
+    }
+    setUploadNotice(importReceiptLine((relayData(got.value) as Record<string, unknown> | null) ?? {}));
+    setUploadFile(null);
+    // The door made a target, a job and an inventory it has not shown yet, so the whole page is
+    // re-read rather than patched from the receipt: a panel that edited its own rows from a 202
+    // would be displaying what it predicted instead of what the worker wrote.
+    await load();
+  }, [csrf, load, props.projectId, uploadDeadline, uploadFile, uploadKind, uploadSensitive]);
+
   // §8 line 292 from the browser. The body is the plan id and nothing else, so the page asks the
   // journal which plan is freezable instead of letting an operator type one: the target, the
   // contracts and the graph revision are functions of that plan (contract comment in
@@ -444,10 +507,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // is re-read after the answer so the row that was just frozen stops being offered.
   const freezeBlueprint = useCallback(
     async (planId: string) => {
-      if (csrf === "") {
-        setFreezeNotice("还没有可用的会话令牌，先完成配对。");
-        return;
-      }
+      const freezeNoticeGate = sessionGate(csrf);
+        if (!freezeNoticeGate.ok) {
+          setFreezeNotice(freezeNoticeGate.line);
+          return;
+        }
       const got = await postJson(
         `/api/v1/projects/${props.projectId}/blueprints`,
         { verificationPlanId: planId },
@@ -471,10 +535,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // verdict out of a receipt that only promised work (§10).
   const requestGeneration = useCallback(
     async (blueprintId: string) => {
-      if (csrf === "") {
-        setGenerateNotice("还没有可用的会话令牌，先完成配对。");
-        return;
-      }
+      const generateNoticeGate = sessionGate(csrf);
+        if (!generateNoticeGate.ok) {
+          setGenerateNotice(generateNoticeGate.line);
+          return;
+        }
       const got = await postJson(
         `/api/v1/projects/${props.projectId}/candidates`,
         { blueprintId },
@@ -686,30 +751,46 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           </ul>
         ) : null}
         {activeTab === "samples" ? (
-          samples === null ? (
-            <p data-samples-empty>{samplesNotice ?? "正在读取库存…"}</p>
-          ) : (
-            <ul data-sample-list data-inventory-revision={samples.inventoryRevision}>
-              {samples.rows.map((row) => (
-                <li key={row.vectorId} data-sample={row.vectorId} data-sample-review={row.reviewStatus}>
-                  <span>{sampleLine(row)}</span>
-                  {sampleIsDecidable(row.reviewStatus) ? (
-                    <>
-                      <button type="button" data-sample-approve={row.vectorId} onClick={() => void decideSample(row, "approved")}>
-                        批准
-                      </button>
-                      <button type="button" data-sample-reject={row.vectorId} onClick={() => void decideSample(row, "rejected")}>
-                        驳回
-                      </button>
-                    </>
-                  ) : (
-                    <span data-sample-decided={row.reviewStatus}>已决定，正文不可改</span>
-                  )}
-                </li>
-              ))}
-              {samplesNotice === null ? null : <p data-samples-notice>{samplesNotice}</p>}
-            </ul>
-          )
+          <>
+            <section aria-label="上传采集" data-panel="capture-upload">
+              <h3>上传一次采集（§8 line 272：文件、kind、可选期限与敏感值）</h3>
+              <input type="file" data-upload-file onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} />
+              <select aria-label="采集类型" data-upload-kind value={uploadKind} onChange={(event) => setUploadKind(event.target.value)}>
+                <option value="har">har</option>
+                <option value="asar">asar</option>
+              </select>
+              <input aria-label="截止时间" data-upload-deadline type="text" placeholder="deadlineAt（可空）" value={uploadDeadline} onChange={(event) => setUploadDeadline(event.target.value)} />
+              <input aria-label="敏感值" data-upload-sensitive type="text" placeholder="敏感值，逗号分隔（可空）" value={uploadSensitive} onChange={(event) => setUploadSensitive(event.target.value)} />
+              <button type="button" data-upload-send onClick={() => void uploadCapture()}>
+                上传
+              </button>
+              {uploadNotice === null ? null : <p data-upload-notice>{uploadNotice}</p>}
+            </section>
+            {samples === null ? (
+              <p data-samples-empty>{samplesNotice ?? "正在读取库存…"}</p>
+            ) : (
+              <ul data-sample-list data-inventory-revision={samples.inventoryRevision}>
+                {samples.rows.map((row) => (
+                  <li key={row.vectorId} data-sample={row.vectorId} data-sample-review={row.reviewStatus}>
+                    <span>{sampleLine(row)}</span>
+                    {sampleIsDecidable(row.reviewStatus) ? (
+                      <>
+                        <button type="button" data-sample-approve={row.vectorId} onClick={() => void decideSample(row, "approved")}>
+                          批准
+                        </button>
+                        <button type="button" data-sample-reject={row.vectorId} onClick={() => void decideSample(row, "rejected")}>
+                          驳回
+                        </button>
+                      </>
+                    ) : (
+                      <span data-sample-decided={row.reviewStatus}>已决定，正文不可改</span>
+                    )}
+                  </li>
+                ))}
+                {samplesNotice === null ? null : <p data-samples-notice>{samplesNotice}</p>}
+              </ul>
+            )}
+          </>
         ) : null}
         {activeTab === "code" ? (
           candidate === null ? (

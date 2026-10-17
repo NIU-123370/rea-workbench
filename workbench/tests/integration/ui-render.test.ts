@@ -254,6 +254,11 @@ describe("the landing list before any read has happened", () => {
     expect(html).toContain('data-panel="project-list"');
     // No link is rendered to a project nobody has read yet.
     expect(html).not.toContain("/project/");
+    // The create form is there from the first paint - a visitor who cannot read a list still has to
+    // be able to ask for one - but it has not said anything yet: no notice paragraph exists before
+    // an operator has typed or clicked.
+    expect(html).toContain('data-panel="project-create"');
+    expect(html).not.toContain("data-project-create-notice");
   });
 });
 
