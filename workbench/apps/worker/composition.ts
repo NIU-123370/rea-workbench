@@ -166,6 +166,11 @@ export const COMMAND_NAMES = [
   // behind it owns every rule (role, named comparator policy, transcript re-hash, identity binding);
   // this name is what puts it on the wire instead of only in a test.
   "verification.complete",
+  // The same row's other half: who is allowed to *start* a verify job. §11 says a result is taken only
+  // from `running`, and §10 gives the comparing to the trusted evaluator, so this name is the single
+  // door through which a `verify` row leaves `queued` in a build that ships neither a container runner
+  // nor the evaluator process itself (issue #75). It is not an §8 route - an evaluator is not a browser.
+  "verification.claim",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -894,6 +899,11 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     // staging bytes stay an opaque id plus a digest rather than a path or a storage key.
     "verification.complete": async (payload, actor) =>
       relay(await verifications.complete(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
+    // §10's claim. The frame carries no job id unless the caller narrows the queue to one candidate, and
+    // the service - not this handler - decides which row starts, because the row, the deadline and the
+    // state machine all live behind the single writer.
+    "verification.claim": (payload, actor) =>
+      relay(verifications.claim(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
     "blueprint.freeze": async (payload, actor) =>
       relay(await blueprints.freeze(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
     "blueprint.read": async (payload, actor) => {

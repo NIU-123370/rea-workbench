@@ -9,7 +9,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { asId, newId, nowInstant } from "../../packages/domain/identity.ts";
 import { URL_TARGET_IDENTITY_REASON } from "../../packages/domain/target.ts";
 import type { Id, Instant } from "../../packages/domain/identity.ts";
+import { asDigest } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
+import type { JobRow } from "../../packages/application/ports.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { bootWorker, COMMAND_NAMES } from "../../apps/worker/composition.ts";
 import { parseFrame, startWorkerRpc } from "../../apps/worker/rpc-server.ts";
@@ -62,6 +64,7 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "verification.read",
   "verification.request",
   "verification.complete",
+  "verification.claim",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -137,6 +140,29 @@ function env(): Record<string, string | undefined> {
 
 function request(name: string, payload: JsonValue, actor: Actor): Promise<Result<JsonValue, GateFailure>> {
   return worker.dispatch(name, payload, actor);
+}
+
+// A verify row in the shape `verification.request` writes: no target, and an input naming a candidate
+// this project does not have (the point of the row is only that it is *queued* somewhere else).
+function queuedVerifyJobRow(projectId: Id, kind: JobRow["kind"] = "verify"): JobRow {
+  const at = nowInstant();
+  return {
+    id: newId(),
+    projectId,
+    targetId: null,
+    kind,
+    state: "queued",
+    cleanupState: "pending",
+    inputJson: kind === "verify" ? { candidateId: newId(), comparatorPolicyId: "exact-http-v1" } : { blueprintId: newId() },
+    resultRef: null,
+    errorJson: null,
+    idempotencyKey: `claim-${String(newId())}`,
+    requestDigest: asDigest("f".repeat(64)),
+    deadlineAt: null,
+    retryAt: null,
+    createdAt: at,
+    updatedAt: at,
+  };
 }
 
 function unwrap<T>(result: Result<T, GateFailure>): T {
@@ -744,6 +770,72 @@ describe("named commands and the local RPC (§14)", () => {
     expect(loud?.state).toBe("degraded");
     expect(loud?.reasons).toEqual(["verification-executor-not-installed"]);
   });
+
+  // The claim name is the other half of #75: without it a `verify` row could never leave `queued`, and
+  // the queue would be readable but not workable. What the composition owes is only that the name exists
+  // and the roles stay outside it - which row starts, what the binding says and what a deadline does are
+  // the service's rules, and its own suite pins them.
+  it("names the evaluator's claim and keeps the control plane out of it (§10, §7.3)", async () => {
+    const created = unwrap(await request("project.create", { name: "verify-claim" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+
+    const asBuilder = await request("verification.claim", { projectId, request: {} }, builder);
+    expect(asBuilder.ok).toBe(false);
+    if (asBuilder.ok) return;
+    expect(asBuilder.error.code).toBe("ACCESS_DENIED");
+    expect(asBuilder.error.reason).toBe("builder-may-not-claim-a-verification");
+
+    const asInspector = await request("verification.claim", { projectId, request: {} }, inspector);
+    expect(asInspector.ok).toBe(false);
+    if (asInspector.ok) return;
+    expect(asInspector.error.reason).toBe("only-the-evaluator-claims-a-verification");
+
+    // The evaluator reaches the door, and on a queue with nothing in it the answer is the named empty
+    // one - not an error, and not a job row invented to make the call look productive.
+    // Another project has a queued verify job. The claim is a project command (§14's named commands all
+    // carry a project), so a scan that reached past this project's queue would start somebody else's
+    // work - and would report a busy answer here while this project has nothing waiting.
+    const other = unwrap(await request("project.create", { name: "verify-claim-other" }, inspector)) as { id: string };
+    const otherId = asId(other.id);
+    const foreign = worker.writeConnection.transact((tx) => {
+      tx.insertJob({
+        ...queuedVerifyJobRow(otherId),
+        id: newId(),
+      });
+      return true;
+    });
+    if (!foreign.ok) throw new Error(JSON.stringify(foreign.error));
+
+    const idle = unwrap(await request("verification.claim", { projectId, request: {} }, evaluator)) as Record<string, unknown>;
+    expect(idle).toEqual({ state: "idle" });
+
+    // and the foreign row is still sitting where it was, still queued
+    const stillQueued = worker.writeConnection.transact((tx) => tx.listJobsByStates(["queued"], 200));
+    if (!stillQueued.ok) throw new Error(JSON.stringify(stillQueued.error));
+    expect(stillQueued.value.filter((job) => job.projectId === otherId && job.kind === "verify").length).toBe(1);
+
+    // A queued row of a *different kind* in this very project is not this door's work either - `build`
+    // has its own executor (#57), so a claim that reached past the kind would start work twice.
+    const foreignKind = worker.writeConnection.transact((tx) => {
+      tx.insertJob({ ...queuedVerifyJobRow(projectId, "build"), id: newId() });
+      return true;
+    });
+    if (!foreignKind.ok) throw new Error(JSON.stringify(foreignKind.error));
+    const stillIdle = unwrap(await request("verification.claim", { projectId, request: {} }, evaluator)) as Record<string, unknown>;
+    expect(stillIdle).toEqual({ state: "idle" });
+    const buildRows = worker.writeConnection.transact((tx) => tx.listJobsByStates(["queued"], 200));
+    if (!buildRows.ok) throw new Error(JSON.stringify(buildRows.error));
+    expect(buildRows.value.filter((job) => job.projectId === projectId && job.kind === "build").length).toBe(1);
+
+    // A key §10 does not name is refused by name: the claim takes a candidate filter or nothing, and an
+    // unlisted field (here a self-claimed attempt budget) must not be silently ignored.
+    const extra = await request("verification.claim", { projectId, request: { maxAttempts: 3 } }, evaluator);
+    expect(extra.ok).toBe(false);
+    if (extra.ok) return;
+    expect(extra.error.reason).toBe("verification-claim");
+    expect(JSON.stringify(extra.error.details)).toContain("maxAttempts");
+  });
+
 
   it("carries a generation frame through the local RPC and answers with the worker's own refusal", async () => {
     const started = await startWorkerRpc(worker);

@@ -12,10 +12,11 @@ const INVENTORY_BOUND = 5_000;
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
 import type { EvaluatorCompletion } from "../contracts/verification.ts";
-import { evaluatorCompletionSchema, INSTALLED_COMPARATOR_POLICIES, verificationReportSchema, verificationRequestSchema } from "../contracts/verification.ts";
+import { evaluatorCompletionSchema, INSTALLED_COMPARATOR_POLICIES, verificationClaimRequestSchema, verificationReportSchema, verificationRequestSchema } from "../contracts/verification.ts";
+import type { VerificationWorkWire } from "../contracts/verification.ts";
 import { findComparatorPolicy } from "../contracts/verification.ts";
 import type { JobRecord } from "../contracts/jobs.ts";
-import { projectJobRecord, transition } from "./job-queue.ts";
+import { decideStart, jobErrorFromFailure, projectJobRecord, transition } from "./job-queue.ts";
 import type { EventDraft, JobRow } from "./ports.ts";
 import type {
   ArtifactPort,
@@ -63,6 +64,24 @@ import type { VectorService } from "./vector-service.ts";
 // rows the worker already owns, which leaves no field an untrusted side could set.
 // The evaluator's staged bytes are re-hashed before anything is published, and the
 // report artifact is the JSON derived here, not the transcript handed over.
+
+// How far a claim is willing to look into the queue. The scan is bounded everywhere else in this
+// repository (§7.4's 先计量再分配), and an unrelated backlog must not turn one claim into a table read.
+const CLAIM_SCAN_LIMIT = 200;
+
+// What the evaluator is told to run, read out of the rows the worker already owns. Ids and digests: no
+// source text, no holdout value, no storage key or host path (§12.1), and no outcome field - the claim
+// starts work, it cannot finish it.
+export type VerificationWork = VerificationWorkWire;
+
+// Three outcomes, mirroring `verificationClaimSchema`: something started, nothing was waiting, or the
+// row that was found could not be started and is now `failed` (§11). The third is an outcome rather
+// than a refusal because a refusal rolls its own transaction back - which would leave an expired job
+// `queued` to be refused again forever, the one thing §11's deadline rule forbids.
+export type VerificationClaim =
+  | { state: "claimed"; job: JobRecord; work: VerificationWork }
+  | { state: "idle" }
+  | { state: "failed"; job: JobRecord; reasonCode: string };
 
 export type VerificationCommit = {
   verificationId: Id;
@@ -493,6 +512,197 @@ export class VerificationService {
       },
     });
     if (!committed.ok) return err(committed.error);
+    return { ok: true, value: committed.value.value };
+  }
+
+  // §10's other evaluator door: the worker decides which verify job starts, and moves it under §11's
+  // own transition. This is the only way a `verify` row leaves `queued` in this build - the runner's
+  // `RUNNABLE_JOB_KINDS` still lists `build` only, because there is no container runtime here and no
+  // evaluator process to run against one (issue #75's remaining half) - so the claiming role has to be
+  // the role §7.3 says does the comparing, not the role that asked for the work.
+  //
+  // Two things this deliberately is not. It states no result: §10's 一次请求只造工作 applies twice over
+  // to the evaluator's own claim, so the row becomes `running`, which is the shape of "somebody is
+  // working" and never of "it passed". And it keeps no second clock: the deadline question goes through
+  // `decideStart`, the same owner the runner asks, so a job whose 最晚启动时间 has passed becomes `failed`
+  // here for the reason that owner gives and no other.
+  claim(projectId: Id, actor: Actor, input: unknown): Result<VerificationClaim, GateFailure> {
+    if (actor.actorKind !== "evaluator") {
+      const reason = isBuilder(actor)
+        ? "builder-may-not-claim-a-verification"
+        : "only-the-evaluator-claims-a-verification";
+      return this.denied(
+        projectId,
+        actor,
+        null,
+        gateFail("ACCESS_DENIED", reason, "a verify job is claimed by the trusted evaluator only (DESIGN §7.3, §10)", {
+          actorKind: actor.actorKind,
+        }),
+      );
+    }
+    const parsed = verificationClaimRequestSchema.safeParse(input ?? {});
+    if (!parsed.success) {
+      return gateFail("INVALID_INPUT", "verification-claim", "the claim was rejected", {
+        fields: issueNames(parsed.error.issues),
+      });
+    }
+    const wanted = parsed.data.candidateId === undefined ? null : asId(parsed.data.candidateId);
+
+    const scanned = this.storage.transact((tx) =>
+      tx
+        .listJobsByStates(["queued"], CLAIM_SCAN_LIMIT)
+        // A project's queue, not the table: this command carries a project (§14's named commands are
+        // project-scoped), and a bounded scan means an unrelated project's backlog cannot push this
+        // project's job out of the window.
+        .filter((job) => job.projectId === projectId)
+        .filter((job) => job.kind === "verify")
+        .filter((job) => {
+          if (wanted === null) return true;
+          const asked = readVerifyRequest(job.inputJson);
+          return asked !== null && asked.candidateId === wanted;
+        }),
+    );
+    if (!scanned.ok) return gateFail("INVALID_INPUT", scanned.error.code, scanned.error.message);
+    const next = scanned.value[0];
+    // Nothing waiting is an answer, not a failure - and it writes no journal entry: an evaluator polls,
+    // and a poll that finds no work decides nothing about anyone's permission (§12.2 lists 权限 allow/deny,
+    // and "there was nothing to give" is neither).
+    if (next === undefined) return { ok: true, value: { state: "idle" } };
+
+    const start = decideStart({ job: next, now: nowInstant(), brokerAvailable: true, permanentFailure: false });
+    if (start.action === "requeue") {
+      // Unreachable for a verify job on this path - a verification asks no broker, which is why
+      // `brokerAvailable` is true - and named rather than assumed, so a future caller that passes a
+      // broker-dependent job through here cannot silently skip the wait §11 asks for.
+      return gateFail("CAPABILITY_UNAVAILABLE", "verification-start-requeued", "this job is waiting to be retried, not started (§11)", {
+        retryAt: start.retryAt,
+      });
+    }
+
+    const committed = commitDecision<VerificationClaim>(this.storage, {
+      projectId,
+      actor,
+      resourceType: "job",
+      action: "verification.claim",
+      resourceId: next.id,
+      allowReason: start.action === "fail" ? "verify-job-not-started" : "verify-job-running",
+      metadata: { candidateId: wanted ?? null, jobKind: next.kind, jobState: next.state, startAction: start.action },
+      work: (tx): Step<VerificationClaim> => {
+        // Re-read inside the transaction: two evaluators asking at once must not both get this row, and
+        // §11's transition is the whole check - a row that is no longer `queued` cannot take `running`.
+        const current = tx.getJob(projectId, next.id);
+        if (current === null) {
+          return { kind: "failure", failure: gateFail("NOT_FOUND", "verification-job-unknown", "that job is no longer here") };
+        }
+        const at = nowInstant();
+        if (start.action === "fail") {
+          const failed = transition(current, "failed", at);
+          if (failed === null) {
+            return {
+              kind: "failure",
+              failure: gateFail("REVISION_CONFLICT", "verification-job-moved", `the row is ${current.state}, so it is not this job's failure to take`, {
+                jobState: current.state,
+              }),
+            };
+          }
+          // §11: 达到 deadlineAt 仍未启动，则 queued→failed，保存明确错误. The row says what stopped it,
+          // and the answer names the same reason, so the caller is not left to infer a deadline from a
+          // `failed` row it cannot read.
+          tx.updateJob({
+            ...failed,
+            errorJson: jobErrorFromFailure(failed, { code: "RESOURCE_LIMIT", reason: start.reason, details: {} }),
+            updatedAt: at,
+          });
+          tx.appendEvent({
+            projectId,
+            type: "job.updated",
+            aggregateId: current.id,
+            payloadJson: { resourceIds: [current.id], state: "failed", reasonCode: start.reason },
+            createdAt: at,
+          } satisfies EventDraft);
+          return {
+            kind: "committed",
+            // The row and the answer say the same thing: this job is `failed`, and this is the code that
+            // says why. A caller that treats this as "nothing to do" would be reading the row wrong,
+            // which is exactly why the outcome is named rather than folded into an empty answer.
+            value: {
+              state: "failed",
+              job: projectJobRecord(failed, tx.listLeasesForJobs(projectId, [current.id])),
+              reasonCode: start.reason,
+            },
+          };
+        }
+
+        const started = transition(current, "running", at);
+        if (started === null) {
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "REVISION_CONFLICT",
+              "verification-job-already-claimed",
+              `a job in state ${current.state} is not available to claim`,
+              { jobState: current.state },
+            ),
+          };
+        }
+        tx.updateJob({ ...started, updatedAt: at });
+        tx.appendEvent({
+          projectId,
+          type: "job.updated",
+          aggregateId: current.id,
+          payloadJson: { resourceIds: [current.id], state: "running" },
+          createdAt: at,
+        } satisfies EventDraft);
+
+        // The binding, read from the rows the worker owns - never from what the caller asked for. A job
+        // whose candidate or blueprint no longer resolves is not work, so the claim refuses rather than
+        // handing out a `running` row the evaluator cannot act on: the two halves of the answer move
+        // together or not at all.
+        const askedFor = readVerifyRequest(current.inputJson);
+        if (askedFor === null) {
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "INVALID_INPUT",
+              "verification-job-request-mismatch",
+              "this job does not name the candidate and comparator a run needs (§8 line 297's own input)",
+              { fields: ["candidateId", "comparatorPolicyId"] },
+            ),
+          };
+        }
+        const candidate = tx.getCandidate(projectId, askedFor.candidateId);
+        if (candidate === null) {
+          return {
+            kind: "failure",
+            failure: gateFail("NOT_FOUND", "verification-claim-candidate-unknown", "the candidate this job asked for is no longer in this project", {}),
+          };
+        }
+        const blueprint = tx.getBlueprint(projectId, candidate.blueprintId);
+        if (blueprint === null) {
+          return {
+            kind: "failure",
+            failure: gateFail("NOT_FOUND", "verification-claim-blueprint-unknown", "the blueprint the candidate was built against is no longer in this project", {}),
+          };
+        }
+        return {
+          kind: "committed",
+          value: {
+            state: "claimed",
+            job: projectJobRecord(started, tx.listLeasesForJobs(projectId, [current.id])),
+            work: {
+              candidateId: candidate.id,
+              candidateDigest: candidate.digest,
+              blueprintId: blueprint.id,
+              planId: blueprint.verificationPlanId,
+              targetId: blueprint.targetId,
+              snapshotDigest: blueprint.snapshotDigest,
+              comparatorPolicyId: askedFor.comparatorPolicyId,
+            },
+          },
+        };
+      },
+    });
+    if (!committed.ok) return committed;
     return { ok: true, value: committed.value.value };
   }
 
