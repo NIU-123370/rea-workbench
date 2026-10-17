@@ -20,7 +20,7 @@ import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { MIGRATIONS } from "../../packages/adapters/storage/migrations.ts";
 import { asId, type Id } from "../../packages/domain/identity.ts";
 
-// The offline restore (DESIGN §13 line 453, D23 / PRD A16, issue #23).
+// The offline restore (DESIGN §13 line 453, D23 / PRD A12 / TESTPLAN T16, issue #23).
 //
 // §13 says a rollback first confirms this build can read the database, and otherwise
 // restores the pair - the DB and the artifact manifest - from the same moment. That order is

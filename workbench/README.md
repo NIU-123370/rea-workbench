@@ -43,7 +43,7 @@ npm ci
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
-| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
+| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账，**并核对源码里点名的编号确实存在**）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
 | `tests/{unit,integration,fixtures,support}` | 纯逻辑门禁、真 SQLite / 真文件门禁、固定 envelope fixture，以及跨套件共用的交接数据播种（`support/blueprint-seed.ts`）                                       |
 
 Builder 生成支路（F08 / A07 / issue #19）的边界：
@@ -1348,7 +1348,7 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 - 没有 seccomp profile 的实际加载；
 - 没有 network namespace 对 egress 的实际拦截（本机只验证了地址与 CIDR 的判定逻辑）。
 
-因此沙箱**不得被宣传为已支持的平台能力**：支持面固定为 Linux x64，且在 T19 的隔离验收于真实
+因此沙箱**不得被宣传为已支持的平台能力**：支持面固定为 Linux x64，且在 T07/T14 的隔离验收于真实
 Linux 宿主通过之前，`GET /health` 的 profile 必须继续报告 `available: false`。隔离条件不满足
 时代码只拒绝、不回退到 `--no-sandbox`；平台判定由注入的 probe 提供，策略里不读
 `process.platform`（`tests/integration/sandbox-broker.test.ts` 有守卫用例）。

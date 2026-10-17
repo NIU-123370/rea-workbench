@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   checkDocs,
+  checkSourceReferences,
+  findIdReferences,
   parseAcceptanceRows,
   parseTestCaseRows,
   reconcile,
@@ -50,8 +52,8 @@ describe("the matrix reconciles with the acceptance table", () => {
     expect(checkDocs(missing, PRD)).toContain("test-case-missing:T17");
     const doubled = testplan([...ALL_CASES, ["T05", "A05"]]);
     expect(checkDocs(doubled, PRD)).toContain("duplicate-test-case:T05");
-    const beyond = testplan([...ALL_CASES, ["T18", "A01"]]);
-    expect(checkDocs(beyond, PRD)).toContain("test-case-out-of-range:T18");
+    const beyond = testplan([...ALL_CASES, ["T18", "A01"]]); // docs-check-ignore: names the invented case the reason below is about
+    expect(checkDocs(beyond, PRD)).toContain("test-case-out-of-range:T18"); // docs-check-ignore: ditto
   });
 
   it("refuses to let a criterion go untested or a test name one that does not exist", () => {
@@ -62,8 +64,8 @@ describe("the matrix reconciles with the acceptance table", () => {
     expect(reasons).toContain("acceptance-untested:A13");
     expect(reasons.filter((reason) => reason.startsWith("acceptance-untested:"))).toHaveLength(12);
 
-    const invented = testplan(ALL_CASES.map(([id], index) => [id, index === 0 ? "A14" : `A${String((index % 13) + 1).padStart(2, "0")}`]));
-    expect(checkDocs(invented, PRD)).toContain("acceptance-not-declared:A14(T01)");
+    const invented = testplan(ALL_CASES.map(([id], index) => [id, index === 0 ? "A14" : `A${String((index % 13) + 1).padStart(2, "0")}`])); // docs-check-ignore: A14 is the invented criterion this case asserts is refused
+    expect(checkDocs(invented, PRD)).toContain("acceptance-not-declared:A14(T01)"); // docs-check-ignore: ditto
   });
 
   it("refuses a case with no acceptance id and an unreadable table", () => {
@@ -83,6 +85,47 @@ describe("the matrix reconciles with the acceptance table", () => {
   });
 });
 
+describe("a source file may only name an id the two tables declare", () => {
+  const declared = { cases: ["T01", "T16"], accepts: ["A05", "A12"] };
+
+  it("reads a citation but not a timestamp, a digest or an identifier", () => {
+    const source = [
+      `// The offline restore (DESIGN §13 line 453, D23 / PRD A12 / TESTPLAN T16, issue #23).`,
+      `const stamp = "2026-10-16T09:00:00.000Z";`,
+      `const digest = "sha512-hfhF/FmoQyTUkA0bIKFOtw536BQSeBMe6BF6QyWlrPxT754+TFLaZ7sKKTfvvM0yJgKgaYTwnFCIZ/GuDw5SUA==";`,
+      `export const T17Record = "T17Record";`,
+      `const advisory = "until TESTPLAN T07/T14 isolation acceptance has run";`,
+    ].join("\n");
+    const refs = findIdReferences("apps/worker/restore.ts", source).map((ref) => `${ref.ref}@${String(ref.line)}`);
+    expect(refs).toEqual(["A12@1", "T16@1", "T07@5", "T14@5"]);
+  });
+
+  it("honours an inline opt-out so a fixture can name the id it refuses", () => {
+    expect(findIdReferences("tests/unit/a.test.ts", `const invented = "A14"; // docs-check-ignore: this case asserts A14 is refused`)).toEqual([]);
+  });
+
+  // Three ids the tables never declared. They live here as named constants with the opt-out
+  // marker, so the invented id appears at one marked site instead of on every assertion line.
+  const inventedCase = "T19"; // docs-check-ignore: the fixture is about refusing an undeclared case id
+  const inventedAcceptance = "A16"; // docs-check-ignore: ditto, acceptance family
+  const otherInventedCase = "T40"; // docs-check-ignore: ditto
+
+  it("names the site of a reference the tables do not declare, by family", () => {
+    const refs = findIdReferences("packages/contracts/sandbox.ts", `const advisory = "until ${inventedCase} isolation acceptance has run";`);
+    expect(refs.map((ref) => ref.ref)).toEqual([inventedCase]);
+    expect(checkSourceReferences(refs, declared)).toEqual([
+      `test-case-ref-undeclared:${inventedCase}(packages/contracts/sandbox.ts:1)`,
+    ]);
+    expect(checkSourceReferences(refs, { ...declared, cases: [...declared.cases, inventedCase] })).toEqual([]);
+
+    const both = findIdReferences("apps/worker/restore.ts", `// PRD ${inventedAcceptance} and TESTPLAN ${otherInventedCase}`);
+    expect(checkSourceReferences(both, declared)).toEqual([
+      `acceptance-ref-undeclared:${inventedAcceptance}(apps/worker/restore.ts:1)`,
+      `test-case-ref-undeclared:${otherInventedCase}(apps/worker/restore.ts:1)`,
+    ]);
+  });
+});
+
 describe("the committed documents pass the gate they describe", () => {
   it("npm run docs:check exits clean against docs/PRD.md and docs/TESTPLAN.md", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
@@ -93,5 +136,10 @@ describe("the committed documents pass the gate they describe", () => {
     expect(output).toContain("用例 17 条 / 验收 13 条");
     expect(output).not.toContain("- acceptance-");
     expect(output).not.toContain("- test-case-");
+    expect(output).not.toContain("source-root-missing");
+    // The scan size is part of the contract: a walk that read nothing (renamed root, wrong
+    // root directory) prints an otherwise identical clean line, so the count is pinned to a
+    // floor well below today's 119 references over 199 files rather than to the number itself.
+    expect(output).toMatch(/源码引用 \d{3,} 处（\d{3,} 个文件）/);
   });
 });

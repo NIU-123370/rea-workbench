@@ -68,7 +68,7 @@ export const SANDBOX_HOST_REQUIREMENTS = {
   // namespace has been executed by this repository's gates.
   verified: false,
   advisory:
-    "sandbox isolation is unverified outside a Linux x64 host and must not be advertised as a supported platform until T19 isolation acceptance has run",
+    "sandbox isolation is unverified outside a Linux x64 host and must not be advertised as a supported platform until TESTPLAN T07/T14 isolation acceptance has run",
 } as const;
 
 export const UNSUPPORTED_PLATFORM_REASON = "platform-unsupported";
