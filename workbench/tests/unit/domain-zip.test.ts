@@ -5,6 +5,7 @@ import {
   buildZipArchive,
   crc32,
   entryNameDefects,
+  MAX_ENTRY_NAME_BYTES,
   readZipArchive,
   type ZipEntry,
   type ZipLimits,
@@ -231,5 +232,90 @@ describe("a damaged archive is refused rather than trusted", () => {
     whole.set(text("../escape.txt"), central + 46);
     const escaped = readZipArchive(whole, LIMITS);
     expect(!escaped.ok && (escaped.error as string[]).join(",")).toContain("entry-name-parent-segment:../escape.txt");
+  });
+});
+
+// A reader that is not this file's author. The archive above already walks bytes by hand for hostile
+// cases; this block does it for the one thing our own `readZipArchive` cannot check: whether the
+// archive *says* its names are UTF-8. APPNOTE 4.4.5 makes general-purpose bit 11 that statement, and
+// `encodeName` has always written UTF-8 - so before the bit was set, every third-party reader decoded
+// a non-ASCII name as CP437 while this repository's own reader round-tripped it. An archive only its
+// own reader understands is broken, whatever the reader asserts.
+describe("what a standards-following reader can learn about the names", () => {
+  const UTF8_BIT = 0x0800;
+
+  function centralRecords(archive: Uint8Array): { flags: number; name: string; nameLengthField: number; crc: number; localCrc: number; localFlags: number }[] {
+    const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
+    const records: { flags: number; name: string; nameLengthField: number; crc: number; localCrc: number; localFlags: number }[] = [];
+    // Find the end-of-central-directory record rather than assuming a fixed layout: the record says
+    // where the directory starts, which is exactly what an outside reader does.
+    let end = -1;
+    for (let offset = archive.byteLength - 22; offset >= 0 && end < 0; offset -= 1) {
+      if (view.getUint32(offset, true) === 0x06054b50) end = offset;
+    }
+    if (end < 0) throw new Error("no end-of-central-directory record");
+    const count = view.getUint16(end + 10, true);
+    let offset = view.getUint32(end + 16, true);
+    for (let index = 0; index < count; index += 1) {
+      if (view.getUint32(offset, true) !== 0x02014b50) throw new Error(`central record ${String(index)} has no signature`);
+      const nameLength = view.getUint16(offset + 28, true);
+      const extraLength = view.getUint16(offset + 30, true);
+      const commentLength = view.getUint16(offset + 32, true);
+      const localOffset = view.getUint32(offset + 42, true);
+      const name = new TextDecoder().decode(archive.slice(offset + 46, offset + 46 + nameLength));
+      // The local header must agree with the directory entry: same name bytes, same flags, same crc.
+      if (view.getUint32(localOffset, true) !== 0x04034b50) throw new Error("local header signature lost");
+      records.push({
+        flags: view.getUint16(offset + 8, true),
+        name,
+        nameLengthField: nameLength,
+        crc: view.getUint32(offset + 16, true),
+        localCrc: view.getUint32(localOffset + 14, true),
+        localFlags: view.getUint16(localOffset + 6, true),
+      });
+      offset += 46 + nameLength + extraLength + commentLength;
+    }
+    return records;
+  }
+
+  it("labels UTF-8 names as UTF-8, and leaves plain ASCII unlabelled", () => {
+    const built = buildZipArchive(
+      [...entries(), { name: "报告/验证结果.txt", bytes: text("PASS\n") }],
+      STAMP,
+      LIMITS,
+    );
+    if (!built.ok) throw new Error(JSON.stringify(built.error));
+    const records = centralRecords(built.value);
+    expect(records.map((record) => record.name)).toEqual(["adapter.ts", "openapi.json", "reports/verification.json", "报告/验证结果.txt"]);
+    for (const record of records) {
+      // An ASCII name keeps the bit clear: setting it there would claim an encoding no reader needs,
+      // and older readers that ignore the bit would then be told a name is UTF-8 when it is the same
+      // bytes either way. So the flag is exactly "this archive has something to say".
+      const asciiOnly = [...record.name].every((char) => (char.codePointAt(0) ?? 0xffffffff) <= 0x7f);
+      expect(record.flags & UTF8_BIT).toBe(asciiOnly ? 0 : UTF8_BIT);
+      expect(record.localFlags).toBe(record.flags);
+      expect(record.localCrc).toBe(record.crc);
+    }
+    // Read back the way a stranger would: bit set ⇒ UTF-8, bit clear ⇒ CP437. Only the flagged entry
+    // survives that rule, which is the whole point of the bit.
+    const flagged = records.find((record) => (record.flags & UTF8_BIT) === UTF8_BIT);
+    expect(flagged?.name).toBe("报告/验证结果.txt");
+    expect(records.filter((record) => (record.flags & UTF8_BIT) === UTF8_BIT)).toHaveLength(1);
+  });
+
+  it("refuses a name the 16-bit length field cannot hold, instead of truncating it", () => {
+    const tooLong = `${"a".repeat(65536)}.txt`;
+    expect(entryNameDefects(tooLong)).toContain(`entry-name-over-length:${String(MAX_ENTRY_NAME_BYTES)}`);
+    const refused = buildZipArchive([{ name: tooLong, bytes: text("x") }], STAMP, { ...LIMITS, maxArchiveBytes: 10_000_000, maxUncompressedBytes: 10_000_000 });
+    expect(!refused.ok).toBe(true);
+    if (refused.ok) return;
+    expect(refused.error.join(",")).toContain("entry-name-over-length");
+    // The boundary itself still fits, and the field carries the real length rather than length mod 65536.
+    const fits = "a".repeat(MAX_ENTRY_NAME_BYTES - 4);
+    const built = buildZipArchive([{ name: `${fits}.txt`, bytes: text("x") }], STAMP, { maxEntries: 16, maxUncompressedBytes: 1_000_000, maxArchiveBytes: 4_000_000 });
+    if (!built.ok) throw new Error(JSON.stringify(built.error));
+    const [record] = centralRecords(built.value);
+    expect(record?.nameLengthField).toBe(text(`${fits}.txt`).byteLength);
+    expect(record?.name).toBe(`${fits}.txt`);
   });
 });
