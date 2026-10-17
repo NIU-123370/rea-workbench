@@ -117,9 +117,16 @@ export const COMMAND_NAMES = [
   "vector.review",
   "contract.create",
   "contract.review",
+  // The contract read (§8 line 288). The service has owned this rule since #12 — including the
+  // Builder refusal — but until the door existed nothing outside a test could ask for it, so the
+  // rule was never on the wire (issue #58).
+  "contract.read",
   "plan.build",
   "plan.review",
   "plan.read",
+  // The report read (§8 line 298). One name for the control-plane view of a stored report;
+  // `blueprint.handoff`'s Builder-facing summary is a different projection with different rules.
+  "verification.read",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -679,6 +686,14 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       if (refused !== null) return refused;
       return relay(await contracts.review(projectIdOr(payload), actor, contractId as Id, asRecord(payload)["request"] ?? {}));
     },
+    // §8 line 288: the stored revision, projected through the same schema the review answers
+    // with. The service owns the role rule (a Builder reads blueprint projections only).
+    "contract.read": (payload, actor) => {
+      const contractId = pickId(payload, "contractId");
+      const refused = missing(contractId);
+      if (refused !== null) return refused;
+      return relay(contracts.read(projectIdOr(payload), actor, contractId as Id));
+    },
     "plan.build": (payload, actor) => relay(plans.build(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
     "plan.review": (payload, actor) => {
       const planId = pickId(payload, "planId");
@@ -691,6 +706,16 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const refused = missing(planId);
       if (refused !== null) return refused;
       return relay(plans.read(projectIdOr(payload), actor, planId as Id));
+    },
+    // §8 line 298. The service answers with the report *and* the staleness it re-derived from
+    // the rows that exist now; the route's documented body is the report, so the view crosses the
+    // socket whole and the door picks the half §8 names. Dropping it here instead would leave the
+    // command unable to say what it measured.
+    "verification.read": async (payload, actor) => {
+      const verificationId = pickId(payload, "verificationId");
+      const refused = missing(verificationId);
+      if (refused !== null) return refused;
+      return relay(await verifications.read(projectIdOr(payload), actor, verificationId as Id));
     },
     "blueprint.freeze": async (payload, actor) =>
       relay(await blueprints.freeze(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),

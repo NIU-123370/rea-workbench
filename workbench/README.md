@@ -275,7 +275,7 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **27 条**，仍缺 **13 条**。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **29 条**，仍缺 **11 条**。
 这 27 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
@@ -289,10 +289,12 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 照 §8 原样把体里的名字转发出去就等于让任一会话替别人签批，所以体的 schema 里没有这个键，
 发它就来 400 并报出键名；②§8 写的 `note:string` 在存储模型与 §12.2 的日志字段表里都没有归属，
 所以门拒绝它而不是收下后丢掉（页面不能以为自己记下了一个没人保存的理由）；③§8 的三条回包写的是
-「200 TestVector／ContractRevision／VerificationPlan」，而封闭命令表里 `contract.*`／`plan.*` 都没有
-读命令，门只能出服务真正回答的那份回执（receipt），它是一份具名契约而不是命令返回值的转储。
-缺的 13 条里 `GET /contracts/:c`、`GET /blueprints/:b`、`GET /verifications/:v` 三条连命令都还没有
-（`contract.*` 只有 create／review，服务侧的 `read` 还没上封闭命令表）；
+「200 TestVector／ContractRevision／VerificationPlan」，而当时封闭命令表里 `contract.*` 还没有读命令，
+门只能出服务真正回答的那份回执（receipt），它是一份具名契约而不是命令返回值的转储。
+缺的 11 条里只剩 `GET /blueprints/:b` 一条连命令都还没有（`blueprint.*` 只有 freeze／handoff／manifest，
+而 §8 那一行明令此门不得出 source manifest／holdout，所以它要的是一个新的具名投影，不是复用 handoff）；
+`GET /contracts/:c` 与 `GET /verifications/:v` 是本轮补上的——两侧服务的 `read` 一直都在，
+连「Builder 只读蓝图投影」那条拒绝都写好了，缺的只是封闭命令表上的两个名字和一扇门。
 三个创建门各有一处 §8 偏离，都是「文档给了字段而实现无处安放」：vector 的 `sensitiveValues`、
 plan／contract 的 `expectedGraphRevision`（§7.4 让计划自己绑图版本）都由门**具名拒收**，
 而 contract 不在 §8 line 261 的幂等清单里，所以那扇门没有键——浏览器实测同键重发拿到的是
@@ -368,6 +370,15 @@ details 字面量（含 `{ pinnedRevision }` 这种简写成员），21 个键�
   「修订 4／两行 approved／0 个按钮」，证明这条线不是粘住的。
 - 点击「来源」不再往队列里塞草稿（队列计数 0），而带缺口的格子点「创建定向调查」仍然入队一条
   `capture-new`（`unmappedReasons: []`）——「读得到」与「还缺证据」在页面上是两件事。
+- 两条新读门在同一轮里由配对页面同源取过：`GET .../contracts/da06…` 回 200、16 个键，
+  `digest` = `ec5d1eec…9e62` 与库里那一行逐字相同，`review.status` 是 `draft`；
+  `GET .../verifications/01d2…` 回 200、12 个键（**没有** `staleness`——§8 那一列写的是报告本身，
+  服务替自己调用方重算的那份新鲜度不出这道门），`result=PASS`、`counts.total=1`。
+  磁盘侧独立核一次：`verifications.report_artifact_id → artifacts.sha256` =
+  `181f46fb…0e8d`，同一份文件 `shasum -a 256` 得同一个值，文件里的 `result`/`counts` 与页面拿到的
+  一致——「门服务的是存着的那份字节」这条只有这样才能算证过。
+  同一路径上 `contracts/not-an-id` 回 400 `contract-id-malformed`、不存在的 verification id 回
+  404 `verification-unknown`。
 - 三条新读路由在同一轮里由页面直接取过：`GET /projects/:p` 回 6 个键
   （`recentJobIds` 有 2 条）、`GET /projects/:p/jobs/:j` 回 9 个键（含 `cleanupRetryAt`、`error`），
   不存在的 evidence id 回 `evidence-unknown`。

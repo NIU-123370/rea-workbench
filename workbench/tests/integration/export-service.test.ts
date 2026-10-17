@@ -7,8 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { asDigest, digestBytes } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
-import type { Id, Instant } from "../../packages/domain/identity.ts";
-import { vectorSetDigestOf } from "../../packages/domain/report.ts";
+import type { Id } from "../../packages/domain/identity.ts";
 import { readZipArchive } from "../../packages/domain/zip.ts";
 import { racingStorage } from "../support/racing-storage.ts";
 import { declaredPackageEntries } from "../../packages/domain/export.ts";
@@ -20,18 +19,17 @@ import {
 } from "../../packages/adapters/storage/database.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
-import { BuilderService } from "../../packages/application/builder-service.ts";
 import { ExportService } from "../../packages/application/export-service.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
 import { VectorService } from "../../packages/application/vector-service.ts";
 import { readAudit } from "../../packages/application/audit.ts";
 import type { EvidenceFactsPort } from "../../packages/application/ports.ts";
 import type { Actor } from "../../packages/application/actor.ts";
-import type { ArtifactRow, JobRow, LeaseRow } from "../../packages/application/ports.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
 import type { Result } from "../../packages/domain/result.ts";
 import { exportManifestSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
-import { hex, seedBlueprintForGeneration } from "../support/blueprint-seed.ts";
+import { hex } from "../support/blueprint-seed.ts";
+import { seedVerifiedScenario, type VerifiedOverrides } from "../support/verification-seed.ts";
 
 // Export packages against real storage (DESIGN §10, §11, §8 / PRD F11, issue #22).
 //
@@ -45,8 +43,6 @@ const LIMITS = { maxDepth: 24, maxCodeUnits: 200_000 };
 const ZIP_LIMITS = { maxEntries: 16, maxUncompressedBytes: 8_000_000, maxArchiveBytes: 9_000_000 };
 const reviewer: Actor = { actorId: "local-reviewer", actorKind: "reviewer" };
 const builder: Actor = { actorId: "builder-agent", actorKind: "builder" };
-const COMPARATOR = asDigest("c".repeat(64));
-const RUNNER = asDigest("d".repeat(64));
 
 let root: string;
 let db: DatabaseSync;
@@ -69,50 +65,6 @@ async function failureOf<T>(result: Promise<Result<T, GateFailure>>): Promise<Ga
   return settled.error;
 }
 
-function insertJob(id: Id, kind: JobRow["kind"], state: JobRow["state"], cleanupState: JobRow["cleanupState"], deadlineAt: Instant | null = null): void {
-  const created = nowInstant();
-  const outcome = writer.transact((tx) => {
-    const inserted = tx.insertJob({
-      id,
-      projectId,
-      targetId,
-      kind,
-      state,
-      cleanupState,
-      inputJson: {},
-      resultRef: null,
-      errorJson: null,
-      idempotencyKey: `${kind}-${id}`,
-      requestDigest: asDigest(hex(`${kind}-request-${id}`)),
-      deadlineAt,
-      retryAt: null,
-      createdAt: created,
-      updatedAt: created,
-    });
-    if (inserted.outcome !== "inserted") throw new Error(`job ${inserted.outcome}`);
-    return true;
-  });
-  if (!outcome.ok) throw new Error(JSON.stringify(outcome.error));
-}
-
-function insertLease(jobId: Id, cleanupState: LeaseRow["cleanupState"]): void {
-  const outcome = writer.transact((tx) => {
-    tx.insertLease({
-      id: newId(),
-      jobId,
-      kind: "har-staging",
-      resourceIdentityJson: { storageKey: `projects/${projectId}/staging/x` },
-      ownershipProofJson: { mintedBy: "verify-runner", jobId },
-      cleanupState,
-      lastErrorJson: null,
-      retryAt: null,
-      retryCount: 0,
-    });
-    return true;
-  });
-  if (!outcome.ok) throw new Error(JSON.stringify(outcome.error));
-}
-
 type Scenario = {
   blueprintId: Id;
   candidateId: Id;
@@ -125,101 +77,18 @@ type Scenario = {
 // A verification row plus the report artifact it claims, agreeing field for field, so
 // `VerificationService.read` finds nothing to complain about and the gate's decision is
 // the one under test rather than an artefact of the fixture.
-async function seedVerified(name: string, overrides: { result?: "PASS" | "FAIL" | "UNKNOWN"; cleanupState?: JobRow["cleanupState"]; leaseState?: LeaseRow["cleanupState"] } = {}): Promise<Scenario> {
-  const seeded = await seedBlueprintForGeneration({ writer, store, projectId, targetId, name });
-  const buildJob = newId();
-  insertJob(buildJob, "build", "running", "pending");
-  const commit = unwrap(
-    await new BuilderService({ storage: writer, artifacts: store, limits: LIMITS }).generate(
-      projectId,
-      builder,
-      seeded.blueprintId,
-      { budget: { maxAttemptsPerBlueprint: 3, deadlineAt: null }, generator: { model: "test-agent" }, jobId: buildJob },
-    ),
-  );
-
-  const verifyJob = newId();
-  insertJob(verifyJob, "verify", "succeeded", overrides.cleanupState ?? "complete");
-  insertLease(verifyJob, overrides.leaseState ?? "complete");
-
-  const planned = writer.transact((tx) => tx.getPlan(projectId, seeded.planId));
-  if (!planned.ok || planned.value === null) throw new Error("the seeded plan row vanished");
-  const plan = planned.value;
-  const vectorSetDigest = vectorSetDigestOf([], LIMITS);
-  const reportArtifactId = newId();
-  const verificationId = newId();
-  const identities = {
-    snapshotDigest: plan.snapshotDigest,
-    blueprintDigest: seeded.digest,
-    candidateDigest: commit.digest,
-    vectorSetDigest,
-    planDigest: plan.digest,
-    inventoryDigest: plan.inventoryDigest,
-    comparatorDigest: COMPARATOR,
-    runnerImageDigest: RUNNER,
-  };
-  const content = {
-    id: verificationId,
-    candidateId: commit.candidateId,
-    result: overrides.result ?? "PASS",
-    currentness: "current",
-    scope: ["getCart"],
-    identities,
-    counts: { total: 1, passed: 1, failed: 0, blocked: 0, skipped: 0 },
-    inventoryCounts: { total: 1, selected: 1, excluded: 0, blocked: 0 },
-    excludedVectors: [],
-    outcomes: [],
-    limitations: ["no retry semantics observed"],
-  };
-  const reportJson = { ...content, digest: asDigest(hex(`report-${name}`)) };
-  // Stored with a key order and formatting a re-serialization would not reproduce, so a
-  // package that copies the published bytes is distinguishable from one that rebuilds them
-  // from the parsed report (§10: a published report never changes).
-  const { digest: reportDigest, ...reportRest } = reportJson;
-  const bytes = new TextEncoder().encode(JSON.stringify({ digest: reportDigest, ...reportRest }, null, 1));
-  const published = await store.publish(projectId, "report", bytes);
-  if (!published.ok) throw new Error(JSON.stringify(published.error));
-  const created = nowInstant();
-  const inserted = writer.transact((tx) => {
-    tx.insertArtifact({
-      id: reportArtifactId,
-      projectId,
-      jobId: verifyJob,
-      class: "report",
-      sha256: published.value.sha256,
-      digestReason: null,
-      byteLength: published.value.byteLength,
-      storageKey: published.value.storageKey,
-      mediaType: "application/json",
-      createdAt: created,
-    } satisfies ArtifactRow);
-    tx.insertVerification({
-      id: verificationId,
-      projectId,
-      candidateId: commit.candidateId,
-      jobId: verifyJob,
-      planId: plan.id,
-      planDigest: plan.digest,
-      inventoryDigest: plan.inventoryDigest,
-      blueprintDigest: seeded.digest,
-      vectorSetDigest,
-      comparatorDigest: COMPARATOR,
-      runnerImageDigest: RUNNER,
-      result: reportJson.result,
-      currentness: "current",
-      summaryJson: { counts: reportJson.counts },
-      reportArtifactId,
-    });
-    return true;
-  });
-  if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+// The chain comes from the shared fixture (tests/support/verification-seed.ts): the candidate is
+// generated by the real `BuilderService` and the report row agrees with its artifact field for
+// field, so what is under test here is the delivery gate rather than the shape of a fixture.
+async function seedVerified(name: string, overrides: VerifiedOverrides = {}): Promise<Scenario> {
+  const seeded = await seedVerifiedScenario({ writer, store, projectId, targetId, name, builderActor: builder, overrides });
   return {
     blueprintId: seeded.blueprintId,
-    candidateId: commit.candidateId,
-    candidateDigest: commit.digest,
-    verificationId,
-    reportBytes: bytes,
-    reportArtifactId,
+    candidateId: seeded.candidateId,
+    candidateDigest: seeded.candidateDigest,
+    verificationId: seeded.verificationId,
+    reportBytes: seeded.reportBytes,
+    reportArtifactId: seeded.reportArtifactId,
   };
 }
 

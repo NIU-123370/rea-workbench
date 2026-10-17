@@ -18,7 +18,8 @@ import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
 import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/audit.ts";
 import { vectorCommitReceiptSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
-import { contractCommitReceiptSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
+import { contractCommitReceiptSchema, contractRevisionSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
+import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
 import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal, MAX_IDEMPOTENCY_KEY_LENGTH } from "../../packages/application/idempotency.ts";
@@ -30,6 +31,7 @@ import type { Id } from "../../packages/domain/identity.ts";
 import { asDigest } from "../../packages/domain/canonical-json.ts";
 import { hex } from "../support/blueprint-seed.ts";
 import { seedReviewChain } from "../support/review-chain.ts";
+import { seedVerifiedScenario } from "../support/verification-seed.ts";
 
 // The session, CSRF/idempotency and SSE contracts of the local HTTP API, over a real
 // loopback server, a real worker process object and a real Unix socket to a real
@@ -1043,7 +1045,7 @@ describe("the §8 read routes (issue #58)", () => {
     return call("GET", pathname, { headers: { host: `127.0.0.1:${String(address.port)}`, cookie } });
   }
 
-  it("mounts exactly the five documented reads and refuses each one unpaired", async () => {
+  it("mounts exactly the seven documented reads and refuses each one unpaired", async () => {
     const id = newId();
     for (const pathname of [
       `${API_PREFIX}/projects/${id}`,
@@ -1051,6 +1053,8 @@ describe("the §8 read routes (issue #58)", () => {
       `${API_PREFIX}/projects/${id}/evidence/${"ev_" + "1".repeat(64)}`,
       `${API_PREFIX}/projects/${id}/vectors/${id}`,
       `${API_PREFIX}/projects/${id}/verification-plans/${id}`,
+      `${API_PREFIX}/projects/${id}/contracts/${id}`,
+      `${API_PREFIX}/projects/${id}/verifications/${id}`,
     ]) {
       const anonymous = await call("GET", pathname);
       expect(`${pathname}:${String(anonymous.status)}`).toContain("401");
@@ -2437,5 +2441,73 @@ describe("the three creation doors (§8 lines 282, 286, 289 / issue #58)", () =>
     const details = (JSON.parse(stale.text) as { error: { details: Record<string, unknown> } }).error.details;
     expect(details["expected"]).toBe(live.value.inventoryRevision + 40);
     expect(details["actual"]).toBe(live.value.inventoryRevision);
+  });
+
+  it("reads a stored contract revision back over HTTP (§8 line 288)", async () => {
+    const fix = await seeded("door-contract-read");
+    const path = `${API_PREFIX}/projects/${String(fix.projectId)}/contracts/${String(fix.seeded.contractId)}`;
+    const read = await call("GET", path, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(read.status, read.text).toBe(200);
+    const revision = contractRevisionSchema.safeParse(JSON.parse(read.text) as JsonValue);
+    if (!revision.success) throw new Error(`${JSON.stringify(revision.error.issues)}\n${read.text}`);
+    // The row the fixture wrote, not a re-derivation: the digest is the same one the review door
+    // has to be given, so a page can read a contract and then decide on it without a second
+    // source of truth.
+    expect(revision.data.id).toBe(fix.seeded.contractId);
+    expect(revision.data.digest).toBe(fix.seeded.contractDigest);
+    // The status lives under `review`, the same shape the inventory summary uses - reading a flat
+    // `reviewStatus` off this body is the mistake that made the 样本 tab render an empty list
+    // while every test stayed green (issue #58's browser pass).
+    expect(revision.data.review.status).toBe("draft");
+
+    // A segment that is not an id is refused here rather than looked up: "you typed it wrong"
+    // must not arrive as "there is no such contract" (the same rule the candidate and evidence
+    // reads use, and the one a mutation taught me to prefer).
+    const malformed = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/contracts/not-an-id`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(malformed.status, malformed.text).toBe(400);
+    expect((JSON.parse(malformed.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("contract-id-malformed");
+
+    const unknown = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/contracts/${String(newId())}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(unknown.status, unknown.text).toBe(404);
+    // Another project's real contract answers identically: the route cannot be used to find out
+    // whether an id exists somewhere else.
+    const other = await seeded("door-contract-other");
+    // Another project's real contract answers identically: the route cannot be used to find out
+    // whether an id exists somewhere else. `requestId` is per-request, so the comparison is of
+    // everything the answer *claims*.
+    const claim = (text: string) => {
+      const error = (JSON.parse(text) as { error: Record<string, unknown> }).error;
+      // What the answer asserts, leaving out only the per-request id every response carries.
+      return JSON.stringify({ code: error["code"], message: error["message"], retryable: error["retryable"], details: error["details"] });
+    };
+    const crossProject = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/contracts/${String(other.seeded.contractId)}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(crossProject.status, crossProject.text).toBe(404);
+    expect(claim(crossProject.text)).toBe(claim(unknown.text));
+  });
+
+  it("reads a stored verification report as the body §8 names (§8 line 298)", async () => {
+    const fix = await seeded("door-verification-read");
+    const verified = await seedVerifiedScenario({
+      writer: worker.writeConnection,
+      store: new ArtifactStore(dataDir),
+      projectId: fix.projectId,
+      targetId: fix.seeded.targetId,
+      name: "door-verification-read",
+    });
+    const read = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/verifications/${String(verified.verificationId)}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(read.status, read.text).toBe(200);
+    const report = verificationReportSchema.safeParse(JSON.parse(read.text) as JsonValue);
+    if (!report.success) throw new Error(`${JSON.stringify(report.error.issues)}\n${read.text}`);
+    expect(report.data.id).toBe(verified.verificationId);
+    expect(report.data.identities.candidateDigest).toBe(verified.candidateDigest);
+    // The service also re-derives staleness for its own callers; §8 names the report as this
+    // route's body, so nothing beside it may leak into the reply.
+    expect(Object.keys(JSON.parse(read.text) as Record<string, unknown>)).not.toContain("staleness");
+
+    const malformed = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/verifications/not-an-id`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(malformed.status, malformed.text).toBe(400);
+    expect((JSON.parse(malformed.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("verification-id-malformed");
+    const unknown = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/verifications/${String(newId())}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(unknown.status, unknown.text).toBe(404);
   });
 });

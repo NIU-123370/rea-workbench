@@ -7,7 +7,8 @@ import {
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createdProjectSchema, evidenceViewSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
-import { contractCommitReceiptSchema, contractDraftRequestSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
@@ -113,6 +114,12 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/vectors/:vectorId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/verification-plans/:planId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  // The contract and the report reads (§8 lines 288 and 298). Both services have owned their
+  // rules for a while — including the refusal that keeps a Builder out of the control-plane
+  // contract and out of a report's case list — but with no door those rules existed only where
+  // a test asked for them (issue #58).
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/contracts/:contractId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "GET", template: `${API_PREFIX}/projects/:projectId/verifications/:verificationId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // The three review writes (§8 lines 285, 287, 291). Session-bound and mutating, and - unlike
   // the creations §8 line 261 lists - they take no Idempotency-Key: a review carries its own
   // conflict token (the digest it looked at, and for the inventory-bound two the revision they
@@ -928,6 +935,44 @@ async function readPlan(ctx: Context, deps: ApiDependencies): Promise<ApiRespons
   return jsonSuccess(ctx.requestId, 200, plan.value);
 }
 
+// §8 line 288: the stored contract revision, which is what the right-hand panel needs to
+// re-open a contract it named by id. The reply is projected through the same schema the review
+// door answers with, so one stored row cannot be described two different ways.
+async function readContract(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const contractId = pathId(ctx, "contractId");
+  if (projectId === null) return unknownProject(ctx);
+  if (contractId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "contract-id-malformed", "the contract segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("contract.read", { projectId, contractId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const revision = parseStrict(contractRevisionSchema, outcome.value);
+  if (!revision.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "contract-shape", "the worker did not answer with a contract revision", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, revision.value);
+}
+
+// §8 line 298 names the body as the VerificationReport, so the staleness the service re-derives
+// for its own callers stays behind this hop: what leaves is the stored claim, re-hashed and
+// re-parsed by the service, not a second opinion about whether it still holds.
+async function readVerification(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const verificationId = pathId(ctx, "verificationId");
+  if (projectId === null) return unknownProject(ctx);
+  if (verificationId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "verification-id-malformed", "the verification segment of the path is not an opaque id", ctx.declaration);
+  }
+  const outcome = await deps.worker.call("verification.read", { projectId, verificationId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const report = parseStrict(verificationReportSchema, jsonRecord(outcome.value)["report"] ?? null);
+  if (!report.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "verification-shape", "the worker did not answer with a verification report", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 200, report.value);
+}
+
 async function readGraph(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
@@ -1235,6 +1280,10 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await readVector(ctx, deps);
     } else if (route.method === "GET" && route.template.endsWith("/verification-plans/:planId")) {
       response = await readPlan(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/contracts/:contractId")) {
+      response = await readContract(ctx, deps);
+    } else if (route.method === "GET" && route.template.endsWith("/verifications/:verificationId")) {
+      response = await readVerification(ctx, deps);
     } else if (route.template.endsWith("/events")) {
       response = await streamEvents(ctx, deps);
     } else {

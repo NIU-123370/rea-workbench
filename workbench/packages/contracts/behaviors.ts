@@ -135,12 +135,11 @@ export const planReviewHttpRequestSchema = z.strictObject({
 });
 
 // The receipts are what these commands answer: the commit each service makes about one row, so
-// the create door and the review door share a shape instead of inventing two. Not the record
-// itself - §8's third column names the full record, and no command on the closed surface returns
-// one for a contract (`contract.*` has no read), so this says what the command proved. §8's third column says "200 ContractRevision" and
-// "200 VerificationPlan", and no command on the closed surface returns those bodies -
-// `contract.*` and `plan.*` have no read. Saying so from a named schema is the honest version
-// of a reply that would otherwise be a dump of whatever the service happened to build.
+// the create door and the review door share a shape instead of inventing two. They are *not* the
+// record - §8's third column names the full record for the read routes, and those have their own
+// bodies (`contractRevisionSchema`, `verificationPlanSchema`, reached through `contract.read` and
+// `plan.read`). Naming the receipt separately is what keeps a creation from being read as if it
+// had answered a question it was never asked.
 export const contractCommitReceiptSchema = z.strictObject({
   contractId: idSchema,
   contractKey: nonEmptyString,

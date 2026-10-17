@@ -140,7 +140,7 @@ export class ExportService {
     // succeeded job.
     const cleanupState = worstCleanup(loaded.job?.cleanupState ?? "pending", loaded.lease?.cleanupState ?? "complete");
 
-    const viewed = bound ? await this.verification.read(projectId, verification.id) : null;
+    const viewed = bound ? await this.verification.read(projectId, actor, verification.id) : null;
     if (viewed !== null && !viewed.ok) return viewed;
     const report = viewed?.value.report ?? null;
     const staleness = viewed?.value.staleness ?? [];
@@ -362,7 +362,7 @@ export class ExportService {
       if (record.verificationId === null) {
         return gateFail("STALE_INPUT", "verified-samples-blocked:no-verification-bound", "a verified-samples export lost its verification id");
       }
-      const viewed = await this.verification.read(projectId, record.verificationId);
+      const viewed = await this.verification.read(projectId, actor, record.verificationId);
       if (!viewed.ok) return viewed;
       // The row, not the report body, owns the job whose cleanup state decides delivery (§11).
       const cleanup = await this.cleanupStateOf(projectId, record.verificationId);
