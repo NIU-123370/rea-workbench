@@ -356,6 +356,10 @@ const FALLBACK_PROFILE: ProfileWire = {
     maxExpandedBytes: 1,
     queueWaitMs: 1,
     timeoutMs: 1,
+    // Same placeholder convention as the seven numbers above: this object is only ever attached to
+    // an entry created with `available: false`, so `availableFor` refuses it and no runtime path
+    // reads a limit out of it. It is the shape the type asks for, not a budget anyone may spend.
+    maxGenerationAttempts: 1,
   },
   networkPolicyId: "unreadable",
 };

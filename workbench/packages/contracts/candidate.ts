@@ -1,29 +1,27 @@
 import { z } from "zod";
 
 import { apiErrorSchema } from "./errors.ts";
-import { digestSchema, idSchema, instantSchema, jsonObjectSchema, nonEmptyString } from "./primitives.ts";
+import { digestSchema, idSchema, instantSchema, nonEmptyString } from "./primitives.ts";
 
-// Candidate generation wire (DESIGN §7.3, §10 / PRD F08 A07, issue #19).
+// Candidate generation wire (DESIGN §7.3, §8 line 294, §10 / PRD F08 A07, issues #19 and #57).
 //
-// The request names a blueprint and a job and nothing else: there is no target id, no
-// vector id and no artifact key in this shape, so the Builder's only input is the
-// frozen handoff. The reply repeats the digests the worker computed — a client cannot
-// claim a candidate identity the store did not write.
+// §8's row for this door says the body is `{blueprintId, deadlineAt?}` and the answer is a
+// `202 JobRecord`, and that is the whole shape: the request names the frozen handoff and, at most,
+// a deadline. It does not name a job, a budget or a generator, because each of those is a fact the
+// worker owns — §11's recovery, §12.2's decision journal and §8's idempotency key are all written
+// against "the worker created this job", so a client that supplied an id would be handing the
+// request a fact it is not allowed to decide (that was `issue #57`'s complaint about
+// `candidate.generate`, whose client-minted `jobId` is gone with this shape).
+//
+// The reply is `jobRecordSchema` itself, not a candidate summary: §10 says a request creates work
+// and never a verdict, so at the moment this answers, no candidate exists yet.
 
-export const candidateBudgetSchema = z.strictObject({
-  // §7.3 says an explicit count/time budget exists and that the loop stops when it is
-  // spent, and gives no number. So none is invented here: the caller states both
-  // bounds per request, and a spent count is a refusal rather than one more attempt.
-  maxAttemptsPerBlueprint: z.int().min(1),
-  deadlineAt: instantSchema.nullable(),
-});
-
-export const candidateGenerateRequestSchema = z.strictObject({
+export const candidateRequestSchema = z.strictObject({
   blueprintId: idSchema,
-  jobId: idSchema,
-  budget: candidateBudgetSchema,
-  generator: jsonObjectSchema,
+  deadlineAt: instantSchema.nullable().optional(),
 });
+
+export type CandidateRequestWire = z.infer<typeof candidateRequestSchema>;
 
 export const candidateFileSchema = z.strictObject({
   path: nonEmptyString,
@@ -42,8 +40,6 @@ export const candidateCommitSchema = z.strictObject({
 
 export const candidateFailureSchema = apiErrorSchema;
 
-export type CandidateBudgetWire = z.infer<typeof candidateBudgetSchema>;
-export type CandidateGenerateRequestWire = z.infer<typeof candidateGenerateRequestSchema>;
 export type CandidateFileWire = z.infer<typeof candidateFileSchema>;
 export type CandidateCommitWire = z.infer<typeof candidateCommitSchema>;
 

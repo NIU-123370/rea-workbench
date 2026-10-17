@@ -61,6 +61,7 @@ function profileJson(overrides: Record<string, JsonValue> = {}): JsonValue {
       maxExpandedBytes: 67108864,
       queueWaitMs: 30000,
       timeoutMs: 120000,
+      maxGenerationAttempts: 3,
     },
     networkPolicyId: "deny-egress",
     ...overrides,
@@ -224,6 +225,22 @@ describe("ProfileRegistry (§14)", () => {
     const entry = registry.get("har-capture");
     expect(entry?.available).toBe(true);
     expect(entry?.unavailableReasons).toEqual([]);
+  });
+
+  // §14's "the profile is the only source of a resource number", tested at the field generation
+  // depends on: a profile that does not state its attempt budget reads as unreadable rather than
+  // being handed a default. The reason names the missing path, so an operator sees which number the
+  // file lacks without opening the schema, and `availableFor` - the only door the generation path
+  // uses - refuses it (issue #57).
+  it("refuses to invent a generation budget a profile did not state", () => {
+    const declared = profileJson() as Record<string, JsonValue>;
+    const limits = { ...(declared["limits"] as Record<string, JsonValue>) };
+    delete limits["maxGenerationAttempts"];
+    const registry = new ProfileRegistry([{ label: "har-capture", json: { ...declared, limits } }], linuxHost);
+    const entry = registry.get("unreadable:har-capture");
+    expect(entry?.available).toBe(false);
+    expect(entry?.unavailableReasons.join()).toContain("limits.maxGenerationAttempts");
+    expect(registry.availableFor("har-capture").ok).toBe(false);
   });
 
   it("refuses to call a profile available on a host that cannot enforce the sandbox", () => {

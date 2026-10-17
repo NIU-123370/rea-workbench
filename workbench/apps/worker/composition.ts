@@ -15,9 +15,9 @@ import { fileURLToPath } from "node:url";
 
 import { asDigest } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
-import { asId, asInstant, newId, nowInstant } from "../../packages/domain/identity.ts";
+import { asId, newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id, Instant } from "../../packages/domain/identity.ts";
-import type { JsonValue } from "../../packages/domain/json-value.ts";
+import type { JsonObject, JsonValue } from "../../packages/domain/json-value.ts";
 import type { Result } from "../../packages/domain/result.ts";
 
 import { BOOT_CONFIG_FIELDS, WORKER_RPC_SOCKET_NAME } from "../../packages/contracts/boot.ts";
@@ -52,6 +52,8 @@ import { JobReadService } from "../../packages/application/job-read.ts";
 import { AuditReadService } from "../../packages/application/audit-read.ts";
 import { HarIngestionService } from "../../packages/application/har-ingestion.ts";
 import { VerificationService } from "../../packages/application/verification-service.ts";
+import { createJobRunner } from "../../packages/application/job-runner.ts";
+import type { RunnerOutcome } from "../../packages/application/job-runner.ts";
 
 import { acquireWorkerLock, applyMigrations, openWriteConnection, planMigrations } from "../../packages/adapters/storage/database.ts";
 import { ArtifactStore } from "../../packages/adapters/storage/artifacts.ts";
@@ -61,7 +63,6 @@ import { ReaSession } from "../../packages/adapters/rea/session.ts";
 import { ReaCaptureInspector } from "../../packages/adapters/rea/capture-inspection.ts";
 import { WebCaptureEvidenceFacts } from "../../packages/adapters/rea/web-capture-records.ts";
 import { createProjectRequestSchema, projectListQuerySchema } from "../../packages/contracts/resources.ts";
-import { candidateGenerateRequestSchema } from "../../packages/contracts/candidate.ts";
 import { exportCreateRequestSchema, exportReadRequestSchema } from "../../packages/contracts/export.ts";
 import { graphReadRequestSchema } from "../../packages/contracts/graph.ts";
 import { jobListRequestSchema } from "../../packages/contracts/jobs.ts";
@@ -153,10 +154,12 @@ export const COMMAND_NAMES = [
   // Builder; this is the control-plane door over that one body, with the plan id added for the
   // roles §8 names - and still no way to reach the source manifest or the holdout list.
   "blueprint.read",
-  // The Builder's own operation (§7.3, §10 / issue #19). It is a command like any
-  // other, so the actor kind arrives on the frame and the service — not this table —
-  // decides whether that kind may generate.
-  "candidate.generate",
+  // The Builder's own operation (§7.3, §10 / issue #19), asked for as work (§8 line 294 /
+  // issue #57): the door enqueues a build job and the worker's runner is what executes it. There is
+  // no `candidate.generate` command any more - it took a `jobId` and a budget from the caller, which
+  // made the client the owner of a row §11's recovery and §12.2's journal both assume the worker
+  // created.
+  "candidate.request",
   // Delivery (§8 lines 299-300 / issue #22). The ZIP leaves through a named command that
   // re-runs the verified-samples gate; there is no path output parameter anywhere in it.
   "export.create",
@@ -225,6 +228,11 @@ export type WorkerHandle = {
   dispatch: (name: string, payload: JsonValue, actor: Actor) => Promise<CommandOutcome>;
   doctor: () => Promise<DoctorReport>;
   recovery: () => Result<RecoveryReport, GateFailure>;
+  // One turn of the job runner (§11 / issue #57). It is on the handle rather than behind a command
+  // because nothing may *ask* the worker to run a job: the queue is the worker's, the doors that
+  // filled it are the only client-facing surface, and `apps/worker/main.ts` is what pumps this on a
+  // timer. A test that wants a deterministic turn calls it directly.
+  runJobs: () => Promise<Result<RunnerOutcome, GateFailure>>;
   // The one-time pairing code this start command minted (§14). It is reachable only
   // from the local process: there is no command that asks the worker for a code, so
   // a web request cannot mint one, and `mintPairingCode` is how the operator asks for
@@ -526,6 +534,50 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     };
   }
 
+  // The two profile facts generation needs. `get` rather than `availableFor` is the deliberate part:
+  // `available` answers "can this host enforce the sandbox", which the doctor reports and the Builder
+  // child's seccomp profile decides — it is not a statement about the numbers in the file. Requiring
+  // it here would make generation impossible on every host that is not verified Linux x64, which is a
+  // claim §7.3 does not make. What is still refused is the thing §14 cares about: a profile that did
+  // not parse has no numbers, and no number is invented in its place (§7.3, §10, issue #57).
+  function generationContext(): Result<{ queueWaitMs: number; maxGenerationAttempts: number }, GateFailure> {
+    if (config.modelEndpoint === null) {
+      return gateFail(
+        "CAPABILITY_UNAVAILABLE",
+        "generation-endpoint-not-configured",
+        "generation is off while no model endpoint is declared (§3: 缺省即关闭，不回落到隐式端点)",
+      );
+    }
+    const entry = profiles.get(config.sandboxProfile);
+    if (entry === null) {
+      return gateFail("CAPABILITY_UNAVAILABLE", "generation-budget-unknown", "no profile is installed under the name that carries the generation budget");
+    }
+    return { ok: true, value: { queueWaitMs: entry.profile.limits.queueWaitMs, maxGenerationAttempts: entry.profile.limits.maxGenerationAttempts } };
+  }
+
+  // The identity the runner generates under (§7.3: only the Builder role may). It is minted here and
+  // reachable from nowhere else - no frame, no row, no response. `generatorJson` on the candidate is
+  // the same story in the other direction: it names who ran, and a model endpoint or a host path
+  // would be a §12.1 leak into a row other roles read (§12.1: 记名字不记值).
+  const runnerActor: Actor = { actorId: "worker-job-runner", actorKind: "builder" };
+  const runnerGenerator: JsonObject = { mintedBy: "job-runner", profileId: config.sandboxProfile };
+  const jobRunner = createJobRunner({
+    storage: writer,
+    // The same bounded worker-wide scan recovery uses: both ask "what is in the queue" without a
+    // project id to narrow by, and a second limit number here would be a second thing to measure.
+    scanLimit: RECOVERY_SCAN_LIMIT,
+    now: nowInstant,
+    builds: {
+      actor: runnerActor,
+      generator: runnerGenerator,
+      budget: () => {
+        const context = generationContext();
+        return context.ok ? { ok: true, value: context.value.maxGenerationAttempts } : { ok: false, error: [context.error.reason] };
+      },
+      generate: (projectId, actor, blueprintId, input) => builder.generate(projectId, actor, blueprintId, input),
+    },
+  });
+
   const handlers: Record<CommandName, (payload: JsonValue, actor: Actor) => Promise<CommandOutcome> | CommandOutcome> = {
     "project.create": (payload) => {
       const parsed = createProjectRequestSchema.safeParse(payload);
@@ -798,23 +850,21 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       if (refused !== null) return refused;
       return relay(await blueprints.readSourceManifest(projectIdOr(payload), actor, blueprintId as Id));
     },
-    "candidate.generate": async (payload, actor) => {
-      // The command carries a blueprint id, a job id and a budget — nothing else. A
-      // request that tried to name a vector, a target or an artifact key would be
-      // refused by the strict schema before the Builder saw it (§7.3: the handoff is
-      // the whole input). `projectId` stays outside the DTO, as with the other
-      // service-backed commands, because it selects the owner rather than the input.
-      const parsed = candidateGenerateRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
-      if (!parsed.success) return gateFail("INVALID_INPUT", "candidate-generate", "the generation request was rejected");
-      const deadline = parsed.data.budget.deadlineAt;
+    // §8 line 294 with issue #57's shape: the request names a blueprint and at most a deadline, the
+    // key is required (§8 line 261's creation list), and the answer is the job row this call wrote.
+    // The two profile facts it needs - the queue wait and the attempt budget - are read through
+    // `availableFor`, so an unavailable profile is a named refusal here rather than a job that runs
+    // uncapped or a number this file invented. The same `generationContext` backs the runner.
+    "candidate.request": (payload, actor) => {
+      const key = pickString(payload, "idempotencyKey");
+      if (key === null || !isIdempotencyKey(key)) {
+        return gateFail("INVALID_INPUT", "idempotency-key-required", "a generation request carries an Idempotency-Key (§8 line 261)");
+      }
+      const context = generationContext();
+      if (!context.ok) return context;
       return relay(
-        await builder.generate(projectIdOr(payload), actor, asId(parsed.data.blueprintId), {
-          budget: {
-            maxAttemptsPerBlueprint: parsed.data.budget.maxAttemptsPerBlueprint,
-            deadlineAt: deadline === null ? null : asInstant(deadline),
-          },
-          generator: parsed.data.generator,
-          jobId: asId(parsed.data.jobId),
+        builder.request(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {}, key, {
+          queueWaitMs: context.value.queueWaitMs,
         }),
       );
     },
@@ -1081,6 +1131,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       },
       doctor: doctorReport,
       recovery,
+      runJobs: () => jobRunner.runOnce(),
       pairingCode: () => currentPairing,
       mintPairingCode: () => {
         currentPairing = bootstraps.mint(Date.now(), request.bootstrapTtlMs ?? undefined);

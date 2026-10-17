@@ -49,6 +49,13 @@ function readJson(target: string): Record<string, string | undefined> {
   return defaults;
 }
 
+// How often the job runner looks at the queue. This is a latency choice of this process, not a
+// resource limit: §14's "measure it into the profile" rule covers the numbers that decide whether
+// work may run (the queue wait and the attempt budget), and both reach the runner through the
+// profile. Nothing is scheduled per second here, so a restart cannot lose a job by missing a beat -
+// the queue is a table, and the next turn reads whatever is in it.
+const RUNNER_POLL_MS = 250;
+
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const terminal = new Terminal(stdoutSink(process.stdout));
   const flags = argv.filter((entry) => entry.startsWith("--"));
@@ -97,13 +104,50 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     `code=${pairing.token} url=http://${worker.config.host}:${String(worker.config.port)} expires=${pairing.expiresAt}`,
   );
 
+  // §11's executor half, now that a `queued` row has someone to pick it up (issue #57): the doors
+  // create work, this loop runs it. One job per turn and only after the previous turn settled - a
+  // Builder child holds role staging, and two of them in the same directory is a race §5's
+  // per-(project,class) promise does not cover.
+  //
+  // `RUNNER_POLL_MS` is a scheduler tick, not a resource limit: §14's "measure it into the profile"
+  // rule is about the numbers that decide whether work may run (the queue wait, the attempt budget),
+  // and both of those come from the profile through `generationContext`. How often the worker looks
+  // is a latency choice of this process, and it is written where the operator can see it.
+  let stopPump = false;
+  const pump = async (): Promise<void> => {
+    while (!stopPump) {
+      const turn = await worker.runJobs();
+      if (!turn.ok) {
+        terminal.print("runner", `error=${turn.error.reason}`);
+      } else {
+        // One line per non-idle turn. A terminal reading that names the job and what became of it
+        // is what the restart tests and an operator's `tail -f` both read, so the shape is stated
+        // per kind rather than assembled from optional fields.
+        const outcome = turn.value;
+        if (outcome.kind === "succeeded") {
+          terminal.print("runner", `succeeded job=${outcome.jobId} candidate=${outcome.candidateId} attempt=${String(outcome.attempt)}`);
+        } else if (outcome.kind === "cancelled") {
+          terminal.print("runner", `cancelled job=${outcome.jobId}`);
+        } else if (outcome.kind !== "idle") {
+          terminal.print("runner", `${outcome.kind} job=${outcome.jobId} reason=${outcome.reason}`);
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, RUNNER_POLL_MS));
+    }
+  };
+  const pumping = pump();
+
   await new Promise<void>((resolve) => {
     const stop = (): void => {
+      stopPump = true;
       resolve();
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
+  // The turn in flight gets to settle: a job cut off between claim and settle would come back as
+  // `interrupted`, which is true but slower to read than the answer the work already produced.
+  await pumping;
   await started.value.close();
   await worker.shutdown();
   terminal.print("worker", "stopped");

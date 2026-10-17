@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TargetService } from "../../packages/application/target-service.ts";
+import { projectJobRecord } from "../../packages/application/job-queue.ts";
+import { apiErrorSchema } from "../../packages/contracts/errors.ts";
 
 import { digestBytes } from "../../packages/domain/canonical-json.ts";
 import { asDigest } from "../../packages/domain/canonical-json.ts";
@@ -476,6 +478,21 @@ describe("the inspect job preserves what the producer recorded (DESIGN §7.1, §
     expect(constrainedSession.pendingPersistence).toEqual([`ev_${"b".repeat(64)}`]);
     const journal = unwrapStorage(readAudit(writer, { after: 0, projectId: otherProjectId, limit: 50 }));
     expect(journal.some((entry) => entry.reasonCode === "resource-constraint-reference-retained" && entry.decision === "deny")).toBe(true);
+
+    // The stopped row has to survive the read-back: `JobRecord.error` is an ApiError by contract, and
+    // a shape only this service knows would not read as "one failed job" - it would make every page of
+    // that project's jobs refuse to parse (issue #57's third condition, §12.1).
+    const stopped = unwrapStorage(writer.transact((tx) => tx.getJob(otherProjectId, asId(staged.job.id))));
+    if (stopped === null) throw new Error("the stopped row is not in the store");
+    const record = projectJobRecord(stopped, []);
+    expect(record.state).toBe("failed");
+    expect(record.error).not.toBeNull();
+    if (record.error === null) return;
+    expect(apiErrorSchema.safeParse(record.error).success).toBe(true);
+    expect(record.error.code).toBe("RESOURCE_LIMIT");
+    expect(record.error.message).toBe("resource-constraint-reference-retained");
+    expect(record.error.retryable).toBe(false);
+    expect(record.error.requestId).toBe(stopped.idempotencyKey);
   });
 
   it("reads back the evidence and the import job a captured target owns (§8 line 274)", async () => {

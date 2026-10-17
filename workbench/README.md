@@ -286,12 +286,13 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **37 条**，仍缺 **3 条**——
-`POST /projects/:p/jobs`（275）、`POST /projects/:p/candidates`（294）、
-`GET /projects/:p/jobs/:j/preview`（304）；前两条卡在同一个缺项上（#57 的生成预算与作业发起方），
-preview 卡的是「像素图由隔离 origin 提供」那半边：本 build 里**没有任何东西持有预览帧**
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **38 条**，仍缺 **2 条**——
+`POST /projects/:p/jobs`（275，要的是 `CaptureTask|InspectTask` 的执行者，与 #75 那半边同一空缺）与
+`GET /projects/:p/jobs/:j/preview`（304，卡的是「像素图由隔离 origin 提供」那半边：本 build 里**没有任何东西持有预览帧**
 （`imageUrl`/`actionState` 全仓零命中，`buildLeftPanel` 的 `frameLabels` 没有生产者，
-`artifacts` 的 class 名录里也没有 frame/preview），所以那道门今天能如实答的只有「没有画面」。
+`artifacts` 的 class 名录里也没有 frame/preview），所以那道门今天能如实答的只有「没有画面」）。
+这一轮补上的是 `POST /projects/:p/candidates`（294）——它缺的既不是命令也不是 schema，而是**执行者**：
+以前 `queued` 只是「有人想过」，本仓没有任何东西把队列里的作业跑起来，所以生成只能由脚本同步触发。
 这一轮补的是 `POST /projects/:p/imports`（272），它缺的不是命令而是**transport**：
 `HttpRequest.body` 一直是 `chunk.toString("utf8")` 拼出来的文本，而一个文件部分是任意字节——
 不是合法 UTF-8 的序列在到达门口之前就已经变成替换字符了。现在请求带着
@@ -306,10 +307,24 @@ preview 卡的是「像素图由隔离 origin 提供」那半边：本 build 里
 `method + template` 逐字比（`:p/:v/:j/...` 按上一段名词展开成路由里的那个参数名），
 另外还多出 **1 条**路由是文档表里没有的——`GET /projects/:p/exports`（交付清单），
 它是 #22 交付时补的读门，记在偏离里。
-这 37 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
+这 38 条里最近补上的是 `POST .../candidates`（294）与**worker 自己的作业执行者**（`packages/application/job-runner.ts`）：
+门只写一行 `queued` 的 build 作业并回 202 JobRecord，跑它是进程内那条循环的事——扫队列（只看 `queued`、只认
+`build` 这一类，`verify`/`inspect` 仍然**没有执行者**，那是 #75 与 ASAR 那两条具名空缺，不做假装跑得起来的样子）、
+按 §11 的 `decideStart` 判过期、声明 running、跑完再落 succeeded/failed 并把 candidate id 写进 `resultRef`。
+claim 与 settle 各是一个事务，中间的生成在 SQLite 之外发生（把 `BEGIN IMMEDIATE` 横跨一个 Builder 子进程，
+就是写锁和 RPC 帧超时在抢同一分钟）。§7.3「只有 Builder 能生成」这条因此落在**worker 自己铸的角色身份**上
+（`{actorId:"worker-job-runner", actorKind:"builder"}`，不在任何请求体里、不在任何回包字段里），
+而 `candidate.generate` 那个命令名被取消了：它是这条命令表里唯一一处「客户端造作业 id、服务端照单执行」的地方。
+预算的来源也随之唯一：`profile.limits.maxGenerationAttempts` 是**必填**字段，
+§14 的「资源初值随 profile 锁定」在这里是可测的——一个没写这个数的 profile 直接 unavailable
+（`profile-schema:limits.maxGenerationAttempts`），没装对应 profile 文件的 worker 在门口就 503
+`generation-budget-unknown`，代码里一个数字都不填；`FALLBACK_PROFILE` 里那个 `1` 是七个既有占位数之外的
+第八个同类占位，它只出现在 `available:false` 的条目上，而执行者读的键是 profile 自己的 id，够不到它。
+其余最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
-命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
-现在能由一个配对会话里的 HTTP 请求走完（浏览器实测见下）。每个记录类型只有**一份投影**
+命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图 → 生成**」这条整链
+现在能由一个配对会话里的 HTTP 请求走完（浏览器实测见下；「生成」那一步的**页面按钮**还没有，见下文「还没有的东西」）。
+每个记录类型只有**一份投影**
 （`COMMIT_PROJECTIONS`）：创建门与审阅门回答的是同一行的同一件事，写成两份就是两份会各自漂的清单；
 创建门回 201、审阅门回 200，这是 §8 那一列自己定的。冻结是 §8 line 261 点名的创建动作，所以它带 `Idempotency-Key`。
 顺带把一条**没人读的声明**变成了规则：路由表上的 `requiresIdempotencyKey` 此前无任何消费者，
@@ -679,6 +694,15 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   与配对表单也在了（§8 line 270）；**没有**控件的是 `project.create`、`vector.create`、`plan.build`、
   `blueprint.freeze` 与 HAR 上传——那几扇门在第七轮里是靠页面里的 `fetch` 驱动的，操作员点不到。
   路由与命令都在，缺的是页面这一头（issue #58 的账）。
+- 「造 → 批 → 冻 → **生成**」这条链在 HTTP 上通了，页面上还差最后那一下：`POST /projects/:p/candidates`
+  需要的 `blueprintId` 只能从蓝图冻结的回执里读到，而冻结在页面上仍然没有控件（#58 的待办清单里那条），
+  所以「发起生成」这个按钮现在做出来也点不亮。门与执行者的读数都在 `tests/integration/candidate-generation.test.ts`
+  （13 条）与第七/八轮浏览器实测旁边记着，别按「页面已能生成」读。
+- 作业失败的原因现在**只有一个写者**：`packages/application/job-queue.ts` 的 `jobErrorFromFailure`，
+  执行者与 HAR 导入两处都走它。此前导入那两处写的是 `{code, reason}`——`JobRecord.error` 按 §8 是
+  `ApiError`，于是一个失败行不是「一行失败」，而是让那个项目**每一页作业都读不出来**；本轮由 V17 变异钉住
+  （改回旧形状即红）。§11 里 `interrupted`／从没跑起来的行 `error` 是 null，不是空对象。
+
 - 换 UI 端口要同时换 `WB_UI_ORIGIN`：中继只认它启动时读到的那一个 own origin，浏览器用别的 host 或端口
   打开就拿到 403 `proxy-origin-mismatch`（第八轮那次先被拒、配上变量后同一次点击成功，就是这个形状）。
 
