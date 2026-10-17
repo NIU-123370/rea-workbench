@@ -127,13 +127,26 @@ export function projectJobRecord(job: JobRow, leases: readonly LeaseRow[]): JobR
 // declared name list (§12.1). `requestId` is the idempotency key - the name the request that made
 // this job already carries. A code that is not in §8's table stays reportable as the one name that
 // means "an upstream answer did not fit the contract", rather than inventing a status.
+// §12.1 says every message, detail and log line is filtered by the declaration. `error_json` is
+// built in this one function, and the text it puts in `message` is meant to be a *name* - the
+// GateFailure's reason - never prose and never a value. That intent was only ever asserted by a
+// comment, so the checkable form of it is a shape rule: anything that is not a bare name is
+// replaced by one fixed name rather than persisted. A reason is how an operator finds the code
+// path, so losing it to a substitution costs nothing that the code did not already lose.
+const NAMED_REASON = /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/;
+export const UNSHAPEABLE_REASON = "reason-unshapeable";
+
+function namedReason(reason: string): string {
+  return NAMED_REASON.test(reason) ? reason : UNSHAPEABLE_REASON;
+}
+
 export function jobErrorFromFailure(
   job: JobRow,
   failure: { code: string; reason: string; details?: JsonObject },
 ): JsonValue {
   const code: NamedErrorCode = isNamedErrorCode(failure.code) ? failure.code : "REA_CONTRACT_MISMATCH";
   return makeApiError(code, {
-    message: failure.reason,
+    message: namedReason(failure.reason),
     // The status table is the only owner of "is this worth asking again": a 5xx class is an
     // infrastructure answer that may change, a 4xx will refuse the same way next time.
     retryable: httpStatusFor(code) >= 500,

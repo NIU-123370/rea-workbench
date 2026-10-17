@@ -4,7 +4,9 @@ import {
   cleanupRetryAt,
   computeDeadlineAt,
   decideStart,
+  jobErrorFromFailure,
   projectJobRecord,
+  UNSHAPEABLE_REASON,
   recoveredState,
   requestCancel,
   transition,
@@ -184,5 +186,44 @@ describe("job record projection (DESIGN §8)", () => {
     expect(projectJobRecord(failed, []).error).toEqual(error);
     expect(projectJobRecord(job(), []).error).toBeNull();
     expect(nowInstant()).toMatch(/Z$/);
+  });
+});
+
+describe("the one place jobs.error_json is built (§12.1)", () => {
+  it("keeps a reason that is a bare name, including the qualified spellings", () => {
+    for (const reason of ["resource-constraint-reference-retained", "limits.maxGenerationAttempts", "proxy-path-depth:0"]) {
+      const apiError = jobErrorFromFailure(job(), { code: "RESOURCE_LIMIT", reason }) as {
+        message: string; code: string; retryable: boolean; details: Record<string, unknown>;
+      };
+      expect(apiError.message).toBe(reason);
+      expect(apiError.code).toBe("RESOURCE_LIMIT");
+      // A 4xx must not promise a retry is worth it; the status table is the only owner.
+      expect(apiError.retryable).toBe(false);
+    }
+  });
+
+  it("replaces a reason that carries prose or a value, and does not echo it", () => {
+    // The shapes here are the ones a caller could actually hand by accident: an upstream
+    // provider message, or a secret-shaped token that would otherwise be persisted in clear text
+    // in a row every job page reads.
+    for (const reason of [
+      "container exited with code 3 after reading Authorization: Bearer abcdefgh",
+      "token=Zm9vYmFyYmF6ISE=",
+    ]) {
+      const text = JSON.stringify(jobErrorFromFailure(job(), { code: "CAPABILITY_UNAVAILABLE", reason }));
+      expect(text).toContain(UNSHAPEABLE_REASON);
+      expect(text).not.toContain("Bearer");
+      expect(text).not.toContain("Zm9vYmFyYmF6");
+      expect(text).not.toContain("container exited");
+    }
+  });
+
+  it("keeps the named code so a substitution is still diagnosable", () => {
+    const apiError = jobErrorFromFailure(job(), {
+      code: "STALE_INPUT",
+      reason: "boom: a sentence with spaces",
+    }) as { code: string; message: string };
+    expect(apiError.code).toBe("STALE_INPUT");
+    expect(apiError.message).toBe(UNSHAPEABLE_REASON);
   });
 });
