@@ -21,11 +21,16 @@ export type CheckName =
   // job has no executor here. The doctor is the surface that says "this capability is absent" out
   // loud, which is what keeps `queued` from reading as "someone is working on it" (issue #75).
   | "verification-executor"
-  // The same absence for the two kinds §8 line 275 can queue: a capture needs a browser lane and an
-  // inspect needs the archive decoder, and the runner's kind list is `build` only. Kept as its own
-  // name rather than folded into the one above because they are different absences - installing an
+  // §8 line 275 can queue two kinds and this build drives one of them: the runner takes `build` and
+  // the ingestion `inspect` row (issue #108), while a capture still needs `capture_browser_scenario`,
+  // which has no mirrored contract here, and §8 line 310's directed investigation needs the retained
+  // REA session. Kept as its own name rather than folded into the one above because installing an
   // evaluator would not make a queued capture go anywhere (issue #58's last door).
-  | "target-work-executor";
+  | "target-work-executor"
+  // The upload's sensitive declaration lives here, in worker memory, until the turn that needs it has
+  // finished (§12.1, §8 line 306). Its count is a fact an operator can read: a number that grows
+  // without bound is a leak, and a leak nobody can see is not a leak anyone fixes.
+  | "sensitive-declaration-memo";
 
 export type CheckOutcome =
   | { state: "ok"; facts: JsonValue }

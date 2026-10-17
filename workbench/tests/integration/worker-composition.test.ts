@@ -437,21 +437,27 @@ describe("named commands and the local RPC (§14)", () => {
     expect(invented.error.reason).toBe("comparator-policy-not-installed");
   });
 
-  // The cell §8 line 275's door makes necessary: a `capture` or an `inspect` row can now be asked for
-  // over HTTP, and the runner takes `build` rows only, so nothing in this build moves them. The claim
-  // has to be about *those* kinds - "there are queued jobs" is a different sentence - so a queued
-  // build row, which does have an executor here, has to leave the check quiet.
-  // This test sits before the job-door tests below for the same reason the evaluator cell does: the
-  // empty half of the claim can only be read while the queue really holds none of these kinds.
-  it("names the missing executor for the two kinds the job door can queue (§7.5)", async () => {
+  // The cell §8 line 275's door makes necessary, rewritten for issue #108: the runner now drives the
+  // ingestion `inspect` row, so "inspect is queued" is no longer one sentence. The three readings the
+  // doctor has to keep apart are a capture (no executor, and none reachable in this build), §8 line
+  // 310's directed investigation (a real job whose executor is the retained REA session, not shipped),
+  // and a row whose input names neither projection - which the *runner* fails by name, so the doctor
+  // counts it without inventing a reason for it. A queued `build` row still leaves it quiet, because
+  // that kind does have an executor.
+  it("names which queued kind has no executor, per kind (§7.5, §11)", async () => {
     const quiet = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
     expect(quiet?.state).toBe("ok");
-    expect(quiet?.facts).toEqual({ queuedCaptureCount: 0, queuedInspectCount: 0 });
+    expect(quiet?.facts).toEqual({
+      queuedCaptureCount: 0,
+      queuedIngestionCount: 0,
+      queuedInquiryCount: 0,
+      queuedUnreadableInspectCount: 0,
+    });
 
     const created = unwrap(await request("project.create", { name: "target-work-executor" }, inspector)) as { id: string };
     const projectId = asId(created.id);
     const at = new Date().toISOString() as Instant;
-    const seed = (kind: "build" | "inspect"): void => {
+    const seed = (kind: "build" | "capture" | "inspect", inputJson: JsonValue): void => {
       const jobId = newId();
       const inserted = worker.writeConnection.transact((tx) => {
         tx.insertJob({
@@ -461,7 +467,7 @@ describe("named commands and the local RPC (§14)", () => {
           kind,
           state: "queued",
           cleanupState: "pending",
-          inputJson: { seededFor: "executor-absence-check" },
+          inputJson,
           resultRef: null,
           errorJson: null,
           idempotencyKey: `${kind}-${jobId}`,
@@ -475,16 +481,39 @@ describe("named commands and the local RPC (§14)", () => {
       });
       if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
     };
+    // §8 line 310's `InspectTask` as the door persists it (`taskForStorage`), so the row the doctor
+    // classifies is the row a browser would have made.
+    // The shape `job.request` actually persists (§8 line 275 nests the task under `task`), not the bare
+    // union - the runner and the doctor classify the row from the column, so seeding a different shape
+    // here would test a row no door can make.
+    const inquiry: JsonValue = {
+      targetId: newId(),
+      expectedGraphRevision: 0,
+      task: { kind: "inspect", claimIds: [], question: "what answers /api/cart", scope: "captured-runtime" },
+    };
 
-    seed("build");
+    seed("build", { blueprintId: newId() });
     const stillQuiet = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
     expect(stillQuiet?.state).toBe("ok");
-    expect(stillQuiet?.facts).toEqual({ queuedCaptureCount: 0, queuedInspectCount: 0 });
+    expect(stillQuiet?.facts).toMatchObject({ queuedCaptureCount: 0, queuedInquiryCount: 0 });
 
-    seed("inspect");
-    const loud = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
-    expect(loud?.state).toBe("degraded");
-    expect(loud?.reasons).toEqual(["target-work-executor-not-installed"]);
+    seed("capture", { kind: "capture", profileId: "rea-default", scenario: { startUrl: "https://example.test", actions: [] }, network: { requestBody: true, responseBody: true, headerValues: false } });
+    const captured = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
+    expect(captured?.state).toBe("degraded");
+    expect(captured?.reasons).toEqual(["capture-executor-not-installed"]);
+
+    seed("inspect", inquiry);
+    const inquired = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
+    expect(inquired?.reasons).toEqual(["capture-executor-not-installed", "inspect-inquiry-executor-not-installed"]);
+
+    // A row that is neither projection is counted and not blamed: the runner's own turn fails it with
+    // `inspect-job-input-unreadable` (that reading is in the executor test), and a second verdict here
+    // would be the doctor claiming a capability absence it has not observed. So the reason set has to
+    // stay exactly what it was - adding this row must not add a sentence.
+    seed("inspect", { seededFor: "executor-absence-check" });
+    const unreadable = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
+    expect(unreadable?.state).toBe("degraded");
+    expect(unreadable?.reasons).toEqual(["capture-executor-not-installed", "inspect-inquiry-executor-not-installed"]);
   });
 
   // §8 line 275 asked on the worker's own socket, because two of its rules are not visible from a

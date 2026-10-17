@@ -362,9 +362,14 @@ origin"那一半**没有判定者**——`profileSchema` 只有 `networkPolicyId
 `sensitiveValues` 是这扇唯一的**双层**规则：帧里带着它走（执行者要用，与 272 的导入同一待遇），
 但落库的 `input_json` 与两处 digest（journal 的与行的）都不含它——落库那份由 `taskForStorage`
 逐字段重建而不是 copy+delete，因为"不能被写下的字段不在被写下的东西里"这句话只有重建才成立。
-这道门也新添一格 doctor：`target-work-executor`——runner 仍只认 `build`，所以现在能排出来的
-capture/inspect 行没有执行者；队列里没有这两类时它 `ok`（facts 是那两个计数），有就 degraded 报
-`target-work-executor-not-installed`，形状与 #75 那格一致。
+这道门也新添一格 doctor：`target-work-executor`。issue #108 之后它按**谁真的能跑**分句报，不再用一条
+`target-work-executor-not-installed` 把三类行盖住：queued 的 capture 行 → `capture-executor-not-installed`
+（`capture_browser_scenario` 在本仓连镜像契约都没有）；§8 line 310 的定向调查行 →
+`inspect-inquiry-executor-not-installed`（它要的是 retained session 上的 `inspect_analysis_view`）；
+导入产生的 ingestion 行 → **有执行者**，只有在 provider 谈不下 MCP 时才报 `provider-session-unavailable`
+（§11 的"暂时不可用"）。分类用的是 runner 自己的 `planOf`，所以体检与执行者对同一行的判断不可能不一致。
+旁边另起一格 `sensitive-declaration-memo`，facts 是 `heldDeclarations`——那是一份带生命周期的秘密字符串，
+计数不出来就是漏，且没人看得见的漏不会有人去修（§12.1）。
 另外记一处**测试 rig 自己的陈旧**：`tests/integration/web-api.test.ts` 写的 profile 文件用的是
 `image`/`network`/`hostMounts`/`wallClockMs` 那套词汇，`profileSchema` 从来没这些键——也就是说那份 profile
 **一直解析失败**，registry 回的是"没有这个 profile"。此前没有一条测试问我要过 profile 里的数字（每个需要
@@ -389,7 +394,8 @@ capture/inspect 行没有执行者；队列里没有这两类时它 `ok`（facts
 它是 #22 交付时补的读门，记在偏离里。
 这 38 条里最近补上的是 `POST .../candidates`（294）与**worker 自己的作业执行者**（`packages/application/job-runner.ts`）：
 门只写一行 `queued` 的 build 作业并回 202 JobRecord，跑它是进程内那条循环的事——扫队列（只看 `queued`、只认
-`build` 这一类，`verify`/`inspect` 仍然**没有执行者**，那是 #75 与 ASAR 那两条具名空缺，不做假装跑得起来的样子）、
+`build` 与导入产生的 `inspect` 这两类（issue #108 把后者接上），`verify` 与 §8 line 310 的定向调查、capture
+仍然**没有执行者**，那是 #75 与 #108 文末那几条具名空缺，不做假装跑得起来的样子）、
 按 §11 的 `decideStart` 判过期、声明 running、跑完再落 succeeded/failed 并把 candidate id 写进 `resultRef`。
 claim 与 settle 各是一个事务，中间的生成在 SQLite 之外发生（把 `BEGIN IMMEDIATE` 横跨一个 Builder 子进程，
 就是写锁和 RPC 帧超时在抢同一分钟）。§7.3「只有 Builder 能生成」这条因此落在**worker 自己铸的角色身份**上
@@ -1051,6 +1057,45 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`（`WB_UI_ORIGIN=http://localho
 - **这一轮仍未测**：由浏览器发起一次生成（页面上没有那个入口，见上文 §8 line 294 那条偏离）、
   分页游标在真实数据上的翻页（作业页只有一页）、以及 `next build` 产物路径。
 
+浏览器实测·第十七轮（2026-10-18 01:33，本机 darwin/arm64；本轮**没有新页面控件**，读数是命令门与
+runner 的，见下文"这轮没做浏览器"）：
+
+- **§8 line 272 的上传作业现在有执行者了**（issue #108）。`RUNNABLE_JOB_KINDS` 由 `["build"]` 变成
+  `["build","inspect"]`，`HarIngestionService.runInspection` 从此有了生产调用方——在此之前它的全部调用方
+  都在 `tests/integration/har-import.test.ts` 里（`grep -rn runInspection packages apps` 只出定义）。
+- 一条真实读数：`capture.importHar` → 行 `queued` → `runJobs()` 一轮 → 回 `{kind:"inspected",
+  jobState:"succeeded", evidenceIds:[ev_aaa…]}`；同一时刻之前 `evidence.get` 是
+  **404 `evidence-unknown`**，之后是 200 且正文是 provider 的信封（`{evidence: …}`，§8 line 281 的位置）。
+  行的 `resultRef` ＝那个 evidence id，`cleanupState` 落 `complete`。
+- 领取形状由契约决定而不是由我挑：`inspectionCommandSchema.expectedJobState` 是 `z.literal("queued")`，
+  §11 又不给 `interrupted` 出边，所以 runner **不预 claim** inspect 行，交给服务在同一笔事务里走
+  `queued→running→succeeded`；作业页因此看得到一次到位的 `queued→succeeded`，这不是把状态机掰弯
+  （两条边都过了 `transition()`）。把它按 build 那样先 claim 的变异被红。
+- §11 的"暂时不可用"这一支是**这次才真的可达**：原先 `providerAvailable` 用的是 `connectReaStdio`
+  不抛异常——而一个不是 MCP 服务的文件照样 spawn 成功，所以这条永远为真，"等"永远不发生。现在它要求
+  `initialize` 谈成（`provider-handshake-failed`），并且 `retryAt` 写进行并广播到事件流；两条各钉住一侧：
+  窗口内第二次看是 `idle`（`requeues=1, idles=1`，spin 的变异死在这里），窗口过完再看到的是又一次
+  `start-requeued`（"等待"不能被写成"搁死"）。
+- **D25 的丢失声明路径**：重启 provider 可用的 worker（内存声明表随进程消失）→ 那一轮
+  `failed / declaration-context-unavailable`，行 `error.code=SENSITIVE_CONTENT_BLOCKED`、
+  没有 evidence 行。这与"操作者当初什么都没声明"是两种状态，实现里必须分开：表里没有＝拒绝，
+  表里是空数组＝真的没声明（`packages/application/declaration-memo.ts` 写死了这条区别）。
+- §9 第 7 项的 retained-reference 停法第一次从 runner 这一侧读到：`jobState:"failed"`、
+  `evidenceIds: []`、`cleanupRetryAt` 非 null（§11 的两个状态分开：行的 `cleanupState` 还是 `pending`，
+  未了的义务在 lease 上）。把收据拍平成 `succeeded` 的变异被这条杀掉。
+- §8 line 310 的定向调查行**留在 queued 且不改**：门把 task 嵌在 `inputJson.task` 里，所以
+  `planOf` 是两个正向 parse（ingestion 投影 / `task` 上的 `InspectTask`），都不是就具名失败；
+  这条是从"按顶层 parse 猜"的写法里被用例纠正过来的。
+- 变异 12 支全被**该杀它的那条**用例杀掉：可运行类表去掉 inspect、inquiry 过滤器删掉、requeue 不写
+  retryAt、不读 retryAt、retryAt 变成永久搁死、provider 可用性写死 true、预 claim、导入不记声明、
+  声明表读成"没声明"、体检少报 inquiry 句子、收据拍平、evidenceIds 抹空、以及把 lease 判成
+  `complete`。本轮没有等义变异（上一条那种"被蕴含的条件"这次没有再写）。
+- **这轮没做浏览器**：没有新增或改动任何控件，页面只是第一次能在真作业完成后再读一次。HTTP 门到
+  runner 的端到端一条用例（`POST /imports` 走 Next 中继 → 作业 `succeeded` → `GET .../evidence/:e` 200）
+  与页面里点出「来源 N」的读数都还欠着，记在下面"还没有的东西"。**磁盘侧独立核同样还没做**——
+  上面的 evidence 读数是经命令门取的，没有开第二个只读连接去比 `artifacts.sha256` 与 `shasum`。
+
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
@@ -1075,9 +1120,18 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   表就等于做一个会猜的表，所以这三扇仍靠 `fetch` 驱动，是 issue #58 剩下的账。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
   读不到日志就说读不到（`FREEZE_EMPTY_LINE` 的三种空态各有自己的句子）。
+- 上传之后那条链还欠两次真门读数（issue #108 文末同段）：**HTTP 门到 runner 的端到端一条用例**——
+  `POST /projects/:p/imports` 经 Next 中继进来、runner 把它跑到 `succeeded`、再 `GET .../evidence/:e` 回 200，
+  这条今天是由 `worker.dispatch`（命令门）证的，不是由那道 HTTP 门；以及**页面里点出「来源 N」**的读数——
+  本轮没有控件改动，所以按规矩明说没做，而不是把"能读"当成"点过"。磁盘侧独立核（第二个只读连接比
+  `artifacts.sha256` 与 `shasum -a 256`）同样没做。
+- capture 行与 §8 line 310 的定向调查行**仍无执行者**，而且不是接上线就有：前者要
+  `capture_browser_scenario` 的镜像契约（本仓 `grep -rl capture_browser_scenario packages apps tests` 为空）
+  加 §12 的浏览器容器，后者要 retained session 上的 `inspect_analysis_view`。两条都由
+  `target-work-executor` 那格分开报出，各自有自己的具名 reason，不再共用一条句子。
 - §10 的 evaluator 有了一条**具名命令**（`verification.complete`，PR #84 之后由这一笔加上，issue #75 的
-  第一条），但**没有 evaluator 进程**：runner 依旧只认 `build`（V1 变异钉着"放开 kinds 就跑红"），所以
-  `verify` 作业仍然停在 `queued`。这条缺席现在由 doctor 的一格说出来：`verification-executor` 在没有
+  第一条），但**没有 evaluator 进程**：runner 现在认 `build` 与导入的 `inspect`（issue #108），
+  `verify` 依旧无人认领，所以 `verify` 作业仍然停在 `queued`。这条缺席现在由 doctor 的一格说出来：`verification-executor` 在没有
   verify 作业时是 `ok`（facts 只有 `queuedVerifyCount: 0`），一旦队列里等着一件就 `degraded` 报
   `verification-executor-not-installed`——一条已排入 `build` 作业不会让它报警，两件事是不同的缺席。
   completion 体的 schema 是硬门：少字段按缺的名字拒，多带一个 §10 没点名的键（试的是自报结论）按那个

@@ -59,6 +59,25 @@ export const harImportHttpResponseSchema = z.strictObject({
   job: jobRecordSchema,
 });
 
+// The projection `har.import` actually persists on its job row: the command minus the two
+// command-time-only fields (`idempotencyKey`, `deadlineAt`) and plus the digest the store measured.
+// It is a contract rather than an inline object literal because the writer and the runner read this
+// column from opposite ends - the runner has to tell an ingestion job's row apart from a directed
+// investigation's row (§8 line 310's `InspectTask`), and sniffing for a field name would make that
+// choice depend on whichever field someone remembered to keep.
+export const ingestionJobInputSchema = z.strictObject({
+  filename: nonEmptyString.max(255),
+  mediaType: z.enum(CAPTURE_MEDIA_TYPES),
+  format: z.literal("har"),
+  byteLength: z.int().nonnegative(),
+  sourceSha256: digestSchema,
+  // A selection is stated, an omitted selection is `null` - not an empty list, which would read as
+  // "the operator asked for no records".
+  recordOrdinals: z.array(z.int().nonnegative()).nullable(),
+});
+
+export type IngestionJobInput = z.infer<typeof ingestionJobInputSchema>;
+
 export const inspectionCommandSchema = z.strictObject({
   projectId: idSchema,
   jobId: idSchema,
