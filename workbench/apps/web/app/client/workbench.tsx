@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -302,6 +302,17 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [stream, setStream] = useState<{ state: "connecting" | "open" | "closed"; seq: number | null }>({ state: "connecting", seq: null });
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [inquiries, setInquiries] = useState<DirectedInquiry[]>([]);
+  // §8 line 275's inspect half (issue #58's last control). The subject of the request is read, never
+  // typed: the graph gives the target and the claim list, the target row gives the kind that decides
+  // whether an inspect is legal against it, and the project row gives the concurrency token. `null`
+  // means the read has not answered, which the panel says in its own sentence instead of offering an
+  // empty form.
+  const [inspectTarget, setInspectTarget] = useState<InspectTargetRead | null>(null);
+  const [graphRevision, setGraphRevision] = useState<number | null>(null);
+  const [inspectChosen, setInspectChosen] = useState<string[]>([]);
+  const [inspectQuestion, setInspectQuestion] = useState("");
+  const [inspectScope, setInspectScope] = useState("");
+  const [inspectNotice, setInspectNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -314,6 +325,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       setSamples(null);
       setSamplesNotice(SAMPLES_EMPTY_LINE["no-session"]);
       setComparators(null);
+      setInspectTarget(null);
+      setGraphRevision(null);
       return;
     }
     const issued = relayData(health.value) as { csrfToken?: string } | null;
@@ -327,7 +340,10 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     // has rather than guessing one from a graph node.
     const project = await getJson(`/api/v1/projects/${props.projectId}`);
     if (project.ok) {
-      const view = (project.value as { targetIds?: string[]; inventoryRevision?: number } | null) ?? {};
+      const view = (project.value as { targetIds?: string[]; inventoryRevision?: number; graphRevision?: number } | null) ?? {};
+      // The directed-inspect request must carry this as its concurrency token, so it is kept from the
+      // same read that lists the targets rather than a second one.
+      setGraphRevision(typeof view.graphRevision === "number" ? view.graphRevision : null);
       const first = view.targetIds?.[0];
       if (first === undefined) {
         setSamples(null);
@@ -344,13 +360,30 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           setSamplesNotice(samplesRefusalLine("read", page.reason, page.facts));
         }
       }
+    } else {
+      // Without this row the page does not know the graph revision, and an inspect without the
+      // concurrency token is a request the door cannot check — so the form says which read is missing
+      // rather than carrying on with the number it saw last visit.
+      setGraphRevision(null);
     }
     const view = await getJson(`/api/v1/projects/${props.projectId}/graph`);
     if (!view.ok) {
       setError(view.reason);
+      setInspectTarget(null);
       return;
     }
-    setGraph(view.value as GraphViewPayload);
+    const graphView = view.value as GraphViewPayload;
+    setGraph(graphView);
+    // The kind is what decides whether a directed inspect is legal against this target at all (§8: an
+    // inspect reads imported bytes), and the graph view does not carry it — so the row is read from the
+    // door that has it. A refusal here leaves the form saying 目标类型读不到 instead of assuming the
+    // last one still applies.
+    if (graphView.targetId === null) {
+      setInspectTarget(null);
+    } else {
+      const row = await getJson(`/api/v1/projects/${props.projectId}/targets/${graphView.targetId}`);
+      setInspectTarget(row.ok ? inspectTargetReadOf(row.value, graphView.targetId) : null);
+    }
     // A journal refusal stops nothing else on the page: the two panels that depend on it say which
     // of their own emptinesses they are in, and everything else was already read.
     const journalPage = await getJson(`/api/v1/projects/${props.projectId}/audit?limit=100`);
@@ -508,6 +541,51 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     },
     [comparator, comparators, csrf, props.projectId],
   );
+
+  // The subject a directed inspect may name, read out of the two reads that own it (issue #58). It is
+  // computed once here so the sentence on the panel and the gate in front of the POST are literally the
+  // same value — a panel that said 可发起 while its own submit refused would be the divergence this
+  // file keeps getting told about.
+  const inspectGraph = useMemo<InspectGraphFacts | null>(
+    () => (graph === null ? null : { targetId: graph.targetId, claimIds: graph.claims.map((claim) => String(claim.claimId)) }),
+    [graph],
+  );
+  const inspectSubject = inspectSubjectOf({ graph: inspectGraph, target: inspectTarget, graphRevision });
+  // Whether the 首次分析 sentence may be printed at all - it speaks about a target, so an unread graph
+  // or a project with no target shows nothing rather than an answered-looking line.
+  const claimsNote = inspectClaimsNoteFor(inspectGraph);
+
+  // §8 line 275's inspect half from the browser. Nothing about the request is typed by the operator
+  // except the question and the checks: the target comes from the graph read, its kind from the target
+  // row, and the concurrency token from the project row — so a moved graph is the door's 409 naming
+  // both revisions, not this page widening a scope it already sent. The key is per click (§8 line 261),
+  // and the job list is re-read afterwards because the row the door wrote is the answer, not a
+  // prediction of it.
+  const requestInspect = useCallback(async () => {
+    const draft = inspectDraftOf({
+      csrf,
+      graph: inspectGraph,
+      target: inspectTarget,
+      graphRevision,
+      chosen: inspectChosen,
+      question: inspectQuestion,
+      scope: inspectScope,
+    });
+    if (!draft.ok) {
+      setInspectNotice(draft.line);
+      return;
+    }
+    const got = await postJson(`/api/v1/projects/${props.projectId}/jobs`, draft.body, csrf, crypto.randomUUID());
+    if (!got.ok) {
+      setInspectNotice(refusalLine("定向调查请求被拒", got.reason, got.facts));
+      return;
+    }
+    setInspectNotice(
+      queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "inspect", done: "已排入定向调查" }),
+    );
+    const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+    if (page.ok) setJobs(page.value as JobsPagePayload);
+  }, [csrf, graphRevision, inspectChosen, inspectGraph, inspectQuestion, inspectScope, inspectTarget, props.projectId]);
 
   // §8 line 272 from the browser: the file goes out as the multipart part the door names, with the
   // four fields it lists and nothing else. No client-side size or type gate is added on top - the
@@ -933,9 +1011,70 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       ) : null}
       {evidence === null ? (evidenceNotice === null ? null : <p data-evidence-refused>{evidenceNotice}</p>) : null}
       {evidence === null ? null : <EvidenceReader evidence={evidence} />}
-      <section aria-label="定向调查队列">
-        <h2>已发起的定向调查（本地排队，尚未提交）</h2>
-        <ul>{inquiries.map((inquiry, index) => <li key={`${String(inquiry.kind)}-${String(index)}`}>{JSON.stringify(inquiry)}</li>)}</ul>
+      <section aria-label="定向调查" data-panel="directed-inspect">
+        <h2>定向调查（§8 line 275：一道门只排作业，不给结论）</h2>
+        <p data-inspect-subject={inspectSubject.ok ? "ready" : "blocked"}>{inspectSubjectLine(inspectSubject, graph?.truncated ?? false)}</p>
+        <p data-inspect-capture-note>{INSPECT_CAPTURE_NOTE}</p>
+        <h3>这一发问的是哪几条主张</h3>
+        {/* Three states, and the first one shows no list at all: with no graph read there is nothing to
+            offer, and printing the 首次分析 note there would claim this target holds no claims — a fact
+            about the project the page has not read. */}
+        {inspectGraph !== null && inspectGraph.claimIds.length > 0 ? (
+          <ul data-inspect-claims="list">
+            {(graph?.claims ?? []).map((claim) => (
+              <li key={String(claim.claimId)}>
+                <label>
+                  <input
+                    type="checkbox"
+                    data-inspect-claim={String(claim.claimId)}
+                    checked={inspectChosen.includes(String(claim.claimId))}
+                    onChange={(event) =>
+                      setInspectChosen((previous) =>
+                        event.target.checked
+                          ? [...previous, String(claim.claimId)]
+                          : previous.filter((entry) => entry !== String(claim.claimId)),
+                      )
+                    }
+                  />
+                  {`${claim.assertion}（修订 ${String(claim.revision)}｜${coverageLine(claim)}）`}
+                </label>
+              </li>
+            ))}
+          </ul>
+        ) : claimsNote === null ? null : (
+          <p data-inspect-claims="none">{claimsNote}</p>
+        )}
+        <label htmlFor="inspect-question">问题（§8 要求非空 question）</label>
+        <textarea
+          id="inspect-question"
+          data-inspect-question
+          value={inspectQuestion}
+          onChange={(event) => setInspectQuestion(event.target.value)}
+        />
+        <label htmlFor="inspect-scope">调查口径</label>
+        <select
+          id="inspect-scope"
+          data-inspect-scope={inspectSubject.ok ? "ready" : "blocked"}
+          value={inspectScope}
+          onChange={(event) => setInspectScope(event.target.value)}
+        >
+          <option value="">（还没有选：页面不默认任何一档）</option>
+          {INSPECT_SCOPE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <button type="button" data-inspect-submit onClick={() => void requestInspect()}>
+          发起定向调查
+        </button>
+        <span data-inspect-notice>{inspectNotice ?? "尚未发起：这一发只会排一个作业，不会给出结论。"}</span>
+        <h3>点过的格子缺口（记录，不是请求）</h3>
+        {inquiries.length === 0 ? (
+          <p data-inquiry-empty>还没有点过任何格子：画布或列表里挑一格，它缺什么会记在这里。</p>
+        ) : (
+          <ul>{inquiries.map((inquiry, index) => <li key={`${String(inquiry.kind)}-${String(index)}`} data-inquiry={String(inquiry.kind)}>{inquiryQueueLine(inquiry)}</li>)}</ul>
+        )}
       </section>
     </div>
   );

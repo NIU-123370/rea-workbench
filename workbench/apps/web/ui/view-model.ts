@@ -16,6 +16,15 @@ import type { JobState } from "../../../packages/domain/job-states.ts";
 // list is reached through zod, which §3 keeps out of this bundle.
 import { isComparatorNormalization } from "../../../packages/domain/comparators.ts";
 import type { ComparatorNormalization } from "../../../packages/domain/comparators.ts";
+// The two vocabularies §8 line 275's inspect half needs, from the node-free owners rather than from
+// `contracts/tasks.ts` and `contracts/resources.ts`: the page offers the scopes and recognises the
+// target kinds, and both contracts re-export these same lists, so a value the door accepts and a
+// value this bundle can name are one list (§3 keeps zod, and one hop beyond it `node:crypto`, out of
+// the browser).
+import { INSPECT_SCOPES, isInspectScope } from "../../../packages/domain/inspect.ts";
+import type { InspectScope } from "../../../packages/domain/inspect.ts";
+import { isTargetKind } from "../../../packages/domain/target.ts";
+import type { TargetKind } from "../../../packages/domain/target.ts";
 
 // The three-column workbench surface (PRD F04, DESIGN §6, issue #18).
 //
@@ -941,4 +950,188 @@ export const STREAM_LINE: Record<"connecting" | "open" | "closed", string> = {
 // simply slow look identical, and an operator reads the first as the second.
 export function streamLineOf(state: "connecting" | "open" | "closed", lastSeq: number | null): string {
   return lastSeq === null ? STREAM_LINE[state] : `${STREAM_LINE[state]}（最后一条 seq ${String(lastSeq)}）`;
+}
+
+// --- §8 line 275 的 inspect 半边：一次定向调查怎么从这一页发出去 --------------------------------
+//
+// The door has been mounted since issue #58's last slice, and the canvas has been naming gaps since
+// S19, but nothing between them: clicking a cell pushed a JSON blob into a list whose own heading
+// admitted 尚未提交. These functions are that missing link, and they keep the two halves separable -
+// what a cell is *missing* stays `directedInquiry`'s judgement, and what may cross the socket is
+// decided here, in one place, by named cause.
+//
+// Ordering is deliberately not the door's. `JobRequestService.request` parses the task before it
+// looks at the target, so a request that breaks two rules is refused by the schema one; the order
+// below is the order a form can be filled in - session, which target this is, what kind of target it
+// is, the concurrency token, then the task's own three fields. It decides which sentence the operator
+// reads before anything is sent, never what the worker will do with a request that goes out.
+
+export const INSPECT_SCOPE_PHRASES: Record<InspectScope, string> = {
+  // Which half of what the project already holds the investigation is allowed to weigh.
+  static: "只看已导入的字节（静态）",
+  "captured-runtime": "连同捕获当时的运行时观测",
+};
+
+// Rendered in this order because that is the order the closed list spells them, and the list is the
+// door's, not the page's: a third scope would have to be added where the vocabulary lives before this
+// control could offer it.
+export const INSPECT_SCOPE_OPTIONS: { value: InspectScope; label: string }[] = INSPECT_SCOPES.map((scope) => ({
+  value: scope,
+  label: INSPECT_SCOPE_PHRASES[scope],
+}));
+
+// Five states the subject can be in, five sentences. Collapsing any pair of them would tell an
+// operator to go fix something that is already fine: "the graph has not been read" is a refresh,
+// "the graph names no target" is an empty project, and "the target is a declared URL" is an upload
+// that has not happened yet.
+export const INSPECT_GRAPH_UNREAD_LINE = "图还没读到：这一发调查指向哪个目标是图读给的，页面不猜一个。";
+export const INSPECT_NO_TARGET_LINE = "图读没有给出 targetId：定向调查必须有目标，而本项目当前的视图里没有这个格位。";
+export const INSPECT_TARGET_UNREADABLE_LINE = "目标类型读不到：这道门要先分清目标是已导入的字节还是声明的 URL，页面不带着猜测去撞门口。";
+export const INSPECT_TARGET_URL_LINE = "这个目标是声明的 URL，背后还没有导入的字节：inspect 读的是导入内容，门口会以 inspect-needs-file-target 拒收。先上传 HAR 或 ASAR。";
+export const INSPECT_REVISION_UNREAD_LINE = "项目行读不到图修订号：这一发必须带 expectedGraphRevision 并发令牌，缺了它图变了也不会告诉你。";
+export const INSPECT_QUESTION_EMPTY_LINE = "问题还空着：§8 要求 inspect 带非空 question，格子缺什么本身不构成一次提问。";
+export const INSPECT_SCOPE_UNSELECTED_LINE = "还没有确定调查口径（只看已导入的字节 / 连同捕获当时的运行时观测）：两者问的不是同一件事，§10 不许页面替你默认一档。";
+export const INSPECT_NEEDS_CLAIMS_LINE = "这个目标已经有主张了：定向调查要勾选它问的是哪几条，空清单只允许用在首次分析上（§8）。";
+export const INSPECT_CHOICE_UNLISTED_LINE = "勾选的主张不在这页读到的清单里：图读与表单说的不是同一批行，先重新读图再发这一发。";
+// Shown when the graph read names no claims: an empty checkbox list here is a fact about the project,
+// not a control the operator forgot, and §8 allows exactly this one empty case.
+export const INSPECT_FIRST_ANALYSIS_NOTE = "本目标还没有任何主张：这一发只能是首次分析（§8 允许 claimIds 为空的那一种），勾选处保持空即可。";
+
+// The capture half of the same door stays out of reach for a stated reason, and the reason is on the
+// panel rather than in a PR: `CaptureTask` needs `scenario.actions` built out of locators, which is a
+// thing an operator assembles, not a thing this page has a control for. Showing the door as
+// half-usable is honest; showing it as usable would be a button that can only ever be refused.
+export const INSPECT_CAPTURE_NOTE = "同一道门的 capture 半边本页发不出去：CaptureTask 要 scenario.actions 的编排控件（locator + 动作），本页没有它，所以也不会摆一个只会吃 400 的按钮。";
+
+// What the four inquiry kinds can become on this page. A cell's gap is recorded whether or not it is
+// sendable, and the line says which of the two it is, so a queue entry never reads as a request.
+export const INQUIRY_KIND_LINES: Record<InquiryKind, string> = {
+  "inspect-runtime": "这一类可由本页发起：填下面的表单走 §8 line 275 的 inspect。",
+  "capture-new": "这一类本页发不出：需要 capture 的动作编排，见上面那句说明。",
+  "read-evidence": "这一类不发请求：读来源是 GET（§8 line 281），点那一列的来源就能读。",
+  "review-claim": "这一类没有对应的门：§8 的三条审阅门是样本、契约与计划，主张本身没有复核路由。",
+};
+
+export function inquiryQueueLine(inquiry: DirectedInquiry): string {
+  return `${inquiry.kind}｜格子 ${inquiry.subjectId}｜缺口：${inquiry.gaps.join("、") || "（无）"}｜${INQUIRY_KIND_LINES[inquiry.kind]}`;
+}
+
+export type InspectTargetRead = { ok: true; kind: TargetKind } | { ok: false; line: string };
+
+// A target row that is not one of the three kinds, or that names a different row than the one asked
+// for, is a read this page cannot use: the kind decides whether the request is sendable at all, so a
+// half-parsed row would either block a legal inspect or send an illegal one. The id is compared
+// because the graph can move between the two reads, and a reply about a *different* target is exactly
+// the case where "the target is inspectable" stops meaning "this target is inspectable".
+export function inspectTargetReadOf(payload: unknown, expectedTargetId: string): InspectTargetRead {
+  const row = (relayData(payload) as { id?: unknown; kind?: unknown } | null) ?? {};
+  if (typeof row.id !== "string" || row.id !== expectedTargetId) {
+    return { ok: false, line: inspectTargetMismatchLine(expectedTargetId, typeof row.id === "string" ? row.id : String(row.id)) };
+  }
+  if (typeof row.kind !== "string" || !isTargetKind(row.kind)) {
+    // The word itself is not echoed: this is the one field whose value has already failed the closed
+    // list, so putting it on screen would be publishing an unvalidated string from a wire reply.
+    return { ok: false, line: `${INSPECT_TARGET_UNREADABLE_LINE}（读到的 kind 是 ${typeof row.kind}，不是三种目标类型之一）` };
+  }
+  return { ok: true, kind: row.kind };
+}
+
+export function inspectTargetMismatchLine(expected: string, got: string): string {
+  return `目标读答的是另一个行：要 ${expected}，答 ${got}。这一发的目标与它读到的类型不是同一行，页面不发。`;
+}
+
+export type InspectGraphFacts = { targetId: string | null; claimIds: readonly string[] };
+
+// Whether the 首次分析 note may be printed. It is a claim about *a target* - "this target holds no
+// claims yet" - so a project whose graph read names no target must not show it, and neither must a
+// page that has read nothing at all. The browser pass for this round found the overreach: an empty
+// project with no target was being described as a target with nothing claimed, which reads as an
+// answered question rather than an unread one.
+export function inspectClaimsNoteFor(graph: InspectGraphFacts | null): string | null {
+  if (graph === null || graph.targetId === null) return null;
+  return graph.claimIds.length === 0 ? INSPECT_FIRST_ANALYSIS_NOTE : null;
+}
+
+export type InspectSubject =
+  | { ok: true; targetId: string; kind: TargetKind; graphRevision: number; claimIds: readonly string[] }
+  | { ok: false; line: string };
+
+// Everything the request needs that is *not* the operator's answer, read through the two owners the
+// page already has: the graph read gives the target and the claim list, the target read gives the
+// kind, the project row gives the concurrency token. The panel shows this same value as a sentence, so
+// what the operator reads as ready and what the gate accepts as ready cannot diverge.
+export function inspectSubjectOf(input: {
+  graph: InspectGraphFacts | null;
+  target: InspectTargetRead | null;
+  graphRevision: number | null;
+}): InspectSubject {
+  if (input.graph === null) return { ok: false, line: INSPECT_GRAPH_UNREAD_LINE };
+  if (input.graph.targetId === null) return { ok: false, line: INSPECT_NO_TARGET_LINE };
+  if (input.target === null) return { ok: false, line: INSPECT_TARGET_UNREADABLE_LINE };
+  if (!input.target.ok) return { ok: false, line: input.target.line };
+  if (input.target.kind === "url") return { ok: false, line: INSPECT_TARGET_URL_LINE };
+  if (input.graphRevision === null) return { ok: false, line: INSPECT_REVISION_UNREAD_LINE };
+  return {
+    ok: true,
+    targetId: input.graph.targetId,
+    kind: input.target.kind,
+    graphRevision: input.graphRevision,
+    claimIds: input.graph.claimIds,
+  };
+}
+
+// Why the concurrency token is spelled out: a 409 naming two revisions is only explainable if the
+// operator can see which one this request claimed.
+const INSPECT_KIND_PHRASES: Record<TargetKind, string> = {
+  url: "声明的 URL",
+  har: "HAR 导入的字节",
+  asar: "ASAR 导入的字节",
+};
+
+export function inspectSubjectLine(subject: InspectSubject, truncated: boolean): string {
+  if (!subject.ok) return subject.line;
+  return `目标 ${subject.targetId}｜${INSPECT_KIND_PHRASES[subject.kind]}｜图修订 ${String(subject.graphRevision)}（这一发带着它，图动了门口回 409 而不是默默扩大范围）${
+    truncated ? "｜注意：图视图已截断，下面的主张清单只是被读到的那一些" : ""
+  }`;
+}
+
+export type InspectJobBody = {
+  targetId: string;
+  expectedGraphRevision: number;
+  task: { kind: "inspect"; claimIds: string[]; question: string; scope: InspectScope };
+};
+
+export type InspectDraft = { ok: true; body: InspectJobBody } | { ok: false; line: string };
+
+export function inspectDraftOf(input: {
+  csrf: string;
+  graph: InspectGraphFacts | null;
+  target: InspectTargetRead | null;
+  graphRevision: number | null;
+  chosen: readonly string[];
+  question: string;
+  scope: string;
+}): InspectDraft {
+  const gate = sessionGate(input.csrf);
+  if (!gate.ok) return { ok: false, line: gate.line };
+  const subject = inspectSubjectOf({ graph: input.graph, target: input.target, graphRevision: input.graphRevision });
+  if (!subject.ok) return { ok: false, line: subject.line };
+  const question = input.question.trim();
+  if (question === "") return { ok: false, line: INSPECT_QUESTION_EMPTY_LINE };
+  if (!isInspectScope(input.scope)) return { ok: false, line: INSPECT_SCOPE_UNSELECTED_LINE };
+  const scope: InspectScope = input.scope;
+  // The read's order, not the click order: two operators checking the same boxes send the same body,
+  // and §8's request digest is over that body, so a click sequence must not become a second identity.
+  const checked = new Set(input.chosen);
+  const claimIds = subject.claimIds.filter((claimId) => checked.has(claimId));
+  if (claimIds.length !== checked.size) return { ok: false, line: INSPECT_CHOICE_UNLISTED_LINE };
+  if (subject.claimIds.length > 0 && claimIds.length === 0) return { ok: false, line: INSPECT_NEEDS_CLAIMS_LINE };
+  return {
+    ok: true,
+    body: {
+      targetId: subject.targetId,
+      expectedGraphRevision: subject.graphRevision,
+      task: { kind: "inspect", claimIds, question, scope },
+    },
+  };
 }

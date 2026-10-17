@@ -13,8 +13,10 @@ import {
   presentStatus,
   blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, importReceiptLine, NO_SESSION_LINE, projectDraftOf, PROJECT_NAME_EMPTY_LINE, projectCreateLine, sessionGate, uploadDraftOf, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, jobUpdateSignalOf, STREAM_LINE, streamLineOf, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, UPLOAD_NO_FILE_LINE, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
   COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
+  inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, inspectClaimsNoteFor,
+  INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES,
 } from "../../apps/web/ui/view-model.ts";
-import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
+import type { GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
 
 // The three-column surface's own rules (PRD F04 / DESIGN §6, issue #18).
 // Colour is never the only channel, an edge is judged by its own claim, a list view
@@ -943,5 +945,220 @@ describe("choosing a comparator from what this build installed (§8 line 297, is
     // What goes out is the name from the list, byte for byte - the page adds no default and no
     // rewriting, so the door's own refusal vocabulary is still the thing being tested.
     expect(chosen.comparatorPolicyId).toBe("exact-http-normalized-v1");
+  });
+});
+
+// §8 line 275's inspect half: the page can finally send a directed investigation instead of writing a
+// note about one (issue #58's last control). Every assertion here is about what may cross the socket,
+// because the door itself has been tested since issue #58's last slice.
+describe("the directed-inspect handle (§8 line 275, issue #58)", () => {
+  const targetId = newId();
+  const claimA = newId();
+  const claimB = newId();
+
+  const readySubject = {
+    graph: { targetId, claimIds: [claimA, claimB] },
+    target: { ok: true, kind: "har" } as const,
+    graphRevision: 7,
+  };
+
+  function draftInput(
+    overrides: Partial<{ csrf: string; graph: { targetId: string | null; claimIds: readonly string[] } | null; target: InspectTargetRead | null; graphRevision: number | null; chosen: readonly string[]; question: string; scope: string }> = {},
+  ) {
+    return {
+      csrf: "token-1234567890",
+      graph: readySubject.graph,
+      target: readySubject.target,
+      graphRevision: readySubject.graphRevision,
+      chosen: [claimA],
+      question: "这个响应在什么条件下会缺字段",
+      scope: "static",
+      ...overrides,
+    };
+  }
+
+  it("reads a target row only when it names the row this page asked about", () => {
+    expect(inspectTargetReadOf({ id: targetId, kind: "har" }, targetId)).toEqual({ ok: true, kind: "har" });
+    // The relay's envelope must not decide: the same row read through `{data: …}` is the same answer.
+    expect(inspectTargetReadOf({ data: { id: targetId, kind: "asar" } }, targetId)).toEqual({ ok: true, kind: "asar" });
+    // A URL target is a kind the read *recognises*, not a broken read - blocking it is the subject
+    // gate's job, because that gate can say why.
+    expect(inspectTargetReadOf({ id: targetId, kind: "url" }, targetId)).toEqual({ ok: true, kind: "url" });
+
+    const mismatch = inspectTargetReadOf({ id: newId(), kind: "har" }, targetId);
+    expect(mismatch.ok).toBe(false);
+    if (mismatch.ok) return;
+    // The two ids are named: "the read answered about a different row" is only actionable if the
+    // operator can see which row that was.
+    expect(mismatch.line).toContain("另一个行");
+
+    expect(inspectTargetReadOf(undefined, targetId).ok).toBe(false);
+    expect(inspectTargetReadOf({ kind: "har" }, targetId).ok).toBe(false);
+    expect(inspectTargetReadOf({ id: targetId, kind: 7 }, targetId).ok).toBe(false);
+    // An unknown vocabulary word is refused *without echoing it*: §12.1 publishes names, never values,
+    // and this is the one field whose value has already failed the closed list.
+    const hostile = inspectTargetReadOf({ id: targetId, kind: "SNAPSHOT-onerror<svg>" }, targetId);
+    expect(hostile.ok).toBe(false);
+    if (hostile.ok) return;
+    expect(hostile.line).not.toContain("SNAPSHOT");
+    expect(hostile.line).toContain("不是三种目标类型之一");
+  });
+
+  it("keeps the six ways a subject can be unavailable in six different sentences, checked in read order", () => {
+    const refusalOf = (subject: InspectSubject) => (subject.ok ? "ready" : subject.line);
+    expect(
+      [
+        refusalOf(inspectSubjectOf({ graph: null, target: readySubject.target, graphRevision: 7 })),
+        refusalOf(inspectSubjectOf({ graph: { targetId: null, claimIds: [] }, target: readySubject.target, graphRevision: 7 })),
+        refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: null, graphRevision: 7 })),
+        refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: { ok: false, line: "目标行读到的形状不对" }, graphRevision: 7 })),
+        refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: { ok: true, kind: "url" }, graphRevision: 7 })),
+        refusalOf(inspectSubjectOf({ graph: readySubject.graph, target: readySubject.target, graphRevision: null })),
+      ]
+      // Pinned by identity and by position: swapping two branches would tell the operator to go fix
+      // something that is already fine.
+    ).toEqual([
+      INSPECT_GRAPH_UNREAD_LINE,
+      INSPECT_NO_TARGET_LINE,
+      INSPECT_TARGET_UNREADABLE_LINE,
+      "目标行读到的形状不对",
+      INSPECT_TARGET_URL_LINE,
+      INSPECT_REVISION_UNREAD_LINE,
+    ]);
+
+    const ready = inspectSubjectOf(readySubject);
+    expect(ready.ok).toBe(true);
+    if (!ready.ok) return;
+    // Read back by value, not just by field name: the token the request will carry is the one the
+    // project row gave, and the claim list is the graph's, in the graph's order.
+    expect(ready).toEqual({ ok: true, targetId, kind: "har", graphRevision: 7, claimIds: [claimA, claimB] });
+  });
+
+  it("shows the concurrency token in the sentence, because a 409 has to be explainable", () => {
+    const line = inspectSubjectLine(inspectSubjectOf(readySubject), false);
+    expect(line).toContain(targetId);
+    expect(line).toContain("图修订 7");
+    expect(line).toContain("HAR 导入的字节");
+    expect(line).not.toContain("截断");
+    // A truncated view is said on the same line as the claim list it limits - the list below is then
+    // only part of what the target holds, and an operator choosing claims has to know that.
+    expect(inspectSubjectLine(inspectSubjectOf(readySubject), true)).toContain("截断");
+    const blocked = inspectSubjectLine({ ok: false, line: INSPECT_TARGET_URL_LINE }, true);
+    expect(blocked).toBe(INSPECT_TARGET_URL_LINE);
+    expect(blocked).not.toContain("截断");
+  });
+
+  it("refuses before anything crosses the socket, one named cause at a time", () => {
+    // Every precondition broken at once, and the session sentence still wins: an unpaired page has no
+    // door to send through, so the rest is not yet its problem.
+    const nothing = inspectDraftOf({ csrf: "", graph: null, target: null, graphRevision: null, chosen: [], question: "", scope: "" });
+    expect(nothing.ok).toBe(false);
+    if (nothing.ok) return;
+    expect(nothing.line).toBe(NO_SESSION_LINE);
+
+    for (const [overrides, line] of [
+      [{ graph: null }, INSPECT_GRAPH_UNREAD_LINE],
+      [{ graph: { targetId: null, claimIds: [] } }, INSPECT_NO_TARGET_LINE],
+      [{ target: null }, INSPECT_TARGET_UNREADABLE_LINE],
+      [{ target: { ok: true, kind: "url" } as const }, INSPECT_TARGET_URL_LINE],
+      [{ graphRevision: null }, INSPECT_REVISION_UNREAD_LINE],
+      [{ question: "   " }, INSPECT_QUESTION_EMPTY_LINE],
+      [{ scope: "" }, INSPECT_SCOPE_UNSELECTED_LINE],
+      // A value outside the two the page renders is the same unanswered question - and it must not be
+      // waved through as "close enough", which is how a default gets smuggled in.
+      [{ scope: "captured-runtime-ish" }, INSPECT_SCOPE_UNSELECTED_LINE],
+      [{ chosen: [] }, INSPECT_NEEDS_CLAIMS_LINE],
+      [{ chosen: [newId()] }, INSPECT_CHOICE_UNLISTED_LINE],
+    ] as const) {
+      const draft = inspectDraftOf(draftInput(overrides));
+      expect(draft.ok).toBe(false);
+      if (draft.ok) return;
+      expect(draft.line).toBe(line);
+    }
+
+    const padded = inspectDraftOf(draftInput({ question: "  这个响应在什么条件下会缺字段  " }));
+    expect(padded.ok).toBe(true);
+    if (!padded.ok) return;
+    // What goes out is the trimmed answer, so the door's `nonEmptyString` is not satisfied by spaces.
+    expect(padded.body.task.question).toBe("这个响应在什么条件下会缺字段");
+  });
+
+  it("keeps §8's one empty-claim exception distinct from its directed rule", () => {
+    const directed = inspectDraftOf(draftInput({ chosen: [] }));
+    expect(directed.ok).toBe(false);
+
+    const firstAnalysis = inspectDraftOf(draftInput({ graph: { targetId, claimIds: [] }, chosen: [] }));
+    expect(firstAnalysis.ok).toBe(true);
+    if (!firstAnalysis.ok) return;
+    // The empty list is what §8 allows for a target that has never been analysed; refusing it here
+    // would make the first inspect of a fresh import impossible to ask for.
+    expect(firstAnalysis.body.task.claimIds).toEqual([]);
+  });
+
+  it("lists the checked claims in the read's order, never the click's", () => {
+    const both = inspectDraftOf(draftInput({ chosen: [claimA, claimB] }));
+    const reversed = inspectDraftOf(draftInput({ chosen: [claimB, claimA] }));
+    expect(both.ok).toBe(true);
+    expect(reversed.ok).toBe(true);
+    if (!both.ok || !reversed.ok) return;
+    expect(both.body.task.claimIds).toEqual([claimA, claimB]);
+    // Same boxes, same body: §8's request digest is computed over this body, so a click sequence must
+    // not become a second identity for one request.
+    expect(reversed.body).toEqual(both.body);
+
+    // Half-known is not half-sent: dropping the unlisted id would silently narrow what was asked about.
+    const partly = inspectDraftOf(draftInput({ chosen: [claimA, newId()] }));
+    expect(partly.ok).toBe(false);
+    if (partly.ok) return;
+    expect(partly.line).toBe(INSPECT_CHOICE_UNLISTED_LINE);
+  });
+
+  it("sends exactly the fields §8 line 275 lists and no others", () => {
+    const draft = inspectDraftOf(draftInput({ chosen: [claimA, claimB], scope: "captured-runtime" }));
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+    expect(Object.keys(draft.body).sort()).toEqual(["expectedGraphRevision", "targetId", "task"]);
+    expect(Object.keys(draft.body.task).sort()).toEqual(["claimIds", "kind", "question", "scope"]);
+    expect(draft.body).toEqual({
+      targetId,
+      expectedGraphRevision: 7,
+      task: { kind: "inspect", claimIds: [claimA, claimB], question: "这个响应在什么条件下会缺字段", scope: "captured-runtime" },
+    });
+    // Nothing here is a `capture` field: profileId, scenario, network and sensitiveValues belong to the
+    // other half of the union, which this page cannot build (and must not half-build).
+    expect(JSON.stringify(draft.body)).not.toContain("sensitiveValues");
+    expect(JSON.stringify(draft.body)).not.toContain("profileId");
+  });
+
+  it("only prints the 首次分析 sentence about a target it actually read", () => {
+    // The sentence is "this target holds no claims yet". Printing it for a project with no target, or
+    // for a page that has not read anything, turns an unanswered question into an answered-looking one -
+    // which is what the browser pass for this round caught.
+    expect(inspectClaimsNoteFor(null)).toBeNull();
+    expect(inspectClaimsNoteFor({ targetId: null, claimIds: [] })).toBeNull();
+    expect(inspectClaimsNoteFor({ targetId, claimIds: [] })).toBe(INSPECT_FIRST_ANALYSIS_NOTE);
+    expect(inspectClaimsNoteFor({ targetId, claimIds: [claimA] })).toBeNull();
+  });
+
+  it("says which recorded gap can become a request on this page, in words an operator reads", () => {
+    const kinds = Object.keys(INQUIRY_KIND_LINES).sort();
+    expect(kinds).toEqual(["capture-new", "inspect-runtime", "read-evidence", "review-claim"]);
+    expect(new Set(Object.values(INQUIRY_KIND_LINES)).size).toBe(4);
+    expect(INQUIRY_KIND_LINES["inspect-runtime"]).toContain("line 275");
+    expect(INQUIRY_KIND_LINES["capture-new"]).toContain("发不出");
+
+    const line = inquiryQueueLine({
+      kind: "inspect-runtime",
+      subjectId: "cell-9",
+      gaps: ["authority-not-applicable", "basis-unknown"],
+      request: { subjectId: "cell-9" },
+    });
+    expect(line).toContain("inspect-runtime");
+    expect(line).toContain("cell-9");
+    expect(line).toContain("authority-not-applicable、basis-unknown");
+    expect(line).toContain(INQUIRY_KIND_LINES["inspect-runtime"]);
+    // The queue used to print `JSON.stringify(inquiry)`: a wire-shaped blob for a request nobody sent.
+    expect(line).not.toContain("{");
+    expect(inquiryQueueLine({ kind: "review-claim", subjectId: "cell-9", gaps: [], request: {} })).toContain("（无）");
   });
 });
