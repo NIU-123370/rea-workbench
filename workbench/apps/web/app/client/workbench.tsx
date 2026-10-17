@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, CaptureActionRow, CaptureProfileOption, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, CaptureActionRow, CaptureProfileOption, PlanExclusionRow, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -273,6 +273,11 @@ export function PairingForm(props: { onPaired: () => void }): React.ReactElement
 // by name (`captureActionOf`), not silently filled in.
 const EMPTY_CAPTURE_ROW: CaptureActionRow = { kind: "click", locatorKind: "role", role: "", name: "", testId: "", value: "", waitState: "" };
 
+// An exclusion row starts answering nothing, including no reason code: the two codes are different
+// claims about the inventory (§7.4) and the page picking one would be the page deciding which claim an
+// operator is making about somebody's sample.
+const EMPTY_PLAN_EXCLUSION_ROW: PlanExclusionRow = { vectorId: "", reasonCode: "", reason: "", excludedBehavior: "", supersededBy: "" };
+
 export function Workbench(props: { projectId: string }): React.ReactElement {
   const [graph, setGraph] = useState<GraphViewPayload | null>(null);
   const [jobs, setJobs] = useState<JobsPagePayload | null>(null);
@@ -338,6 +343,15 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // read will pick up: a declaration makes this project's newest target the address a capture visits.
   const [declareUrl, setDeclareUrl] = useState("");
   const [declareNotice, setDeclareNotice] = useState<string | null>(null);
+  // §8 line 289's plan builder. Every value it needs is read somewhere else on this page already - the
+  // target row (kind *and* snapshot digest, one projection), the journal (which contracts are approved),
+  // the sample page (the inventory this plan must account for) - so the operator only answers judgement:
+  // which contracts, and for each excluded sample which of §7.4's two claims and about which behaviour.
+  const [planChosen, setPlanChosen] = useState<string[]>([]);
+  // Zero rows to start: §8 line 289's `exclusions` has no minimum and a plan that needs no exclusion is the
+  // ordinary case, so the form must not force an answer. A row only exists once the operator adds one.
+  const [planRows, setPlanRows] = useState<PlanExclusionRow[]>([]);
+  const [planNotice, setPlanNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -717,6 +731,54 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     await load();
   }, [csrf, declareUrl, load, props.projectId]);
 
+  // The plan panel's subject, from the same function its submit's gate calls, so the line under the
+  // heading and the reason a click refuses are one value (`inventoryRevision` and the inventory ids both
+  // come from the 样本 page read, and the contract list from the journal read - no second read of either).
+  const planContracts = useMemo(() => (journal === null ? null : approvedContractIds(journal)), [journal]);
+  const planInventory = useMemo(() => (samples === null ? null : samples.rows.map((row) => ({ id: row.vectorId, label: `${row.vectorId}｜${row.caseKey}｜${row.visibility}` }))), [samples]);
+  const planSubject = useMemo(
+    () =>
+      planSubjectOf({
+        targetId: captureTarget?.id ?? null,
+        target: captureTarget?.read ?? null,
+        inventoryRevision: samples?.inventoryRevision ?? null,
+        contracts: planContracts,
+      }),
+    [captureTarget, planContracts, samples],
+  );
+
+  const patchPlanRow = useCallback((index: number, patch: Partial<PlanExclusionRow>) => {
+    setPlanRows((previous) => previous.map((entry, position) => (position === index ? { ...entry, ...patch } : entry)));
+  }, []);
+
+  // §8 line 289 from the browser, keyed per click (§8 line 261 lists plan creation). The whole page is
+  // re-read afterwards for the same reason as the other creation doors: the plan row, its digest and the
+  // audit entry are the worker's writes, and a panel that assembled them from the receipt would be
+  // showing what it predicted.
+  const buildPlan = useCallback(async () => {
+    const draft = planDraftOf({
+      csrf,
+      targetId: captureTarget?.id ?? null,
+      target: captureTarget?.read ?? null,
+      inventoryRevision: samples?.inventoryRevision ?? null,
+      contracts: planContracts,
+      chosenContractIds: planChosen,
+      inventoryIds: (samples?.rows ?? []).map((row) => row.vectorId),
+      rows: planRows,
+    });
+    if (!draft.ok) {
+      setPlanNotice(draft.line);
+      return;
+    }
+    const got = await postJson(`/api/v1/projects/${props.projectId}/verification-plans`, draft.body, csrf, crypto.randomUUID());
+    if (!got.ok) {
+      setPlanNotice(refusalLine("造计划被拒", got.reason, got.facts));
+      return;
+    }
+    setPlanNotice(planBuildLine((relayData(got.value) as Record<string, unknown> | null) ?? {}));
+    await load();
+  }, [csrf, captureTarget, load, planChosen, planContracts, planRows, props.projectId, samples]);
+
   // §8 line 272 from the browser: the file goes out as the multipart part the door names, with the
   // four fields it lists and nothing else. No client-side size or type gate is added on top - the
   // door answers a 5 MiB file with 413 naming `byteLength` and `maxBytes`, an unsupported media type
@@ -952,6 +1014,105 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                 </li>
               ))}
             </ul>
+            <section aria-label="造验证计划" data-panel="plan-build">
+              <h3>造一份验证计划（§8 line 289：勾已批准的契约，并为每一条排掉的样本写明是哪一种说法）</h3>
+              <p data-plan-subject={planSubject.ok ? "ready" : "blocked"}>{planSubjectLine(planSubject)}</p>
+              {planContracts === null ? (
+                <p data-plan-contracts="unreadable">{PLAN_NO_JOURNAL_LINE}</p>
+              ) : planContracts.length === 0 ? (
+                <p data-plan-contracts="empty">{PLAN_NO_CONTRACTS_LINE}</p>
+              ) : (
+                <ul data-plan-contracts="list">
+                  {planContracts.map((id) => (
+                    <li key={id}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          data-plan-contract={id}
+                          checked={planChosen.includes(id)}
+                          onChange={(event) =>
+                            setPlanChosen((previous) =>
+                              event.target.checked ? [...previous, id] : previous.filter((entry) => entry !== id),
+                            )
+                          }
+                        />
+                        {`契约 ${id}`}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <h4>排除项</h4>
+              <ol data-plan-rows={planRows.length}>
+                {planRows.map((entry, index) => (
+                  <li key={index} data-plan-row={index} data-plan-reason={entry.reasonCode === "" ? "unanswered" : entry.reasonCode}>
+                    <label htmlFor={`plan-vector-${String(index)}`}>排掉哪一条样本</label>
+                    <select
+                      id={`plan-vector-${String(index)}`}
+                      data-plan-vector={index}
+                      value={entry.vectorId}
+                      onChange={(event) => patchPlanRow(index, { vectorId: event.target.value })}
+                    >
+                      <option value="">（还没有选：这一格不给默认值）</option>
+                      {(planInventory ?? []).map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <label htmlFor={`plan-reason-code-${String(index)}`}>哪一种说法</label>
+                    <select
+                      id={`plan-reason-code-${String(index)}`}
+                      data-plan-reason-code={index}
+                      value={entry.reasonCode}
+                      onChange={(event) => patchPlanRow(index, { reasonCode: event.target.value, supersededBy: "" })}
+                    >
+                      <option value="">（还没有选：两类理由是两件不同的事）</option>
+                      {PLAN_EXCLUSION_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <label htmlFor={`plan-reason-${String(index)}`}>理由（reason）</label>
+                    <input id={`plan-reason-${String(index)}`} data-plan-reason={index} type="text" value={entry.reason} onChange={(event) => patchPlanRow(index, { reason: event.target.value })} />
+                    <label htmlFor={`plan-behavior-${String(index)}`}>被排掉的行为（excludedBehavior）</label>
+                    <input id={`plan-behavior-${String(index)}`} data-plan-behavior={index} type="text" value={entry.excludedBehavior} onChange={(event) => patchPlanRow(index, { excludedBehavior: event.target.value })} />
+                    {/* The successor is a fact only the `superseded` claim carries, and §7.4 forbids the
+                        pairing the other way round - so the box appears for one code and not the other,
+                        rather than being a field the operator has to remember to leave alone. */}
+                    {entry.reasonCode === "superseded" ? (
+                      <>
+                        <label htmlFor={`plan-successor-${String(index)}`}>被哪一条取代</label>
+                        <select
+                          id={`plan-successor-${String(index)}`}
+                          data-plan-successor={index}
+                          value={entry.supersededBy}
+                          onChange={(event) => patchPlanRow(index, { supersededBy: event.target.value })}
+                        >
+                          <option value="">（还没有选：要说清是哪一行取代了它）</option>
+                          {(planInventory ?? []).map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </>
+                    ) : null}
+                    <button type="button" data-plan-row-remove={index} onClick={() => setPlanRows((previous) => previous.filter((_, position) => position !== index))}>
+                      删掉这一条排除
+                    </button>
+                  </li>
+                ))}
+              </ol>
+              <button type="button" data-plan-row-add onClick={() => setPlanRows((previous) => [...previous, EMPTY_PLAN_EXCLUSION_ROW])}>
+                加一条排除
+              </button>
+              <button type="button" data-plan-submit onClick={() => void buildPlan()}>
+                造计划
+              </button>
+              <span data-plan-notice>{planNotice ?? "尚未造计划：这一发只写一份草稿计划，批准要另走 §8 line 291。"}</span>
+            </section>
             <section aria-label="蓝图冻结" data-panel="blueprint-freeze">
               <h3>冻结蓝图（§8 line 292：只收已批准计划的 id）</h3>
               {freeze.state === "ready" ? (

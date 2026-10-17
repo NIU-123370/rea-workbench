@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { WorkbenchColumns } from "../../apps/web/ui/panels.tsx";
-import { buildMiddlePanel, buildRightTabs, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { buildMiddlePanel, buildRightTabs, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, PLAN_NO_JOURNAL_LINE, PLAN_NO_TARGET_LINE, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
 import { Workbench } from "../../apps/web/app/client/workbench.tsx";
 import { ProjectList } from "../../apps/web/app/client/project-list.tsx";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
@@ -366,5 +366,28 @@ describe("the target-declare panel before anything is typed", () => {
     expect(html).toContain("尚未声明：这一发只写一行目标，不会去访问任何东西。");
     expect(html).not.toContain("已声明 URL 目标");
     expect(html).not.toContain("身份未知（");
+  });
+});
+
+// The plan builder's first paint (§8 line 289). It is the one section on this page whose inputs are
+// three other sections' reads, so the honest first state is "nothing has been read yet" on all three
+// fronts at once - and no exclusion row, because a plan that needs no exclusion is the ordinary case
+// and a forced row would be the page demanding an answer nobody asked for.
+describe("the plan-build panel before any read has happened", () => {
+  it("names all three missing reads and offers no exclusion row", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toContain('data-panel="plan-build"');
+    // A plan precedes a freeze in the chain, so the panel that builds one sits above the one that consumes it.
+    expect(html.indexOf('data-panel="plan-build"')).toBeLessThan(html.indexOf('data-panel="blueprint-freeze"'));
+    expect(html).toContain('data-plan-subject="blocked"');
+    expect(html).toContain(PLAN_NO_TARGET_LINE);
+    expect(html).toContain('data-plan-contracts="unreadable"');
+    expect(html).toContain(PLAN_NO_JOURNAL_LINE);
+    expect(html).toContain('data-plan-rows="0"');
+    expect(html).not.toContain("data-plan-vector=");
+    expect(html).not.toContain("data-plan-successor=");
+    expect(html).toContain('data-plan-row-add="true"');
+    expect(html).toContain("尚未造计划：这一发只写一份草稿计划，批准要另走 §8 line 291。");
+    expect(html).not.toContain("已造计划");
   });
 });
