@@ -13,6 +13,8 @@ import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, bluepri
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { cancelRequestSchema, cleanupRetryReceiptSchema, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
+import { CAPTURE_MEDIA_TYPES, harImportHttpResponseSchema } from "../../packages/contracts/imports.ts";
+import { instantSchema } from "../../packages/contracts/primitives.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
@@ -22,6 +24,10 @@ import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { JsonSchema } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
 import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
+// The digest owner is the domain module, and apps/web may not import node:crypto (§3). That is not a
+// inconvenience: the declared `sourceSha256` an upload carries has to be produced by the same function
+// the worker will re-measure with, or the two sides would disagree about what the same bytes hash to.
+import { digestBytes } from "../../packages/domain/canonical-json.ts";
 import { asId, asInstant, isId, isReaEvidenceId, newId } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import type { JsonObject, JsonValue } from "../../packages/domain/json-value.ts";
@@ -61,9 +67,22 @@ import type { WorkerCaller, WorkerFailure } from "./worker-client.ts";
 
 export const API_PREFIX = "/api/v1";
 
-// §12 measures before it allocates. These bodies are named commands, not uploads: the
-// multipart import route belongs to issue #15's flow and is not mounted here.
+// §12 measures before it allocates, and the two budgets bound different things: these named
+// commands are small JSON bodies, while §8 line 272's import carries a file. Reading them under
+// one number would mean either refusing every realistic HAR or holding JSON routes to a
+// megabyte budget they have no reason to trust, so the transport picks by content type.
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
+// The whole multipart body.
+export const MAX_UPLOAD_BODY_BYTES = 6 * 1024 * 1024;
+
+// The `file` part inside it. This number is derived rather than chosen: the bytes cross to the
+// worker as base64 inside one RPC frame, and that frame is capped at 8 MiB by
+// `MAX_FRAME_BYTES` in apps/worker/rpc-server.ts. base64 of n bytes is 4·ceil(n/3), so a 5 MiB
+// part is ~6.67 MiB of text and leaves the JSON envelope room beside it. A larger upload needs a
+// chunked staging handoff this build does not have; the door names that limit instead of letting
+// the frame cap surface as a transport error nobody declared.
+export const MAX_UPLOAD_FILE_BYTES = 5 * 1024 * 1024;
 
 // The role §8 gives a paired local session. It is assigned by this module and never read
 // from a caller, so a body field claiming a role has nowhere to go.
@@ -158,6 +177,11 @@ const ROUTES: readonly RouteSpec[] = [
   // creations, and the answer is 202 rather than 201: what this creates is a job that has not
   // run yet, so there is no report to point at on the way out.
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/verifications`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
+  // The upload (§8 line 272). `mutating` because it is a POST, so Host, Origin, session and CSRF
+  // all apply before a single byte of the file is looked at; keyed because §8 line 261 names
+  // import among the creations. The body is multipart, so this is the one route the JSON budget
+  // above does not govern.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/imports`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The two lifecycle writes (§8 lines 278-279). Only the cleanup retry is in §8 line 261's list of
   // keyed operations, and §8 line 279 says so itself (需幂等键与本地会话); the cancel door therefore
   // takes no key and its repeat-safety comes from the state machine, not from a journal.
@@ -762,6 +786,15 @@ const COMMIT_PROJECTIONS = {
     reason: "verification-request-shape",
     message: "the worker did not answer with a queued verification job",
   },
+  // §8 line 272's 202 body is `{targetId,job}` and nothing else. The worker's receipt also names
+  // the lease and the source artifact it minted; those are real, but this route's third column
+  // does not list them, so they stay on the service side instead of becoming an undocumented answer.
+  import: {
+    fields: ["targetId", "job"],
+    schema: harImportHttpResponseSchema,
+    reason: "import-shape",
+    message: "the worker did not answer with an imported target and its job",
+  },
 } as const satisfies Record<string, CommitProjection>;
 
 function projectCommit(
@@ -923,6 +956,127 @@ async function requestVerification(ctx: Context, deps: ApiDependencies, key: str
     payload: { projectId, idempotencyKey: key, request },
     body: request,
     projection: COMMIT_PROJECTIONS.verification,
+    status: 202,
+  });
+}
+
+// §8 line 272's body is multipart, so this is the one route that reads `bodyBytes`: a file part is
+// arbitrary bytes, and the text view of them has already replaced every sequence that is not valid
+// UTF-8. The named fields are exactly the four §8 lists - `file`, `kind`, `deadlineAt`,
+// `sensitiveValues` - and a fifth name is refused by name rather than honoured: a door that accepts
+// what the document does not name becomes the place where undocumented capabilities arrive. (The
+// worker's own command does support a `recordOrdinals` selection; §8 line 272 does not list it, so
+// it stays a service-side capability and the deviation is recorded on issue #58.)
+const IMPORT_FIELDS: readonly string[] = ["file", "kind", "deadlineAt", "sensitiveValues"];
+const IMPORT_KINDS: readonly string[] = ["har", "asar"];
+
+async function importCapture(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const contentType = ctx.request.headers["content-type"] ?? "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-multipart-required", "the import body is multipart/form-data (§8 line 272)", ctx.declaration);
+  }
+  let form: FormData;
+  try {
+    form = await new Response(ctx.request.bodyBytes, { headers: { "content-type": contentType } }).formData();
+  } catch {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-multipart-malformed", "the multipart body could not be parsed", ctx.declaration);
+  }
+
+  // Read before anything can be refused: §12.1 filters *every* message, detail and log line this
+  // request produces against the caller's declared values, and the refusals below repeat a media
+  // type and a kind the caller named. A declaration collected at the end of the door would have left
+  // those echoes in place - which is what the test "never echoes a value the caller declared
+  // sensitive" caught.
+  const declaredValues = form.getAll("sensitiveValues").filter((value): value is string => typeof value === "string" && value.length > 0);
+  const declaration: SensitiveDeclaration = { declaredValues: [...ctx.declaration.declaredValues, ...declaredValues] };
+
+  const names = new Set(form.keys());
+  const unexpected = [...names].filter((name) => !IMPORT_FIELDS.includes(name));
+  if (unexpected.length > 0) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-field-unsupported", "the import carries fields §8 line 272 does not name", declaration, { rejectedKeys: unexpected });
+  }
+
+  const parts = form.getAll("file");
+  if (parts.length === 0) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-file-part-missing", "the import needs a `file` part", declaration);
+  }
+  if (parts.length > 1) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-file-part-duplicated", "one import carries exactly one file", declaration);
+  }
+  const part = parts[0];
+  if (!(part instanceof File)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-file-part-not-file", "the `file` part must be a file, not a text field", declaration);
+  }
+  const allowedMediaTypes: readonly string[] = CAPTURE_MEDIA_TYPES;
+  if (!allowedMediaTypes.includes(part.type)) {
+    return refused(ctx.requestId, "UNSUPPORTED_FORMAT", "import-media-type-unsupported", "the upload's media type is not one the workbench ingests", declaration, { mediaType: part.type, allowed: [...allowedMediaTypes] });
+  }
+  const bytes = new Uint8Array(await part.arrayBuffer());
+  if (bytes.byteLength === 0) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-file-empty", "an empty file is not an import", declaration);
+  }
+  if (bytes.byteLength > MAX_UPLOAD_FILE_BYTES) {
+    // Named here rather than left to the RPC frame: the frame limit is this process's transport,
+    // and a caller that never learns which number it hit cannot fix the request.
+    return refused(ctx.requestId, "RESOURCE_LIMIT", "import-file-too-large", "the upload is larger than one worker frame can carry", declaration, { byteLength: bytes.byteLength, maxBytes: MAX_UPLOAD_FILE_BYTES });
+  }
+
+  const kind = form.get("kind");
+  if (typeof kind !== "string" || !IMPORT_KINDS.includes(kind)) {
+    return refused(ctx.requestId, "INVALID_INPUT", "import-kind-unsupported", "the import names a kind §8 line 272 does not offer", declaration, { allowed: [...IMPORT_KINDS] });
+  }
+  // §8's own order: the unsupported projection is answered first, because that is the disagreement
+  // the caller can act on. A caller who is told "this build cannot ingest ASAR" and a caller who is
+  // told "ASAR carries no sensitive projection" are being asked to change different things.
+  if (kind === "asar" && declaredValues.length > 0) {
+    return refused(ctx.requestId, "SENSITIVE_PROJECTION_UNSUPPORTED", "import-asar-sensitive-values-unsupported", "the ASAR path records no short-lived sensitive declaration (§8 line 272: 不伪称上游支持)", declaration);
+  }
+  if (kind === "asar") {
+    return refused(ctx.requestId, "CAPABILITY_UNAVAILABLE", "import-asar-not-wired", "this build wires the HAR ingestion loop only (README 还没有的东西)", declaration);
+  }
+  // Display text, never a path this process opens (§5): the bytes arrived in this request, and
+  // nothing below reads the name again.
+  const filename = part.name;
+  const mediaType = part.type;
+  const sourceSha256 = digestBytes(bytes);
+  const safeBody: Record<string, JsonValue> = {
+    filename,
+    mediaType,
+    format: "har",
+    byteLength: bytes.byteLength,
+    sourceSha256,
+  };
+  const command: Record<string, JsonValue> = { ...safeBody, idempotencyKey: key };
+  const deadlineRaw = form.get("deadlineAt");
+  if (deadlineRaw !== null) {
+    const parsedDeadline = instantSchema.safeParse(deadlineRaw);
+    if (!parsedDeadline.success) {
+      return refused(ctx.requestId, "INVALID_INPUT", "import-deadline-malformed", "the deadline is not a UTC instant", declaration);
+    }
+    command.deadlineAt = parsedDeadline.data;
+    safeBody.deadlineAt = parsedDeadline.data;
+  }
+
+  // The declaration travels to the worker for this task only (§8 line 261: 含短期敏感上下文的请求
+  // 仅在该任务仍存活时核对). It never enters `safeBody`, which is the projection the replay digest
+  // is taken over (§5: 显式敏感原文不进入持久 request_digest).
+  const payload: Record<string, JsonValue> = {
+    projectId,
+    command,
+    bytesBase64: Buffer.from(bytes).toString("base64"),
+  };
+  if (declaredValues.length > 0) payload.sensitiveValues = declaredValues;
+
+  return commitCreation({ ...ctx, declaration }, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${String(projectId)}/imports`,
+    template: `${API_PREFIX}/projects/:projectId/imports`,
+    command: "capture.importHar",
+    payload,
+    body: safeBody,
+    projection: COMMIT_PROJECTIONS.import,
     status: 202,
   });
 }
@@ -1442,6 +1596,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createPlan(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/verifications`) {
       response = await requestVerification(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/imports`) {
+      response = await importCapture(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/cancel")) {
       response = await cancelJob(ctx, deps);
     } else if (route.method === "POST" && route.template.endsWith("/cleanup-retry")) {

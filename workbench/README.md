@@ -275,15 +275,27 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **36 条**，仍缺 **4 条**——
-`POST /projects/:p/imports`（272）、`POST /projects/:p/jobs`（275）、`POST /projects/:p/candidates`（294）、
-`GET /projects/:p/jobs/:j/preview`（304）；前两条与 294 卡在同一个缺项上（#57 的生成预算与作业发起方），
-imports 卡的是二进制穿过 `HttpRequest.body: string` 与 8 MiB RPC 帧这条路。
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **37 条**，仍缺 **3 条**——
+`POST /projects/:p/jobs`（275）、`POST /projects/:p/candidates`（294）、
+`GET /projects/:p/jobs/:j/preview`（304）；前两条卡在同一个缺项上（#57 的生成预算与作业发起方），
+preview 卡的是「像素图由隔离 origin 提供」那半边：本 build 里**没有任何东西持有预览帧**
+（`imageUrl`/`actionState` 全仓零命中，`buildLeftPanel` 的 `frameLabels` 没有生产者，
+`artifacts` 的 class 名录里也没有 frame/preview），所以那道门今天能如实答的只有「没有画面」。
+这一轮补的是 `POST /projects/:p/imports`（272），它缺的不是命令而是**transport**：
+`HttpRequest.body` 一直是 `chunk.toString("utf8")` 拼出来的文本，而一个文件部分是任意字节——
+不是合法 UTF-8 的序列在到达门口之前就已经变成替换字符了。现在请求带着
+`bodyBytes: Uint8Array<ArrayBuffer>` 进来，文本只是它的一个视图，JSON 门照旧读 `body`。
+配额也跟着分成两个（§12「分别预留容量」）：JSON 仍是 64 KiB，multipart 整个体 6 MiB，
+而 `file` 部分 **5 MiB 是由 RPC 帧的 8 MiB 反推的**（base64 是 4·⌈n/3⌉，再留给信封一点余地）；
+超过它就是具名 413 并报出 `byteLength` 与 `maxBytes` 两个数，而不是让帧上限以传输错误的形式冒出来。
+再大的上传要的是分块/staging 交接，本 build 没有，已单开 **issue #77**（四个点等裁决：
+命令形状、谁在何时计量、断开后的部分 staging 归谁清、或者干脆把 profile 的 `maxUploadBytes`
+降到这条路兑现得了的值）。
 这个刻度是现算的：把 §8 表里每行的 `METHOD 路径` 抽出来，与 `api.ts` 路由表的
 `method + template` 逐字比（`:p/:v/:j/...` 按上一段名词展开成路由里的那个参数名），
 另外还多出 **1 条**路由是文档表里没有的——`GET /projects/:p/exports`（交付清单），
 它是 #22 交付时补的读门，记在偏离里。
-这 36 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
+这 37 条里最近补上的是三个创建门（`POST .../vectors`、`.../contracts`、`.../verification-plans`，
 §8 的 282／286／289 行）与四个改变状态的动作门（三条 review ＋ `POST .../blueprints`，285／287／291／292 行）——
 命令一直都在，缺的只是门，所以「**造样本 → 写契约 → 批契约 → 造计划 → 批计划 → 冻蓝图**」这条整链
 现在能由一个配对会话里的 HTTP 请求走完（浏览器实测见下）。每个记录类型只有**一份投影**
@@ -324,6 +336,27 @@ worker 的 `UNIQUE (project_id, idempotency_key)` 替换键重发兜底。**这�
 `NOT_FOUND` 之外的答案走到存储、超长键会安静地写进一个 §14 说 200 字符上限的列里。
 一处**故意没有加**的闸门：deadline 过期不在这里拒——§11 的作业状态机是唯一持有者
 （`tests/unit/job-queue.test.ts:91` 已经证过 `deadline-expired`），再写一道就是第二份会漂移的裁决。
+`POST /projects/:p/imports`（line 272）是这一面第一扇**收字节**的门，回 **202 `{targetId, job}`**。
+它的规矩一条条都能指回文档：字段名录就是 §8 那一格列的四件（`file`／`kind`／`deadlineAt`／
+`sensitiveValues`），第五个名字**报键名拒收**——worker 自己的命令其实支持 `recordOrdinals` 选段，
+文档这行没写，所以门不替文档加料（这条偏离记在下面那串「文档给了字段而实现无处安放」旁边）；
+`kind:'asar'` 有两种答案，按 §8 自己区分的顺序来：带 `sensitiveValues` 时 **422
+`SENSITIVE_PROJECTION_UNSUPPORTED`**（那是调用方能改的东西），不带时 **503 `import-asar-not-wired`**
+（本 build 只接了 HAR 闭环）；媒体类型只收 `CAPTURE_MEDIA_TYPES` 三个，越界回 422 并把允许表给出来。
+文件名是**显示文本**：它进 `targets.original_locator` 前过一遍 basename，落盘路径是内容地址
+`projects/<p>/artifacts/inspector/<sha256>.bin`，浏览器递 `../../../../etc/passwd` 也换不来一个路径。
+回执的形状这轮改了一次：`harImportReceiptSchema` 原来同时写着 `jobId`＋`jobState`，而 §8 要的是
+`job: JobRecord`——**同一件事的两个名字**，所以删掉前者，两处分支（新建与幂等重放）都改成
+`projectJobRecord(那一行, 该行自己的 lease)` 现读，于是重放答的就是行现在的样子。
+这一轮被自己的测试纠正的一条**真缺陷**：`sensitiveValues` 原本是在门口最后一步才并进过滤声明的，
+于是它前面那些拒绝照旧用「没并进去」的声明去过滤——浏览器实测里，一个声明了 `image/png` 为敏感值的
+调用方，在它自己那次的 422 回包中被**原样复读**了这个字符串。把声明的读取提到所有拒绝之前之后，
+同一处答的是 `"mediaType":""`（被过滤器抹掉），§12.1 那句「每一条消息、细节与日志行都按声明过滤」
+这才不是注释。变异批次里这条是 A11（把提前的声明改回空的）→ 用例红。
+**一支活下来的变异**要说清楚：A17 把 `sensitiveValues` 不再交给 worker，88 条测试仍全绿——因为
+HTTP 侧的幂等摘要守卫先把同一件事挡在了命令之前，两个 owner 在这条路径上重叠，今天从这道门
+看不出 worker 那份过滤器有没有被喂到值。留着它是因为「声明不能变成持久列」的持有者是 §5 说的摄取服务，
+不是门；但**它在本轮不可证**，别按「已验证 worker 侧也收到了声明」读。
 三个创建门各有一处 §8 偏离，都是「文档给了字段而实现无处安放」：vector 的 `sensitiveValues`、
 plan／contract 的 `expectedGraphRevision`（§7.4 让计划自己绑图版本）都由门**具名拒收**，
 而 contract 不在 §8 line 261 的幂等清单里，所以那扇门没有键——浏览器实测同键重发拿到的是
@@ -344,7 +377,8 @@ plan.review#12 → blueprint.freeze#13`；计划那次 `exclusions` 交了一条
 样本／契约／计划后冻结 **201** `publicVectorCount 1 · holdoutVectorCount 0 · contractCount 1 · auditSeq 7`，
 同键重发得到**逐字段相同**的回执与**新的** `x-request-id`，审计日志里 `blueprint.freeze` 的 allow 只有
 **一条**；200 字符的键正常受理，201 字符 **400 `idempotency-key-required`**。
-注意 `POST /imports` 也在缺的那一半里——**HAR 导入目前没有浏览器可达的入口**。
+注意 `POST /imports` 已经在那一半被补上了（本轮）——**HAR 导入现在有浏览器可达的入口了**，
+但只有一次采集真从这道门进来过：路径、限额与拒绝形状是实测的，`file` 部分的上限是 5 MiB（#77）。
 
 拒绝回包里的数字现在能到操作者（issue #59 已闭合）。做法是一份**具名键白名单**
 （`packages/contracts/errors.ts` 的 `SAFE_DETAIL_KEYS`，21 个键：字节数、上限、代数、修订号两侧、
@@ -511,6 +545,46 @@ Next 中继，读数逐条对过——无 `targetId` 与 `targetId=not-a-uuid` *
   这不是门的问题，是缺另一扇门，已单开 **issue #75** 记录（命令名、evaluator capability、
   以及「谁把 queued 推到 running」三点等裁决）。
 
+浏览器实测·第七轮（2026-10-17 04:11–04:16，三个真进程：worker＋web(4310)＋next dev(4496)；
+这一轮换了两处 rig：`WB_REA_ENTRYPOINT` 指向 `tests/fixtures/rea-mcp-fixture.mjs`（记录的 tools/list
+形状那份），因为 `capture.importHar` 要先有一个 provider 会话才建得出摄取服务；worker 是 **SIGTERM
+优雅停**的，日志收在 `worker stopped`／`web stopped`，`worker.lock` 与 `worker.rpc.sock` 自己消失了
+——这正是 #72 说的「只有非正常死才会留下陈旧文件」的反面证据）：
+
+- 配对走页面表单（`Dv1eCWNK…` 一次性码），配对后 `GET /session` 200、`reviewerId=a7eb883a…`。
+- `POST /projects/:p/imports`（同源 `fetch` + `FormData` + 一个 `File`，键 `browser-import-1`）→
+  **202**，体恰好两个键 `{targetId:"1759a481…", job:{id:"61832ff6…", kind:"inspect", state:"queued",
+  cleanupState:"pending", deadlineAt:null, retryAt:null, cleanupRetryAt:"2026-10-17T04:11:57.216Z",
+  resultRef:null, error:null}}`。`cleanupRetryAt` 不是墙钟：投影的 `now` 取的是那一行的 `updated_at`
+  （`job-queue.ts:111`），所以它是可重读的行派生值，不是每次读都变的数。
+- 同键同体重发 → 回包**逐字节相同**而 `x-request-id` 换（`77837a47…`）；`har.import` 的 allow 日志
+  只有 seq 23 与 24 两条（两次导入各一条，重发没跑命令）。
+- **二进制那条**是这一轮的关键读数：浏览器造 4096 字节 `0x00..0xFF` 循环体 → **202**，
+  `targets.source_sha256`＝`snapshot_digest`＝`artifacts.sha256`＝`c8f5d034…f193`，
+  与我在另一台 shell 里对本地重建的同一串字节 `createHash` 出来的值逐字相同；
+  落盘文件 `shasum -a 256` 同一个值，头 16 字节 `0001 0203 … 0f`，大小 4096，权限 `-rw-------`，
+  键名就是内容地址。文本那条 87 字节同样对得上（`d27c19f9…524d88`）。
+- 拒绝侧八条各有形状：无键 **400** `idempotency-key-required`（流水线那句措辞）；
+  错 CSRF **403** `csrf-token-missing`；JSON 体 **400**（不是 multipart）；`image/png` **422**
+  `import-media-type-unsupported` 带三个允许值；多带 `recordOrdinals` **400**
+  `rejectedKeys:["recordOrdinals"]`；`kind:"asar"` **503** `import-asar-not-wired`；
+  `kind:"asar"`＋`sensitiveValues` **422** `SENSITIVE_PROJECTION_UNSUPPORTED`（§8 那条自己区分的答案）；
+  5 MiB＋1 字节 **413** `{byteLength:5242881, maxBytes:5242880}`。
+- **一条测试抓到的真缺陷**：上面那两次 422 里，第一次（改门前）的回包把调用方自己声明为敏感的
+  `image/png` **原样复读**了；把声明的读取提到所有拒绝之前之后，同一处的细节变成 `"mediaType":""`。
+  这条后来固定成用例（A11 变异 → 红）。
+- 页面自己读到：重载后 `会话：paired`，左栏 `任务 db52b6e9-1155-454e-8834-0dc3b1105139`／
+  `清理 pending`／`画面 无画面：本次导入只带请求与响应，没有预览帧`——那句这次是**真话**，
+  上传里确实一个预览帧都没有（本轮没有加任何按钮，也没有生产者）。
+- 磁盘侧独立核（第二个连接 `readOnly:true`）：两条 inspect 作业都 `queued`、`target_id` 指着各自
+  新建的 target、幂等键分别是 `browser-import-1`／`browser-import-bin`、两份 `request_digest` 不同；
+  两条 `resource_leases` 的 ownership proof 是 `{"mintedBy":"har-import","jobId":…,"sourceArtifactId":…}`；
+  `events` 各一条 `job.updated`，payload 是 `[jobId, targetId]`＋`state:"queued"`；
+  `verifications` 计数仍是 1（导入造不出结论）。
+- 这一轮**没做也没法做的**：`file` 部分 5 MiB 以上没有通路（#77），ASAR 那条只到「具名拒绝」，
+  导入之后的 `capture.inspect` 跟进没从这道门跑过（它没有 HTTP 命令名，README 的「还没有的东西」里
+  ASAR/HAR 解码那半仍按未接线读）。
+
 浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
 把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：
 
@@ -548,7 +622,10 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 明确**未实现 / 未验证**的范围：
 
 - ASAR 的导入 ingestion job、目标行与 artifact 落库尚未由 worker 装配接线
-  （`apps/worker` 现在只注册 HAR 导入闭环）；`static-analysis.ts` 只做准入闸门与
+  （`apps/worker` 现在只注册 HAR 导入闭环，所以 `kind:"asar"` 的上传在门口就具名拒绝：
+  503 `import-asar-not-wired`，带声明时按 §8 先回 422）；HAR 上传这轮有了 HTTP 入口，
+  但**导入之后的解码跟进没有**——`capture.inspect` 不在封闭命令表里，作业会停在 `queued`
+  （与 #75 那半边是同一类空缺：造得出工作，接不了工作）。`static-analysis.ts` 只做准入闸门与
   已持久化 envelope 的只读投影。
 - 只交付 `detail: "complete"` 的内联图。`detail: "summary"` 的 envelope 返回
   503 `CAPABILITY_UNAVAILABLE`，因为读回完整图需要 `inspect_analysis_view` 访问
