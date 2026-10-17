@@ -6,11 +6,15 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalRoute,
   checkDocs,
+  checkIdempotencyKeys,
   checkRoutes,
   checkSectionAnchors,
   checkSourceReferences,
   findIdReferences,
   findSectionAnchors,
+  IDEMPOTENCY_DEVIATIONS,
+  KEYED_CREATION_TEMPLATES,
+  KEYED_CREATION_WORDS,
   parseAcceptanceRows,
   parseDecisionRows,
   parseDesignRoutes,
@@ -242,8 +246,8 @@ describe("§8's route table is reconciled with the doors the web adapter mounts"
 
   // The adapter's table as api.ts writes it: one door per line, the prefix interpolated rather
   // than spelled out. Lines 2-5 below are the four doors.
-  const door = (method: string, template: string) =>
-    `  { method: "${method}", template: \`\${API_PREFIX}${template}\`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },`;
+  const door = (method: string, template: string, keyed = false) =>
+    `  { method: "${method}", template: \`\${API_PREFIX}${template}\`, mutating: ${String(method !== "GET")}, requiresSession: true, requiresIdempotencyKey: ${String(keyed)} },`;
   const api = (extra: string[] = []) =>
     [
       "const ROUTES: readonly RouteSpec[] = [",
@@ -257,9 +261,9 @@ describe("§8's route table is reconciled with the doors the web adapter mounts"
 
   it("reads §8's rows with their line numbers, and nothing from the neighbouring tables", () => {
     expect(designRows()).toEqual([
-      { method: "GET", target: "/health", line: 10 },
-      { method: "POST", target: "/projects/:p/jobs", line: 11 },
-      { method: "GET", target: "/projects/:p/jobs/:j/preview", line: 12 },
+      { method: "GET", target: "/health", request: "无；需本地会话", line: 10 },
+      { method: "POST", target: "/projects/:p/jobs", request: "`{task}`", line: 11 },
+      { method: "GET", target: "/projects/:p/jobs/:j/preview", request: "query `frame?:integer`", line: 12 },
     ]);
     // A document with no §8 heading yields no rows, which the caller turns into
     // `design-routes-unreadable` rather than into an empty comparison.
@@ -268,10 +272,10 @@ describe("§8's route table is reconciled with the doors the web adapter mounts"
 
   it("reads the adapter's table by its line shape", () => {
     expect(parseMountedRoutes(api())).toEqual([
-      { method: "GET", target: "/health", line: 2 },
-      { method: "POST", target: "/projects/:projectId/jobs", line: 3 },
-      { method: "GET", target: "/projects/:projectId/exports", line: 4 },
-      { method: "GET", target: "/comparator-policies", line: 5 },
+      { method: "GET", target: "/health", line: 2, keyed: false },
+      { method: "POST", target: "/projects/:projectId/jobs", line: 3, keyed: false },
+      { method: "GET", target: "/projects/:projectId/exports", line: 4, keyed: false },
+      { method: "GET", target: "/comparator-policies", line: 5, keyed: false },
     ]);
     // The failure this pins: a door reformatted onto several lines stops being readable here, and
     // since §8 still names it, it reappears as `design-route-unmounted` instead of as a green scan
@@ -357,6 +361,87 @@ describe("§8's route table is reconciled with the doors the web adapter mounts"
   });
 });
 
+describe("§8's Idempotency-Key rule is reconciled with the flags the doors declare", () => {
+  // Built from the shipped mapping rather than a copy of it: if a creation word loses its template,
+  // these fixtures go red too, which is the point of that reason.
+  const create = (word: string, keyed: boolean, line = 3) => ({
+    method: "POST",
+    target: KEYED_CREATION_TEMPLATES[word] ?? `/unmapped-${word}`,
+    line,
+    keyed,
+  });
+  const projectDoor = { method: "POST", target: "/projects", line: 4, keyed: true };
+  const designRow = (target: string, request: string, line = 9) => [
+    { method: "POST" as const, target, request, line },
+  ];
+
+  // The tree as it stands: seven of the eight named creations keyed, `export` deliberately not, and
+  // one door (`POST /projects`) keyed that §8's list does not name.
+  const shipped = () => [...KEYED_CREATION_WORDS.map((word) => create(word, word !== "export")), projectDoor];
+
+  it("says nothing when every difference is the one that was recorded", () => {
+    expect(checkIdempotencyKeys(designRow("/projects/:p/jobs", "`{task}`"), shipped(), IDEMPOTENCY_DEVIATIONS)).toEqual([]);
+  });
+
+  it("names both directions of the difference, because the over-strict one is invisible to a client", () => {
+    expect(checkIdempotencyKeys(designRow("/projects/:p/jobs", "`{task}`"), shipped(), {})).toEqual([
+      "idempotency-key-required-unenforced:POST /projects/:/exports(api.ts:3, §8 line 261)",
+      "idempotency-key-enforced-unlisted:POST /projects(api.ts:4)",
+    ]);
+  });
+
+  it("keeps a waiver that has stopped covering a difference", () => {
+    // The day the export door starts requiring the key, the entry describing the deviation is a
+    // statement about something that is no longer true.
+    const keyed = shipped().map((row) => (row.target.endsWith("/exports") ? { ...row, keyed: true } : row));
+    expect(checkIdempotencyKeys(designRow("/x", "无"), keyed, IDEMPOTENCY_DEVIATIONS)).toEqual([
+      `idempotency-deviation-stale:POST /projects/:p/exports(门已按要求要键，删掉这条记录) ${IDEMPOTENCY_DEVIATIONS["POST /projects/:p/exports"]}`,
+    ]);
+    // And the same inversion the other way: a door that stops requiring the key leaves the second
+    // entry describing nothing, since the document never asked for it either.
+    const unkeyed = shipped().map((row) => (row.target === "/projects" ? { ...row, keyed: false } : row));
+    expect(checkIdempotencyKeys(designRow("/x", "无"), unkeyed, IDEMPOTENCY_DEVIATIONS)).toEqual([
+      `idempotency-deviation-stale:POST /projects(文档与门都不再要求) ${IDEMPOTENCY_DEVIATIONS["POST /projects"]}`,
+    ]);
+  });
+
+  it("reads 需幂等键 out of the row's own field column, not out of a copy of the table", () => {
+    const cleanup = "/projects/:projectId/jobs/:jobId/cleanup-retry";
+    // §8 line 279 is the row that writes it; 279 here is only a fixture line number.
+    const rows = designRow("/projects/:p/jobs/:j/cleanup-retry", "{}；需幂等键与本地会话", 279); // docs-check-ignore: the fixture's §8 row text, not a DESIGN citation
+    const withCleanup = (keyed: boolean) => [...shipped(), { method: "POST" as const, target: cleanup, line: 5, keyed }];
+    // The door mounted and not keyed: the row's own line is quoted back.
+    expect(checkIdempotencyKeys(rows, withCleanup(false), IDEMPOTENCY_DEVIATIONS)).toEqual([
+      "idempotency-key-required-unenforced:POST /projects/:/jobs/:/cleanup-retry(api.ts:5, §8 line 279)", // docs-check-ignore: ditto
+    ]);
+    // Keyed: nothing to say, and the keyed door is not flagged as over-strict, because the row asked.
+    expect(checkIdempotencyKeys(rows, withCleanup(true), IDEMPOTENCY_DEVIATIONS)).toEqual([]);
+    // A row that asks for a key on a door nobody mounted is the loudest of the three.
+    expect(checkIdempotencyKeys(rows, shipped(), IDEMPOTENCY_DEVIATIONS)).toEqual([
+      "idempotency-door-unmounted:POST /projects/:/jobs/:/cleanup-retry(§8 line 279 写了 需幂等键)", // docs-check-ignore: ditto
+    ]);
+  });
+
+  it("refuses to check one fewer door than the document named", () => {
+    const missing = shipped().filter((row) => row.target !== KEYED_CREATION_TEMPLATES["blueprint"]);
+    expect(checkIdempotencyKeys(designRow("/x", "无"), missing, IDEMPOTENCY_DEVIATIONS)).toEqual([
+      "idempotency-door-unmounted:POST /projects/:/blueprints(§8 line 261 names blueprint)",
+    ]);
+    // A word the mapping does not carry is its own named fault, so an unmapped name cannot pass as
+    // "nothing to check". Read against a one-door table, so the reason arrives alone.
+    expect(
+      checkIdempotencyKeys(designRow("/x", "无"), [{ method: "POST", target: "/x", line: 7, keyed: false }], {}, ["harbour"]),
+    ).toEqual(["idempotency-word-unmapped:harbour"]);
+  });
+
+  it("stays quiet when the caller has already refused an unreadable table", () => {
+    // `checkRoutes` owns the unreadable-table reasons; doubling them here would print the same
+    // defect twice under two names.
+    expect(checkIdempotencyKeys([], shipped(), {})).toEqual([]);
+    expect(checkIdempotencyKeys(designRow("/x", "无"), [], {})).toEqual([]);
+  });
+});
+
 describe("the committed documents pass the gate they describe", () => {
   it("npm run docs:check exits clean against docs/PRD.md and docs/TESTPLAN.md", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
@@ -388,16 +473,23 @@ describe("the committed documents pass the gate they describe", () => {
     expect(output).not.toContain("- mounted-route-");
     expect(output).not.toContain("- route-deviation-");
     expect(output).not.toContain("- web-api-module-");
+    // The idempotency side of the same reconciliation: eight words §8 line 261 names, and the two
+    // differences this build ships with — both counted from the tables, not from memory.
+    expect(output).toContain("具名键 8 词 · 已记幂等偏差 2 条");
+    expect(output).not.toContain("- idempotency-");
   });
 
   it("names the door nobody documented, on a run no clean tree can fake", () => {
     // The green run above cannot distinguish "the reconciliation found nothing" from "the
     // reconciliation was never called", because the tree is genuinely clean today. `--probe-routes`
-    // mounts a door §8 does not name and the whole path has to refuse it by that name, alone.
+    // mounts one door §8 does not name and gives it a key requirement nobody asked for, so the same
+    // run has to refuse both faults by name — and nothing else. Dropping either `reasons.push` line
+    // turns this red, which is what the two counts on the green line cannot show.
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const probe = spawnSync(process.execPath, ["infra/release/docs-check.mjs", "--probe-routes"], { cwd: root, encoding: "utf8" });
     expect(probe.status).not.toBe(0);
     expect(probe.stdout).toContain("mounted-route-unlisted:GET /probe-routes-not-a-door(api.ts:0)");
-    expect(probe.stdout.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(1);
+    expect(probe.stdout).toContain("idempotency-key-enforced-unlisted:POST /probe-routes-not-a-door(api.ts:0)");
+    expect(probe.stdout.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(2);
   });
 });

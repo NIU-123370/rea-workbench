@@ -53,8 +53,27 @@ export declare function reconcile(input: ReconcileInput): string[];
 
 export declare function checkDocs(testplan: string, prd: string): string[];
 
-/** One row of either route table: §8's, or the web adapter's. */
+/** One row of §8's route table: the door it promises and the field column that describes it. */
+export type DesignRouteRow = { method: string; target: string; request: string; line: number };
+
+/** One door the web adapter actually mounts, with the flag its declaration line carries. */
+export type MountedRouteRow = { method: string; target: string; line: number; keyed: boolean };
+
+/** Rows of either table, for the check that only compares method and path. */
 export type RouteRow = { method: string; target: string; line: number };
+
+/** The eight creations §8 line 261 names, and this file's reading of each onto a path template. */
+export declare const KEYED_CREATION_WORDS: string[];
+export declare const KEYED_CREATION_TEMPLATES: Record<string, string>;
+
+/**
+ * The two idempotency differences this build ships with. Named keys, for the same reason as the
+ * route waiver table: indexing a door that is not here should not read back as a waiver.
+ */
+export declare const IDEMPOTENCY_DEVIATIONS: {
+  "POST /projects/:p/exports": string;
+  "POST /projects": string;
+};
 
 /**
  * The differences this build ships with, each naming the issue that records it. Declared with its
@@ -69,9 +88,9 @@ export declare const ROUTE_DEVIATIONS: {
 
 export declare const WEB_API_FILE: string;
 
-export declare function parseDesignRoutes(markdown: string, sections: DesignSection[]): RouteRow[];
+export declare function parseDesignRoutes(markdown: string, sections: DesignSection[]): DesignRouteRow[];
 
-export declare function parseMountedRoutes(text: string): RouteRow[];
+export declare function parseMountedRoutes(text: string): MountedRouteRow[];
 
 export declare function canonicalRoute(method: string, target: string): string;
 
@@ -79,4 +98,12 @@ export declare function checkRoutes(
   design: RouteRow[],
   mounted: RouteRow[],
   deviations: Record<string, string>,
+): string[];
+
+export declare function checkIdempotencyKeys(
+  design: DesignRouteRow[],
+  mounted: MountedRouteRow[],
+  deviations: Record<string, string>,
+  words?: readonly string[],
+  templates?: Record<string, string>,
 ): string[];

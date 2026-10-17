@@ -74,12 +74,38 @@ export const SKIPPED_DIRECTORIES = ["node_modules", ".next", "dist", "coverage"]
 // the issue that records it, and a route the two sides agree on turns the entry itself into a
 // defect (`route-deviation-stale`). Without that inversion a waiver table only grows, and the
 // gate decays back into the one-off reading it replaced.
-const DESIGN_ROUTE_ROW = /^\|\s*`(GET|POST|PUT|PATCH|DELETE)\s+(\S+)`\s*\|/;
-// The web adapter's own table. Line-shaped on purpose, like the other four parsers: an entry
+const DESIGN_ROUTE_ROW = /^\|\s*`(GET|POST|PUT|PATCH|DELETE)\s+(\S+)`\s*\|/;// The web adapter's own table. Line-shaped on purpose, like the other four parsers: an entry
 // that moves off the line this reads stops counting as a mounted door, and since §8 still names
 // it, the loss surfaces as `design-route-unmounted` rather than as a green pass over a shrunken
 // scan.
-const MOUNTED_ROUTE_ROW = /^\s*\{\s*method:\s*"(GET|POST|PUT|PATCH|DELETE)",\s*template:\s*`\$\{API_PREFIX\}([^`]+)`/;
+const MOUNTED_ROUTE_ROW = /^\s*\{\s*method:\s*"(GET|POST|PUT|PATCH|DELETE)",\s*template:\s*`\$\{API_PREFIX\}([^`]+)`,\s*mutating:\s*(true|false),\s*requiresSession:\s*(true|false),\s*requiresIdempotencyKey:\s*(true|false)\s*\}/;
+
+// §8 line 261 says which creations take an `Idempotency-Key`, naming them by the *word* the command
+// carries (`import`, `job`, …) rather than by a path. The mapping below is this file's own reading of
+// those eight words onto the eight path templates that create them — which is why every entry is
+// asserted to exist in the mounted table (`idempotency-door-unmounted`): if a door is renamed or
+// dropped, the gate goes red instead of silently checking one fewer thing.
+export const KEYED_CREATION_WORDS = ["import", "job", "vector", "plan", "blueprint", "candidate", "verification", "export"];
+export const KEYED_CREATION_TEMPLATES = {
+  import: "/projects/:projectId/imports",
+  job: "/projects/:projectId/jobs",
+  vector: "/projects/:projectId/vectors",
+  plan: "/projects/:projectId/verification-plans",
+  blueprint: "/projects/:projectId/blueprints",
+  candidate: "/projects/:projectId/candidates",
+  verification: "/projects/:projectId/verifications",
+  export: "/projects/:projectId/exports",
+};
+
+// The two differences this build ships with, each pointing at the issue that records it.
+export const IDEMPOTENCY_DEVIATIONS = {
+  // §8 line 261 lists export among the keyed creations, while §5's `exports` row says 不覆盖旧包 —
+  // a retried request must make a second package rather than replay the first. The code follows §5.
+  "POST /projects/:p/exports": "issue #58 — §5 说不覆盖旧包，§8 line 261 又把 export 列为具名键创建",
+  // §8's row for the project create asks only for `{name:string}`, yet the door requires a key.
+  // Requiring more than the row says is a live difference for callers, so it is named, not assumed.
+  "POST /projects": "issue #58 — 门要键，而 §8 那一行的请求字段只写 {name:string}",
+};
 
 /**
  * The three differences this build ships with, each recorded on an issue rather than smoothed
@@ -104,41 +130,60 @@ export const WEB_API_FILE = "apps/web/api.ts";
 /**
  * @param {string} markdown the DESIGN.md text
  * @param {{ section: string, start: number, end: number }[]} sections the same split the anchor check uses
- * @returns {{ method: string, target: string, line: number }[]} §8's route rows, and nothing else's
+ * @returns {{ method: string, target: string, request: string, line: number }[]} §8's route rows
  *
  * Scoped to §8 because other tables in the document open their first cell with a backtick too
  * (the module table's `packages/domain`, the field tables' `request.method`); the method
- * alternation already excludes those, and the scope keeps a future `POST /something` row in an
- * unrelated section from being read as a promised endpoint.
+ * alternation excludes those, and the scope keeps a future `POST /something` row in an unrelated
+ * section from being read as a promised endpoint.
+ *
+ * `request` is the row's second column — the field list §8 writes there — because the idempotency
+ * rule below reads 「需幂等键」 out of it rather than from a copy of the table kept here. Cells are
+ * split on pipes that are *not* escaped, since a row like the import one spells `kind:'har'\|'asar'`.
  */
 export function parseDesignRoutes(markdown, sections) {
   const owned = sections.find((entry) => entry.section === "8");
   if (owned === undefined) return [];
   const lines = markdown.split("\n");
-  /** @type {{ method: string, target: string, line: number }[]} */
+  /** @type {{ method: string, target: string, request: string, line: number }[]} */
   const rows = [];
   for (let index = owned.start - 1; index < owned.end; index += 1) {
-    const match = DESIGN_ROUTE_ROW.exec(lines[index] ?? "");
-    if (match !== null) rows.push({ method: String(match[1]), target: String(match[2]), line: index + 1 });
+    const line = lines[index] ?? "";
+    const match = DESIGN_ROUTE_ROW.exec(line);
+    if (match === null) continue;
+    const cells = line.split(/(?<!\\)\|/);
+    rows.push({
+      method: String(match[1]),
+      target: String(match[2]),
+      request: String(cells[2] ?? "").trim(),
+      line: index + 1,
+    });
   }
   return rows;
 }
 
 /**
  * @param {string} text the apps/web/api.ts source
- * @returns {{ method: string, target: string, line: number }[]} the doors that table mounts
+ * @returns {{ method: string, target: string, line: number, keyed: boolean }[]} the doors that table mounts
  *
  * The `${API_PREFIX}` the templates interpolate is dropped rather than substituted: §8's rows
  * are written without it, and a gate that had to agree on the prefix would only be checking its
- * own reading of a constant.
+ * own reading of a constant. The three flags are read with the same line-shape requirement, so a
+ * door whose declaration moves off the line stops counting as mounted (and §8 still names it).
  */
 export function parseMountedRoutes(text) {
-  /** @type {{ method: string, target: string, line: number }[]} */
+  /** @type {{ method: string, target: string, line: number, keyed: boolean }[]} */
   const rows = [];
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const match = MOUNTED_ROUTE_ROW.exec(lines[index] ?? "");
-    if (match !== null) rows.push({ method: String(match[1]), target: String(match[2]), line: index + 1 });
+    if (match === null) continue;
+    rows.push({
+      method: String(match[1]),
+      target: String(match[2]),
+      line: index + 1,
+      keyed: match[5] === "true",
+    });
   }
   return rows;
 }
@@ -226,6 +271,85 @@ export function checkRoutes(design, mounted, deviations) {
     const mountedHere = mountedByKey.has(key);
     if (declared !== mountedHere) continue;
     reasons.push(`route-deviation-stale:${target}(${declared ? "两侧已对上，删掉这条记录" : "两侧都没有这条路由"}) ${note}`);
+  }
+  return reasons;
+}
+
+/**
+ * §8 states the idempotency rule in two places: line 261 names the eight creations that take an
+ * `Idempotency-Key`, and a row asks for one in its own field column (the cleanup-retry row writes
+ * 需幂等键与本地会话). Both readings are compared against the flags the mounted table declares, in
+ * both directions: a named creation whose door does not require a key is a promise unmet, and a door
+ * that requires one the document never asked for changes what a caller has to send — the second is
+ * the easier one to miss, because nothing refuses it.
+ *
+ * @param {{ method: string, target: string, request: string, line: number }[]} design §8's rows
+ * @param {{ method: string, target: string, line: number, keyed: boolean }[]} mounted the doors
+ * @param {Record<string, string>} deviations named differences allowed to stand
+ * @param {readonly string[]} words the creation words the document names (a parameter, so a fixture
+ *   can hand over one more word than the template table maps and read back the named refusal —
+ *   a reason nobody can reach is a reason nobody can prove)
+ * @param {Record<string, string>} templates the word → path-template reading
+ */
+export function checkIdempotencyKeys(design, mounted, deviations, words = KEYED_CREATION_WORDS, templates = KEYED_CREATION_TEMPLATES) {
+  const reasons = [];
+  if (design.length === 0 || mounted.length === 0) return reasons;
+  const byKey = new Map();
+  for (const row of mounted) byKey.set(canonicalRoute(row.method, row.target), row);
+
+  /** @type {Map<string, number>} canonical key -> the §8 line that asks for the key */
+  const expected = new Map();
+  for (const word of words) {
+    const template = templates[word];
+    if (template === undefined) {
+      reasons.push(`idempotency-word-unmapped:${word}`);
+      continue;
+    }
+    const key = canonicalRoute("POST", template);
+    if (!byKey.has(key)) {
+      reasons.push(`idempotency-door-unmounted:${key}(§8 line 261 names ${word})`);
+      continue;
+    }
+    expected.set(key, 0);
+  }
+  for (const row of design) {
+    if (!row.request.includes("需幂等键")) continue;
+    const key = canonicalRoute(row.method, row.target);
+    if (!byKey.has(key)) {
+      reasons.push(`idempotency-door-unmounted:${key}(§8 line ${String(row.line)} 写了 需幂等键)`);
+      continue;
+    }
+    expected.set(key, row.line);
+  }
+
+  /** @param {string} key */
+  const waived = (key) => Object.keys(deviations).some((target) => canonicalRoute(...splitRoute(target)) === key);
+
+  for (const [key, designLine] of expected) {
+    const door = byKey.get(key);
+    if (door === undefined || door.keyed || waived(key)) continue;
+    reasons.push(
+      `idempotency-key-required-unenforced:${key}(api.ts:${String(door.line)}`
+      + `${designLine > 0 ? `, §8 line ${String(designLine)}` : ", §8 line 261"})`,
+    );
+  }
+  for (const [key, door] of byKey) {
+    if (!door.keyed || expected.has(key) || waived(key)) continue;
+    reasons.push(`idempotency-key-enforced-unlisted:${key}(api.ts:${String(door.line)})`);
+  }
+  for (const target of Object.keys(deviations)) {
+    const key = canonicalRoute(...splitRoute(target));
+    const door = byKey.get(key);
+    if (door === undefined) {
+      reasons.push(`idempotency-deviation-stale:${target}(两侧都没有这道门)`);
+      continue;
+    }
+    const asks = expected.has(key);
+    if (asks === door.keyed) {
+      reasons.push(
+        `idempotency-deviation-stale:${target}(${door.keyed ? "门已按要求要键，删掉这条记录" : "文档与门都不再要求"}) ${deviations[target] ?? ""}`.trimEnd(),
+      );
+    }
   }
   return reasons;
 }
@@ -545,21 +669,28 @@ if (process.argv[1] !== undefined && process.argv[1].endsWith("docs-check.mjs"))
   if (existsSync(apiFile)) mountedRouteRows = parseMountedRoutes(readFileSync(apiFile, "utf8"));
   else reasons.push(`web-api-module-missing:${WEB_API_FILE}`);
 
-  // `--probe-routes` mounts a door no document names. It exists because this repository's tree is
-  // currently clean, and a clean tree cannot tell "no defect" from "no check": the ordinary run's
-  // green line would print identically if the reconciliation were computed and then dropped, or if
-  // the waiver table had quietly grown wide enough to cover anything. The probe makes the whole
-  // path — read, parse, compare, print the reason, exit non-zero — observable in one run.
-  const PROBE_DOOR = { method: "GET", target: "/probe-routes-not-a-door", line: 0 };
+  // `--probe-routes` mounts a door no document names, and gives it a key requirement nobody asked
+  // for. It exists because this repository's tree is currently clean on both reconciliations, and a
+  // clean tree cannot tell "no defect" from "no check": the ordinary run's green line would print
+  // identically if either reconciliation were computed and then dropped. The probe makes both paths
+  // observable in one run — read, parse, compare, name both faults, exit non-zero.
+  const PROBE_DOOR = { method: "GET", target: "/probe-routes-not-a-door", line: 0, keyed: false };
+  // The key flag has to be the *other* value for the second reconciliation, so the probe door is
+  // declared as requiring a key: §8 names no such creation, so only `checkIdempotencyKeys` can see it.
+  const PROBE_KEYED_DOOR = { method: "POST", target: "/probe-routes-not-a-door", line: 0, keyed: true };
   const probed = process.argv.includes("--probe-routes");
-  reasons.push(...checkRoutes(designRouteRows, probed ? [...mountedRouteRows, PROBE_DOOR] : mountedRouteRows, ROUTE_DEVIATIONS));
+  const mountedForRoutes = probed ? [...mountedRouteRows, PROBE_DOOR] : mountedRouteRows;
+  const mountedForKeys = probed ? [...mountedRouteRows, PROBE_KEYED_DOOR] : mountedRouteRows;
+  reasons.push(...checkRoutes(designRouteRows, mountedForRoutes, ROUTE_DEVIATIONS));
+  reasons.push(...checkIdempotencyKeys(designRouteRows, mountedForKeys, IDEMPOTENCY_DEVIATIONS));
 
   const rows = parseTestCaseRows(testplan).length;
   const accepts = parseAcceptanceRows(prd).length;
   process.stdout.write(
     `docs:check 用例 ${String(rows)} 条 / 验收 ${String(accepts)} 条 / 决策 ${String(declaredDecisions.length)} 条 / `
     + `源码引用 ${String(references.length)} 处（${String(filesScanned)} 个文件）/ 设计锚点 ${String(anchors.length)} 处（DESIGN ${String(designSections.length)} 节）/ `
-    + `路由 §8 ${String(designRouteRows.length)} 条 · 挂载 ${String(mountedRouteRows.length)} 条 · 已记偏差 ${String(Object.keys(ROUTE_DEVIATIONS).length)} 条\n`,
+    + `路由 §8 ${String(designRouteRows.length)} 条 · 挂载 ${String(mountedRouteRows.length)} 条 · 已记偏差 ${String(Object.keys(ROUTE_DEVIATIONS).length)} 条 / `
+    + `具名键 ${String(KEYED_CREATION_WORDS.length)} 词 · 已记幂等偏差 ${String(Object.keys(IDEMPOTENCY_DEVIATIONS).length)} 条\n`,
   );
   for (const reason of reasons) process.stdout.write(`- ${reason}\n`);
   process.exit(reasons.length > 0 ? 1 : 0);
