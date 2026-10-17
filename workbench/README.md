@@ -186,6 +186,14 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   worker 那把排他锁**（`worker-still-running-close-it-first`）：一边有人写文件、一边生成
   manifest，得到的是一份描述「从未存在过的瞬间」的备份。verify 的退出码看 `reasons` 是否为空，
   而不是看有没有找到文件——「找到了但有一堆说不清」不是通过。
+- `npm run db:migrate`（TESTPLAN §5 那三条命令里最后缺的一条）把**顺序**当成实现：
+  不带 `-- --approve` 只打印待应用的迁移（`pending <id> sql_sha256=<摘要>`——摘要用的是 runner
+  将要记录的那个 `checksum`，不是另算的一份，否则操作者拿它跟 `schema_migrations` 对不上）并以
+  **退出码 2** 结束；0 会被读成"迁完了"，所以这里既不是 0 也不是 1。
+  带批准时**先 `consistentBackup()` 再 `applyMigrations()`**，所以中途失败的回包会告诉你
+  「备份在失败之前就有了」（`backup taken before the failure: <文件名>`），失败的这一步不被记录。
+  它也**先拿 worker 那把排他锁**：活着的 worker 握着它就直接拒，不打开库、不备份、不动 `schema_migrations`。
+  `schema_migrations` 里被改写过的历史迁移仍然由 `planMigrations` 拒掉，那条守卫与 worker 启动共用。
 - `npm run db:restore -- --from <data dir>/backups/workbench-<stamp>.db` 是操作者的恢复入口，
   顺序就是它的全部设计（§13 line 453 / D23）：**先拿 worker 自己的排他锁**（拿不到就停，这条
   入口不可能和在线 worker 同时写），再确认 schema（`planRestore` 与 `planMigrations` 都会拒不
@@ -1389,6 +1397,42 @@ runner 的，见下文"这轮没做浏览器"）：
 **这轮仍然没做的**：**没有断电等效的真机读数**。这一对 flush 主张的是"崩溃后磁盘上应当有什么"，
 我能证的是**调用次序**与**失败时的具名拒绝**；真正的掉电演练要宿主层手段（TESTPLAN §2 的"恢复演练"层次），
 本轮没做，所以别把它读成"T16 的断电验收已通过"。
+
+发布门禁·第廿六轮（2026-10-18 04:38–04:43，**看板对账的第二笔实现：`npm run db:migrate`**）：
+
+- 上一轮核对 closed issue 时，**#6 的第 4 框**（「`db:migrate` 先显示计划，已有数据先做一致性备份」）
+  查出是真没有：`package.json` 里只有 `db:backup`／`db:verify`／`db:restore`。
+  而 TESTPLAN `:77` 与 `:88` 不只点了这条命令，还点了它的**协议**——
+  「`db:migrate` 必须在先展示变更并获得操作批准、完成一致性备份后执行」。
+  ⇒ 这条命令的顺序就是功能本身：一个"备份在应用之后"的实现，在成功路径上回答得一模一样，
+  只在失败那一次才露出区别。
+- 实现落在 `apps/worker/migrate.ts`：计划行打印的是 **runner 将要记录的那个摘要**
+  （为此把 `database.ts` 的 `checksum` 导出，而不是在 CLI 里另算一份——两个摘要就对不上 `schema_migrations`）；
+  未批准 ⇒ **退出码 2**（0 会被读成"迁完了"，1 会被读成"失败了"，这次两样都不是）；
+  批准后 `consistentBackup()` 先于 `applyMigrations()`，**失败回包点名那份备份**；
+  **两处是我自己写完又退回来的**，记下来比留著好看：① 起初加了一个 `pending-after`（应用完再
+  `planMigrations` 一次、打印还剩多少），随后发现它在成功支路上**不可能与"起始 pending − applied 条数"
+  不同**——`applyMigrations` 返回 ok 本身已经是"pending 全部应用完了"的陈述，那是一条没有反面可观测的
+  装饰，删了（与 #113 那轮删掉的"既不是 har 也不是 asar"分支同一条判据）。
+- 八条用例（`tests/integration/migrate-command.test.ts`，真临时目录、真 SQLite）：
+  无批准不动任何东西（**断 backups 目录仍为空**）、已是最新不备份、批准后备份先落盘且 `pending-after=0`、
+  **注入一条会失败的迁移**证明"备份在失败之前"与"失败那步没被记录"、锁被活 worker 拿着时先拒、
+  以及 CLI 的 64／2／0 三种退出码与打印内容。
+- 末态闸门：typecheck 0／lint **207 文件 0 条**／`test:unit` **686/39**／
+  `test:integration` **516 passed + 6 skipped / 26 files**／`review` **0 命中**／`docs:check` exit 0。
+  变异 **6 支（S1–S6）全红**：CLI 自己另算一份摘要、**把备份挪到应用之后**、未批准也返回 0、
+  不拿排他锁、批准了不备份、已是最新还多备份一份——各被对应用例打死。
+- **S2 第一次是存活的，这条要单记**：第一版用例只断"失败回包里点名了备份"＋"备份文件存在"，
+  而**在这一个进程里，"失败后回滚再备份"与"应用前先备份"答得一模一样**（回滚把差异抹平了）。
+  补的断言是直接看**快照内容**：`test_vectors` 由本次要应用的第一个迁移（`0003-delivery`）创建，
+  所以它在**快照里没有、在线上库里有**才叫"备份在先"——顺序第一次变成可观测的。
+  同一次修正里还把该用例的起点从"只应用了 1 条"改成"应用了 2 条"，
+  因为我顺手写的"快照里应当有 `evidence_records`"在 1 条的起点上是错的（它由 0002 创建）：**断言本身错，
+  不是代码错**，这也是它先红了一次才发现的。
+
+**这轮仍然没做的**：**这条命令不进 CI**（它会改库，`gates` 里跑它本身就是错的），
+所以它的证据是 8 条集成用例，不是一次 CI 绿；#123 剩下两格（`dev/build/start` 的命名、
+独立 `test:e2e` 档）**仍等你**，因为它们要么改文档、要么新增一条表外命令面。
 
 
 ## 还没有的东西

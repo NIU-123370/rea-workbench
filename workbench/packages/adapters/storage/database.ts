@@ -40,7 +40,10 @@ function fail(code: StorageErrorCode, message: string): Err<StorageError> {
   return { ok: false, error: { code, message } };
 }
 
-function checksum(sql: string): string {
+// Exported because `npm run db:migrate` shows the operator this exact digest before they approve,
+// and a plan display computed elsewhere would be a number that cannot be compared with the
+// `schema_migrations` row the runner writes.
+export function checksum(sql: string): string {
   return createHash("sha256").update(sql, "utf8").digest("hex");
 }
 
