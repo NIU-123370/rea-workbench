@@ -1096,6 +1096,43 @@ runner 的，见下文"这轮没做浏览器"）：
   上面的 evidence 读数是经命令门取的，没有开第二个只读连接去比 `artifacts.sha256` 与 `shasum`。
 
 
+浏览器实测·第十八轮（2026-10-18 01:42–01:47，真 Chrome 1600×1200，**生产构建**：`next build` + `next start -p 4499`；
+三个真进程 worker＋web(4312)＋next(4499)；provider 是 `tests/fixtures/rea-mcp-fixture.mjs` 的 `har_records` 案，
+经一个自设 `process.env.FIXTURE_CASE` 的 wrapper 起——`connectReaStdio` 只给孩子 `PATH`，env 传不进去）：
+
+- **从头到尾没跑一行脚本命令**：落地页填配对码 → `会话：paired`；点「创建项目」→ 项目 id
+  `dbe1ecf4-543d-446d-885c-ba4781f357d9`；样本页签「上传一次采集」→ 选文件 → 勾 `har` → 敏感值填
+  `sesame-browser-value` → 点「上传」→ 页面回「已收下采集文件：目标 `8ecb5476…`｜作业 inspect `ba653acf…`（queued）」。
+  文件进 `<input type=file>` 用的是页面内 `DataTransfer`＋`new File([...])`（浏览器文件选择器不在被测面里，
+  但 `input.files` 与 React 的 `onChange` 走的是同一条路径；MCP 的 `upload_file` 在这台机器上被工作区根目录
+  白名单拒了，两次读数 `/private/tmp` 与工作区都不在它配好的 root 里）。
+- **runner 那一轮在页面上自己走完了**：作业栏不需要重载就变成「inspect｜succeeded｜清理 complete」，
+  并且带「（最后一条 seq 3）」；worker 终端同步打出
+  `runner inspected job=ba653acf-0592-4a9a-833a-f0b0522dc56f state=succeeded evidence=1`。
+  这是 §13 的 `job.updated` 订阅（第十一轮）与 §11 的执行者（本轮）第一次在同一次点击里配合成功。
+- **字节侧三方对齐（逐字）**：浏览器里对上传前那份字节算 `crypto.subtle.digest` =
+  `0e6a433b258dc5069b9c5593eefa59b2b385dd495daea65525f89c2a5d6884fd`（355 字节）；
+  库侧 `targets.source_sha256` 与 `snapshot_digest` 同一个值；磁盘上那份 source artifact
+  `shasum -a 256` 也是同一个值（`match=true`，size 355，media `application/json`）。
+  信封那份独立对齐：门答 `sha256 ac716779751781…`／`byteLength 2870` ＝ 盘上文件的实际摘要与实际长度。
+- **§8 line 281 的证据读门由真实动作造出来的行答 200**：同源 `fetch` 取
+  `/api/v1/projects/…/evidence/ev_aaa…` → **200**，键集合 `byteLength,evidence,mediaType,sha256`，
+  `evidence.operation = inspect_web_network_capture`，**回包里没有那串声明过的敏感值**。
+  库侧事件与日志：`job.updated(queued) → evidence.committed → job.updated(succeeded)`；
+  `audit_entries` 两条 allow（`har.import` → `har-imported`、`har.inspect` → `evidence-persisted`）——
+  执行者这一跑是有裁决记录的，不是无声写库。
+- **「来源 N」仍然点不出来，而且这次不是缺门，是缺生产者**：左栏在上传完成后写
+  `target-has-no-claims`，主张区写「此 scope 暂无主张」，`SELECT count(*) FROM claims`＝**0**、
+  `graph_edges`＝**0**、`projects.graph_revision`＝**0**。也就是说 #108 把 evidence 造出来了，
+  而 #107（白板没有生产者）让画布与「来源」跳转依旧无物可点——这条现在有了**浏览器里的读数**，不再只是 grep。
+  同一格的「画面」仍是「无画面：本次导入只带请求与响应，没有预览帧」（#79）。
+- 控制台**没有 JS 报错**；一条无障碍建议：`A form field element should have an id or name attribute`
+  （计数 3）。这轮的输入格都靠 `data-*` 与可见 label 定位，缺 `name` 会让读屏与自动填充少一个锚——
+  另开条目，不混进这条链。
+- rig 收尾：`kill -TERM` worker 后收 `worker stopped`，`worker.lock` 与 `worker.rpc.sock` 自己消失（#72 那条
+  反面证据又应一次）。这一轮**没有**动上一轮遗留的 4310/4496 那两个进程（不属于本轮，也不该顺手停）。
+
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
