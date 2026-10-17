@@ -97,13 +97,14 @@ function insertTarget(projectId: Id): Id {
   return targetId;
 }
 
-async function seedBlueprint(projectId: Id, targetId: Id, name: string): Promise<Id> {
+async function seedBlueprint(projectId: Id, targetId: Id, name: string, withPost = false): Promise<Id> {
   const seeded = await seedBlueprintForGeneration({
     writer: worker.writeConnection,
     store: new ArtifactStore(dataDir),
     projectId,
     targetId,
     name,
+    withPost,
   });
   return seeded.blueprintId;
 }
@@ -620,5 +621,199 @@ describe("nothing may ask the worker to run its own queue", () => {
     // The in-flight turn settles before the sockets close: cutting it off mid-generation is how a
     // job ends up `interrupted` when the work actually finished.
     expect(main.indexOf("await pumping;")).toBeLessThan(main.indexOf("await started.value.close();"));
+  });
+});
+
+// The adapter ABI §7.3 fixes is `invoke(operationId, sdkInput, {baseUrl})`. Until this block nothing
+// had ever **run** a generated candidate: the file list, the digests and the manifest were all
+// asserted, and the README said out loud that "the SDK really can be called" was not a proven fact.
+// Running it is the difference, and the first run found a defect no assertion could see - the emitted
+// code passed `body` on every method, so a generated GET died inside `fetch`
+// (`Request with GET/HEAD method cannot have body`) before a byte left the process.
+//
+// Everything below therefore loads the bytes the *read door* hands back (`candidate.file`, the same
+// path the 代码 tab uses), writes them to a real ESM module, imports that, and calls it against a
+// loopback HTTP server that records what actually arrived.
+describe("the generated adapter is executed, not just hashed (§7.3's adapter ABI)", () => {
+  type LoadedAdapter = { invoke: (operationId: string, sdkInput: Record<string, unknown>, context: { baseUrl: string }) => Promise<unknown> };
+  type Seen = { method: string; url: string; body: string; contentType: string | undefined };
+
+  async function generatedAdapter(name: string, withPost: boolean): Promise<{ source: string; manifest: Record<string, unknown>; sha256: string }> {
+    await drainQueue();
+    const projectId = await newProject(name);
+    const blueprintId = await seedBlueprint(projectId, insertTarget(projectId), name, withPost);
+    unwrap(await askForCandidate(projectId, blueprintId, newId()));
+    const turn = await worker.runJobs();
+    if (!turn.ok) throw new Error(JSON.stringify(turn.error));
+    if (turn.value.kind !== "succeeded") throw new Error(`the build did not succeed: ${turn.value.kind}`);
+    // Hoisted, not read through the closure below: TypeScript drops the `succeeded` narrowing inside a
+    // nested function, and re-checking the discriminant in three places is how a copy starts drifting.
+    const candidateId = turn.value.candidateId;
+    const view = unwrap(await ask("candidate.get", { projectId, request: { candidateId } })) as {
+      files: { id: string; path: string }[];
+    };
+    const read = async (wanted: string): Promise<{ content?: string; sha256?: string }> => {
+      const file = view.files.find((entry) => entry.path === wanted);
+      if (file === undefined) throw new Error(`${wanted} is not in the candidate`);
+      return unwrap(await ask("candidate.file", { projectId, request: { candidateId, fileId: asId(file.id) } })) as { content?: string; sha256?: string };
+    };
+    const adapter = await read("adapter.ts");
+    const manifest = await read("candidate-manifest.json");
+    if (typeof adapter.content !== "string" || typeof adapter.sha256 !== "string") throw new Error("the adapter read lost its content or digest");
+    return { source: adapter.content, sha256: adapter.sha256, manifest: JSON.parse(String(manifest.content)) as Record<string, unknown> };
+  }
+
+  async function load(source: string, stem: string): Promise<{ module: LoadedAdapter; exports: string[] }> {
+    const dir = await mkdtemp(path.join(tmpdir(), `rea-wb-adapter-${stem}-`));
+    writeFileSync(path.join(dir, "package.json"), JSON.stringify({ type: "module" }));
+    const file = path.join(dir, "adapter.ts");
+    writeFileSync(file, source);
+    const { pathToFileURL } = await import("node:url");
+    const loaded = (await import(pathToFileURL(file).href)) as Record<string, unknown>;
+    const invoke = loaded["invoke"];
+    if (typeof invoke !== "function") throw new Error("the candidate exports no callable invoke");
+    return {
+      module: { invoke: invoke as LoadedAdapter["invoke"] },
+      exports: Object.keys(loaded).sort(),
+    };
+  }
+
+  async function withStub(onRequest: (seen: Seen) => { status: number; body: unknown }): Promise<{ baseUrl: string; seen: Seen[]; close: () => Promise<void> }> {
+    const http = await import("node:http");
+    const seen: Seen[] = [];
+    const server = http.createServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk: string) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        const entry: Seen = { method: String(request.method), url: String(request.url), body, contentType: request.headers["content-type"] };
+        seen.push(entry);
+        const answer = onRequest(entry);
+        response.writeHead(answer.status, { "content-type": "application/json" });
+        response.end(JSON.stringify(answer.body));
+      });
+    });
+    await new Promise<void>((resolve) => { server.listen({ host: "127.0.0.1", port: 0 }, () => resolve()); });
+    const address = server.address() as { port: number };
+    return {
+      baseUrl: `http://127.0.0.1:${String(address.port)}`,
+      seen,
+      close: () => new Promise<void>((resolve) => { server.close(() => resolve()); }),
+    };
+  }
+
+  it("runs a reviewed GET and returns what the server answered", async () => {
+    const generated = await generatedAdapter("exec-get", false);
+    const stub = await withStub(() => ({ status: 200, body: { items: ["widget", "gizmo"], include: "items" } }));
+    const { module: adapter } = await load(generated.source, "get");
+    try {
+      const outcome = await adapter.invoke("getCart", {}, { baseUrl: stub.baseUrl });
+      // The value came off the wire: an assertion on a literal the test itself served would be true
+      // whatever the adapter did.
+      expect(outcome).toEqual({ items: ["widget", "gizmo"], include: "items" });
+      expect(stub.seen).toEqual([{ method: "GET", url: "/api/cart/42", body: "", contentType: undefined }]);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("runs a reviewed POST with the input as its JSON body, typed as such", async () => {
+    const generated = await generatedAdapter("exec-post", true);
+    const stub = await withStub(() => ({ status: 201, body: { added: true } }));
+    const { module: adapter } = await load(generated.source, "post");
+    try {
+      const outcome = await adapter.invoke("addCartItem", { sku: "A-1", quantity: 2 }, { baseUrl: stub.baseUrl });
+      expect(outcome).toEqual({ added: true });
+      expect(stub.seen).toHaveLength(1);
+      const request = stub.seen[0];
+      expect(request?.method).toBe("POST");
+      expect(request?.url).toBe("/api/cart/items");
+      // Parsed back rather than compared as text: the point is that the input survives the round trip,
+      // and a byte-for-byte string check would also pin key order nobody promised.
+      expect(JSON.parse(String(request?.body))).toEqual({ sku: "A-1", quantity: 2 });
+      expect(request?.contentType).toBe("application/json");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("refuses to lose part of the input on a method that carries no body, without reaching the network", async () => {
+    const generated = await generatedAdapter("exec-get-refused", false);
+    const stub = await withStub(() => ({ status: 200, body: {} }));
+    const { module: adapter } = await load(generated.source, "getrefused");
+    try {
+      // Dropping `include` and answering 200 would be worse than the crash this replaces: the caller
+      // would believe a reviewed input was sent. So the named refusal is the assertion, and so is the
+      // empty `seen` - the mistake has to die in the process, not on the wire.
+      const message = await adapter.invoke("getCart", { include: "items" }, { baseUrl: stub.baseUrl }).then(
+        () => "resolved - it silently dropped the input",
+        (error: unknown) => String((error as Error).message),
+      );
+      expect(message).toContain("can carry no request body");
+      expect(message).toContain("getCart");
+      expect(message).toContain("1 field");
+      expect(stub.seen).toEqual([]);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("sends the method exactly as the reviewed contract stated it, on the request line", async () => {
+    // The stub server above cannot see this: Node's HTTP parser hands `req.method` back upper-cased
+    // whatever the client sent, so a generator that lower-cased `GET` looked fine to every test here
+    // while a proxy in front of a real target would answer 501 (RFC 9110 makes method names
+    // case-sensitive). So this one reads the bytes off the socket instead of a parsed request.
+    const generated = await generatedAdapter("exec-raw", false);
+    const net = await import("node:net");
+    const lines: string[] = [];
+    const server = net.createServer((socket) => {
+      socket.once("data", (chunk) => {
+        lines.push(String(chunk).split("\r\n")[0] ?? "");
+        socket.end("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}");
+      });
+    });
+    await new Promise<void>((resolve) => { server.listen({ host: "127.0.0.1", port: 0 }, () => resolve()); });
+    const address = server.address() as { port: number };
+    const { module: adapter } = await load(generated.source, "raw");
+    try {
+      await adapter.invoke("getCart", {}, { baseUrl: `http://127.0.0.1:${String(address.port)}` });
+      expect(lines).toEqual(["GET /api/cart/42 HTTP/1.1"]);
+    } finally {
+      await new Promise<void>((resolve) => { server.close(() => resolve()); });
+    }
+  });
+
+  it("keeps the manifest's declared ABI and operation list exactly as wide as what really runs", async () => {
+    const generated = await generatedAdapter("exec-abi", true);
+    const abi = generated.manifest["adapterAbi"] as { export?: string; parameters?: string[] } | undefined;
+    const declared = generated.manifest["operationIds"] as string[];
+    expect(abi?.export).toBe("invoke");
+    expect(abi?.parameters).toEqual(["operationId", "sdkInput", "context"]);
+    const stub = await withStub(() => ({ status: 200, body: { ok: true } }));
+    const { module: adapter, exports } = await load(generated.source, "abi");
+    try {
+      // The manifest says three parameters; the function that answers has that arity. This is what
+      // "the candidate provides a fixed adapter ABI" (§7.3) has to mean beyond a text field.
+      expect(exports).toEqual(["invoke"]);
+      expect(adapter.invoke.length).toBe(3);
+      // Every declared id is callable...
+      for (const operationId of declared) {
+        await adapter.invoke(operationId, {}, { baseUrl: stub.baseUrl });
+      }
+      // The manifest sorts its operation ids (one order for the same candidate, whatever order the
+      // contract revision listed them in), so the calls happen in that order - asserted rather than assumed.
+      expect(declared).toEqual(["addCartItem", "getCart"]);
+      expect(stub.seen.map((request) => `${request.method} ${request.url}`)).toEqual(["POST /api/cart/items", "GET /api/cart/42"]);
+      // ...and one that is not, is refused by name without touching the base URL at all.
+      const message = await adapter.invoke("deleteCart", {}, { baseUrl: stub.baseUrl }).then(
+        () => "resolved",
+        (error: unknown) => String((error as Error).message),
+      );
+      expect(message).toBe("operation deleteCart is not part of the reviewed contract");
+      expect(stub.seen).toHaveLength(2);
+    } finally {
+      await stub.close();
+    }
   });
 });

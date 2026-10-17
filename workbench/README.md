@@ -104,16 +104,26 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   succeeded 并补一条 `job.updated` 事件；已经 failed/cancelled/interrupted 的 job **不接受结果**
   （§11：终态不复活）。UI 侧「代码」Tab 的入口因此是推导出来的：作业页 → 最近一次成功的
   `build` → 它的 resultRef → `GET /candidates/:c` → 选一个文件取正文。
-- **未验证 / 未实现的部分**：生成的 `adapter.ts` 从未被执行，`openapi.json` 也没喂给任何
-  第三方 OpenAPI 校验器（本机不装依赖）——两条都只由本仓的单测断言其内容与摘要，「SDK
-  真的能调用成功」不属于已证事实。独立**进程**不等于独立**沙箱**：这里没有容器、没有 namespace、
+- **生成的候选现在真的被跑过了**（`tests/integration/candidate-generation.test.ts` 最后那个 describe）：
+  测试取的是**读门交回的字节**（`candidate.file`，也就是「代码」Tab 显示的那同一份），写成临时 ESM 模块
+  `import` 进来，再对一台 loopback HTTP 桩调用 `invoke(operationId, sdkInput, {baseUrl})`，断言桩**收到的**
+  方法、路径、正文与 `content-type`，以及回包原样回到调用方。这一跑就当众逮到一个缺陷：发射器原先给
+  每个方法都带上 `body`，于是**任何生成的 GET 在 `fetch` 里就死**
+  （`Request with GET/HEAD method cannot have body`），一次请求都发不出去——在此之前它不存在，因为没人跑过。
+  修法是 bodyless 的方法（GET/HEAD）不带正文，且**给了非空 `sdkInput` 就按名拒绝**，而不是静默丢掉一部分输入
+  （静默丢比崩更坏：调用方会以为评审过的输入发出去了）。同时 `invoke` 的分派从「一张表 + 每条一个 `if` 分支」
+  收成**只有表**：旧形状里 `request` 内部那个 `route === undefined` 守卫永远走不到（`invoke` 已经拒过），
+  把一支变异改成静默返回 `{invented: true}` 全绿通过——一条到不了的守卫不是守卫。
+  仍未证的两条留着：`openapi.json` 没喂给任何**第三方** OpenAPI 校验器（本机不装依赖），
+  而一条**方法名小写**的变异在任何 fetch 客户端上都观察不到（Fetch 规范把 known methods 规范化回大写），
+  所以它是等价变异而不是测试漏洞——这一条连同上面那条到不了的守卫，都照实写在提交说明与 PR 正文里，不写成全杀。
+  独立**进程**不等于独立**沙箱**：这里没有容器、没有 namespace、
   没有 seccomp，那属于 §11 的 broker（仍未实现），所以「无网络」目前是靠「不给它任何端点/凭据、
   也不给它 RPC socket 路径」实现的，不是靠内核强制执行。
-  「代码」Tab 现在只**读**：浏览器里没有任何入口能发起一次生成——§8 line 294 说
-  `POST /projects/:p/candidates` 收 `{blueprintId, deadlineAt?}` 并回 202 JobRecord，
-  而本仓的 `candidate.generate` 仍要调用方自带 `jobId` + 预算 + generator 描述，直接回候选摘要。
-  把这条改成文档那个形状，等于让 worker 自己挑一个 §7.3 没有给过数字的生成预算，
-  所以我没动它（这一条偏离记在这里，不在 README 里假装已经一致）。
+  （这一段此前写的是「代码 Tab 只能读、页面上没有发起生成的入口」——那在 #57/#87 之后已经不成立：
+  页面上有「发起生成」那一节，§8 line 294 的形状是门自己造的，预算来自 profile 的
+  `maxGenerationAttempts`（§10 的显式预算，见第九轮读数）。留这段是为了记一次自我纠正的形状：
+  README 也会过期，改代码时要顺手回读这些"仍未"的句子。）
 
 导出与 verified-samples（F11 / issue #22）的边界：
 
