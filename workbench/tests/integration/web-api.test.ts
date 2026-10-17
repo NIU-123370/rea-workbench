@@ -22,7 +22,7 @@ import { contractCommitReceiptSchema, contractRevisionSchema, planCommitReceiptS
 import { targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
-import { JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
+import { cleanupRetryReceiptSchema, JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { IdempotencyJournal, MAX_IDEMPOTENCY_KEY_LENGTH } from "../../packages/application/idempotency.ts";
 import type { ListenAddress } from "../../packages/application/session.ts";
 import { SESSION_COOKIE_NAME } from "../../packages/application/session.ts";
@@ -2635,5 +2635,237 @@ describe("the three creation doors (§8 lines 282, 286, 289 / issue #58)", () =>
     expect((JSON.parse(malformed.text) as { error: { details: { reason: string } } }).error.details.reason).toBe("verification-id-malformed");
     const unknown = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/verifications/${String(newId())}`, { headers: { host: host(), cookie: fix.session.cookie } });
     expect(unknown.status, unknown.text).toBe(404);
+  });
+});
+
+describe("the job lifecycle doors (§8 lines 278-279 / issue #58)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `create-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  function post(session: Session, pathname: string, payload: Record<string, JsonValue>, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    return call("POST", pathname, { body: JSON.stringify(payload), headers });
+  }
+
+  function details(text: string): Record<string, unknown> {
+    return (JSON.parse(text) as { error: { details: Record<string, unknown> } }).error.details;
+  }
+
+  function insertJob(projectId: Id, state: "queued" | "running" | "succeeded", cleanupState: "pending" | "complete" | "failed" = "pending"): Id {
+    const jobId = newId();
+    const at = nowInstant();
+    const inserted = worker.writeConnection.transact((tx) => {
+      const outcome = tx.insertJob({
+        id: jobId,
+        projectId,
+        targetId: null,
+        kind: "capture",
+        state,
+        cleanupState,
+        inputJson: {},
+        resultRef: null,
+        errorJson: null,
+        idempotencyKey: `lifecycle-${jobId}`,
+        requestDigest: asDigest("a".repeat(64)),
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: at,
+        updatedAt: at,
+      });
+      if (outcome.outcome !== "inserted") throw new Error(`job ${outcome.outcome}`);
+      return true;
+    });
+    if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+    return jobId;
+  }
+
+  function insertLease(jobId: Id, owned: boolean, cleanupState: "pending" | "complete" | "failed" = "failed"): Id {
+    const leaseId = newId();
+    const inserted = worker.writeConnection.transact((tx) => {
+      tx.insertLease({
+        id: leaseId,
+        jobId,
+        kind: "har-staging",
+        resourceIdentityJson: { storageKey: "projects/x/staging/y" },
+        ownershipProofJson: owned ? { mintedBy: "verify-runner", jobId } : {},
+        cleanupState,
+        lastErrorJson: null,
+        retryAt: null,
+        retryCount: 0,
+      });
+      return true;
+    });
+    if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+    return leaseId;
+  }
+
+  it("cancels a queued job and answers with §8's JobRecord", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "lifecycle-cancel");
+    const jobId = insertJob(projectId, "queued");
+    const path = `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`;
+    const cancelled = await post(session, path, {}, null);
+    expect(cancelled.status, cancelled.text).toBe(202);
+    const record = jobRecordSchema.safeParse(JSON.parse(cancelled.text) as JsonValue);
+    if (!record.success) throw new Error(cancelled.text);
+    expect(record.data.id).toBe(jobId);
+    expect(record.data.state).toBe("cancelled");
+
+    // §11: 终态不复活. A second cancel cannot move it anywhere, and the row still says cancelled.
+    const again = await post(session, path, {}, null);
+    expect(again.status, again.text).toBe(202);
+    expect((jobRecordSchema.parse(JSON.parse(again.text) as JsonValue) as { state: string }).state).toBe("cancelled");
+  });
+
+  it("a running job is asked to stop, not declared dead", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "lifecycle-running");
+    const jobId = insertJob(projectId, "running");
+    const cancelled = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`, {}, null);
+    expect(cancelled.status, cancelled.text).toBe(202);
+    // `cancelling` is the request; only the executor that owns the run reports an interruption.
+    expect((jobRecordSchema.parse(JSON.parse(cancelled.text) as JsonValue) as { state: string }).state).toBe("cancelling");
+  });
+
+  it("a finished job answers with its current state and stays finished", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "lifecycle-terminal");
+    const jobId = insertJob(projectId, "succeeded", "complete");
+    const cancelled = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`, {}, null);
+    expect(cancelled.status, cancelled.text).toBe(202);
+    const record = jobRecordSchema.parse(JSON.parse(cancelled.text) as JsonValue) as { state: string; cleanupState: string };
+    expect(record.state).toBe("succeeded");
+    expect(record.cleanupState).toBe("complete");
+
+    // The row is not rewritten either. §11's terminality is enforced by the state machine, so a
+    // guard that only avoided a *write* would otherwise be invisible from the reply - and a cancel
+    // that touched a finished job's row would be the beginning of 终态复活.
+    const before = worker.writeConnection.transact((tx) => tx.getJob(projectId, jobId));
+    if (!before.ok) throw new Error(JSON.stringify(before.error));
+    if (before.value === null) throw new Error("before row missing");
+    const later = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`, {}, null);
+    expect(later.status, later.text).toBe(202);
+    const after = worker.writeConnection.transact((tx) => tx.getJob(projectId, jobId));
+    if (!after.ok) throw new Error(JSON.stringify(after.error));
+    if (after.value === null) throw new Error("after row missing");
+    expect(after.value.updatedAt).toBe(before.value.updatedAt);
+    expect(after.value.state).toBe("succeeded");
+  });
+
+  it("refuses a cancel body that carries a field and a path segment that is not an id", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "lifecycle-refused");
+    const jobId = insertJob(projectId, "queued");
+    const withField = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`, { reason: "because" }, null);
+    expect(withField.status, withField.text).toBe(400);
+    expect(details(withField.text)["rejectedKeys"]).toEqual(["reason"]);
+
+    const malformed = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/not-an-id/cancel`, {}, null);
+    expect(malformed.status, malformed.text).toBe(400);
+    expect(details(malformed.text)["reason"]).toBe("job-id-malformed");
+    const unknown = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(newId())}/cancel`, {}, null);
+    expect(unknown.status, unknown.text).toBe(404);
+    expect(details(unknown.text)["reason"]).toBe("job-unknown");
+
+    // The gate order, on this door: no cookie is 401, and a session without CSRF is 403.
+    const anonymous = await call("POST", `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`, {
+      body: "{}",
+      headers: { host: host(), origin: `http://${host()}`, "content-type": "application/json" },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+    const noCsrf = await call("POST", `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cancel`, {
+      body: "{}",
+      headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "content-type": "application/json" },
+    });
+    expect(noCsrf.status, noCsrf.text).toBe(403);
+  });
+
+  it("re-schedules only owned, unfinished cleanup and replays the same key to the same answer", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "lifecycle-cleanup");
+    const jobId = insertJob(projectId, "succeeded", "failed");
+    const owned = insertLease(jobId, true);
+    // A second job whose only lease carries no ownership proof: §5 lets this workbench reclaim
+    // only what it can show it minted, so the door must answer "nothing to schedule" for it.
+    const unowned = insertJob(projectId, "succeeded", "failed");
+    const unownedLease = insertLease(unowned, false);
+    const path = `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}/cleanup-retry`;
+
+    const noKey = await post(session, path, {}, null);
+    expect(noKey.status, noKey.text).toBe(400);
+    expect(details(noKey.text)["reason"]).toBe("idempotency-key-required");
+
+    const first = await post(session, path, {}, "cleanup-key-1");
+    expect(first.status, first.text).toBe(202);
+    const receipt = cleanupRetryReceiptSchema.safeParse(JSON.parse(first.text) as JsonValue);
+    if (!receipt.success) throw new Error(first.text);
+    expect(receipt.data.jobId).toBe(jobId);
+    expect(receipt.data.cleanupState).toBe("pending");
+    // The lease this workbench cannot prove it minted is left exactly where it is.
+    expect(receipt.data.leaseIds).toEqual([owned]);
+    expect(receipt.data.retryAt).not.toBeNull();
+    expect(receipt.data.auditSeq).toBeGreaterThan(0);
+
+    const replay = await post(session, path, {}, "cleanup-key-1");
+    expect(replay.status, replay.text).toBe(202);
+    expect(replay.text).toBe(first.text);
+
+    const journal = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/audit?limit=20`, { headers: { host: host(), cookie: session.cookie } });
+    const actions = (((JSON.parse(journal.text) as { entries?: { action: string }[] }).entries) ?? []).map((entry) => entry.action);
+    expect(actions.filter((action) => action === "job.cleanup-retry")).toHaveLength(1);
+
+    // The row, not the reply: the lease really was put back on the schedule with a counted retry.
+    const stored = worker.writeConnection.transact((tx) => tx.getLeaseByJob(projectId, jobId));
+    if (!stored.ok) throw new Error(JSON.stringify(stored.error));
+    if (stored.value === null) throw new Error("stored row missing");
+    expect(stored.value.cleanupState).toBe("pending");
+    expect(stored.value.retryCount).toBe(1);
+    expect(stored.value.retryAt).not.toBeNull();
+
+    const skipped = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(unowned)}/cleanup-retry`, {}, "cleanup-key-2");
+    expect(skipped.status, skipped.text).toBe(202);
+    expect((cleanupRetryReceiptSchema.parse(JSON.parse(skipped.text) as JsonValue) as { leaseIds: string[] }).leaseIds).toEqual([]);
+    const untouched = worker.writeConnection.transact((tx) => tx.getLeaseByJob(projectId, unowned));
+    if (!untouched.ok) throw new Error(JSON.stringify(untouched.error));
+    if (untouched.value === null) throw new Error("untouched row missing");
+    expect(untouched.value.id).toBe(unownedLease);
+    expect(untouched.value.cleanupState).toBe("failed");
+    expect(untouched.value.retryCount).toBe(0);
   });
 });

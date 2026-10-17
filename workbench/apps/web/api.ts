@@ -12,7 +12,7 @@ import { verificationReportSchema } from "../../packages/contracts/verification.
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
-import { jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
+import { cancelRequestSchema, cleanupRetryReceiptSchema, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
@@ -150,6 +150,11 @@ const ROUTES: readonly RouteSpec[] = [
   // §8 line 261, so it carries an Idempotency-Key: a retried freeze must replay the blueprint it
   // already made rather than mint a second one beside it.
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/blueprints`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
+  // The two lifecycle writes (§8 lines 278-279). Only the cleanup retry is in §8 line 261's list of
+  // keyed operations, and §8 line 279 says so itself (需幂等键与本地会话); the cancel door therefore
+  // takes no key and its repeat-safety comes from the state machine, not from a journal.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/jobs/:jobId/cancel`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/jobs/:jobId/cleanup-retry`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
   // selected by manifest file id. Neither takes a path.
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
@@ -734,6 +739,12 @@ const COMMIT_PROJECTIONS = {
     reason: "blueprint-freeze-shape",
     message: "the worker did not answer with a frozen blueprint",
   },
+  cleanup: {
+    fields: ["jobId", "cleanupState", "retryAt", "leaseIds", "auditSeq"],
+    schema: cleanupRetryReceiptSchema,
+    reason: "cleanup-retry-shape",
+    message: "the worker did not answer with a cleanup retry",
+  },
 } as const satisfies Record<string, CommitProjection>;
 
 function projectCommit(
@@ -778,6 +789,9 @@ async function commitCreation(
     payload: Record<string, JsonValue>;
     body: JsonValue;
     projection: CommitProjection;
+    // §8's creations answer 201 and its keyed lifecycle write answers 202, so the status is named by
+    // the caller and recorded with the answer it replays.
+    status?: number;
   },
 ): Promise<ApiResponse> {
   const digest = idempotencyDigest({ route: input.template, method: "POST", body: input.body }, ctx.declaration, deps.limits);
@@ -805,8 +819,9 @@ async function commitCreation(
     deps.journal.abandon(scope, input.key);
     return receipt.response;
   }
-  deps.journal.record(scope, input.key, digest.value, { status: 201, body: receipt.value });
-  return jsonSuccess(ctx.requestId, 201, receipt.value);
+  const status = input.status ?? 201;
+  deps.journal.record(scope, input.key, digest.value, { status, body: receipt.value });
+  return jsonSuccess(ctx.requestId, status, receipt.value);
 }
 
 type ReviewInput = { decision: "approved" | "rejected"; expectedDigest: JsonValue; expectedInventoryRevision?: number };
@@ -994,6 +1009,50 @@ async function readTarget(ctx: Context, deps: ApiDependencies): Promise<ApiRespo
     return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "target-shape", "the worker did not answer with a target view", ctx.declaration);
   }
   return jsonSuccess(ctx.requestId, 200, view.value);
+}
+
+async function cancelJob(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const jobId = pathId(ctx, "jobId");
+  if (projectId === null) return unknownProject(ctx);
+  if (jobId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "job-id-malformed", "the job segment of the path is not an opaque id", ctx.declaration);
+  }
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const request = parseStrict(cancelRequestSchema, body.value);
+  if (!request.ok) return invalidBody(ctx, "a cancel carries no fields", request.error);
+  const outcome = await deps.worker.call("job.cancel", { projectId, jobId }, ctx.actor);
+  if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
+  const record = parseStrict(jobRecordSchema, outcome.value);
+  if (!record.ok) {
+    return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "job-cancel-shape", "the worker did not answer with a job record", ctx.declaration);
+  }
+  return jsonSuccess(ctx.requestId, 202, record.value);
+}
+
+// §8 line 279: keyed, so a retry replays the same answer instead of scheduling the cleanup twice.
+async function retryJobCleanup(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  const jobId = pathId(ctx, "jobId");
+  if (projectId === null) return unknownProject(ctx);
+  if (jobId === null) {
+    return refused(ctx.requestId, "INVALID_INPUT", "job-id-malformed", "the job segment of the path is not an opaque id", ctx.declaration);
+  }
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const request = parseStrict(cancelRequestSchema, body.value);
+  if (!request.ok) return invalidBody(ctx, "a cleanup retry carries no fields", request.error);
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `cleanup-retry:${jobId}`,
+    template: `${API_PREFIX}/projects/:projectId/jobs/:jobId/cleanup-retry`,
+    command: "job.cleanupRetry",
+    payload: { projectId, jobId },
+    body: request.value,
+    projection: COMMIT_PROJECTIONS.cleanup,
+    status: 202,
+  });
 }
 
 // §8 line 293. One path segment, one id, no query: the blueprint is named, not searched, and
@@ -1304,6 +1363,10 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createContract(ctx, deps);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/verification-plans`) {
       response = await createPlan(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template.endsWith("/cancel")) {
+      response = await cancelJob(ctx, deps);
+    } else if (route.method === "POST" && route.template.endsWith("/cleanup-retry")) {
+      response = await retryJobCleanup(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/review")) {
       // One branch for three routes, chosen by the resource the path names: the commands take
       // different ids, and two of the three are inventory-bound while the contract one is not.

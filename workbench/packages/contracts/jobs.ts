@@ -63,6 +63,24 @@ export const jobRecordSchema = z.strictObject({
 
 export type JobRecord = z.infer<typeof jobRecordSchema>;
 
+// §8 line 279's cleanup-retry answer. It names the leases that were re-scheduled and the time they
+// were given, and nothing else: §14 says this operation may change cleanup state and nothing about
+// the business result, so there is no field here a report could arrive in.
+export const cleanupRetryReceiptSchema = z.strictObject({
+  jobId: idSchema,
+  cleanupState: z.enum(CLEANUP_STATES),
+  retryAt: instantSchema.nullable(),
+  leaseIds: z.array(idSchema),
+  auditSeq: z.int().nonnegative(),
+});
+
+export type CleanupRetryReceipt = z.infer<typeof cleanupRetryReceiptSchema>;
+
+// §8 line 278's cancel body is `{}`: the job is named by the path and the decision is the request
+// itself, so a schema that accepts a field would be a door through which a second meaning could be
+// smuggled. Strict-and-empty is how that sentence becomes checkable.
+export const cancelRequestSchema = z.strictObject({});
+
 // --- The project's job page (DESIGN §8 line 277 / issue #55) -------------------------
 //
 // §8 names this route as the way a client recovers a build or verification resource ID:

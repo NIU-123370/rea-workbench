@@ -38,6 +38,7 @@ import { normalizeEventLimit, toStreamEvents } from "../../packages/application/
 import { VectorService } from "../../packages/application/vector-service.ts";
 import { ContractService } from "../../packages/application/contract-service.ts";
 import { TargetService } from "../../packages/application/target-service.ts";
+import { JobLifecycleService } from "../../packages/application/job-lifecycle.ts";
 import { PlanService } from "../../packages/application/plan-service.ts";
 import { BlueprintService } from "../../packages/application/blueprint-service.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
@@ -111,6 +112,10 @@ export const COMMAND_NAMES = [
   // The project's job page (§8 line 277): the documented way to recover a build or
   // verification resource id, because each row carries its persisted resultRef.
   "jobs.list",
+  // The two job lifecycle writes (§8 lines 278-279). `job.cancel` moves the row along §11's
+  // machine; `job.cleanupRetry` re-schedules owned cleanup and nothing else.
+  "job.cancel",
+  "job.cleanupRetry",
   // The two audit windows (§8 lines 302-303). They are separate names because the rows they
   // read are separate: one project's decisions, and the entries that belong to no project.
   "audit.list",
@@ -453,6 +458,7 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
     limits: LIMITS,
   });
   const targets = new TargetService({ storage: writer });
+  const lifecycle = new JobLifecycleService({ storage: writer });
   const contracts = new ContractService({ storage: writer, limits: LIMITS, vectors });
   const plans = new PlanService({ storage: writer, limits: LIMITS });
   const blueprints = new BlueprintService({ storage: writer, artifacts: store, vectors, limits: LIMITS });
@@ -592,6 +598,18 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
           sensitive: { declaredValues: stringList(fields["sensitiveValues"]) },
         }),
       );
+    },
+    "job.cancel": (payload, actor) => {
+      const jobId = pickId(payload, "jobId");
+      const refused = missing(jobId);
+      if (refused !== null) return refused;
+      return relay(lifecycle.cancel(projectIdOr(payload), actor, jobId as Id));
+    },
+    "job.cleanupRetry": (payload, actor) => {
+      const jobId = pickId(payload, "jobId");
+      const refused = missing(jobId);
+      if (refused !== null) return refused;
+      return relay(lifecycle.retryCleanup(projectIdOr(payload), actor, jobId as Id));
     },
     "job.get": (payload, actor) => {
       const projectId = pickId(payload, "projectId");
