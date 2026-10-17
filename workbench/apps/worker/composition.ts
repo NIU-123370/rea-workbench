@@ -70,6 +70,7 @@ import { jobListRequestSchema } from "../../packages/contracts/jobs.ts";
 import { auditListRequestSchema } from "../../packages/contracts/audit.ts";
 import { vectorPageQuerySchema } from "../../packages/contracts/vectors.ts";
 import { candidateFileRequestSchema, candidateReadRequestSchema } from "../../packages/contracts/candidate.ts";
+import { INSTALLED_COMPARATOR_POLICIES } from "../../packages/contracts/verification.ts";
 
 // The worker composition root (DESIGN §2, §3, §14; issue #16).
 //
@@ -149,6 +150,12 @@ export const COMMAND_NAMES = [
   // The report read (§8 line 298). One name for the control-plane view of a stored report;
   // `blueprint.handoff`'s Builder-facing summary is a different projection with different rules.
   "verification.read",
+  // Which comparator names this build installed (issue #82). §8's table has no such read, and the
+  // write door it serves (§8 line 297) accepts a policy *name* only - so without this, the single
+  // way to ask "is this name right" was to send it and be refused, and a refusal is a journalled
+  // decision. It reads the same array `findComparatorPolicy` consults, and it is project-less
+  // because what it reports is this build, not a project's state.
+  "comparator.list",
   // Asking for a verification (§8 line 297). Separate from `candidate.generate` because it is a
   // different actor's decision: the Builder submits, the control plane decides what is compared
   // and against which named comparator.
@@ -207,7 +214,10 @@ const PROJECTLESS_COMMANDS: readonly string[] = [
   "audit.listGlobal",
   "session.pair",
   "session.read",
-  "session.revoke", "projects.list"];
+  "session.revoke",
+  "projects.list",
+  "comparator.list",
+];
 
 export type CommandName = (typeof COMMAND_NAMES)[number];
 export type CommandOutcome = Result<JsonValue, GateFailure>;
@@ -863,6 +873,11 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       if (refused !== null) return refused;
       return relay(await verifications.read(projectIdOr(payload), actor, verificationId as Id));
     },
+    // Issue #82: which names the §8 line 297 door will accept. This handler reads the same constant
+    // `findComparatorPolicy` consults, so a name can never be listed here and rejected there, and
+    // there is no "recommended"/"default" field this process could be accused of picking for the
+    // caller (§10 refuses exactly that).
+    "comparator.list": () => relay({ ok: true, value: { policies: INSTALLED_COMPARATOR_POLICIES } }),
     // §8 line 297. The key travels on the frame rather than being minted here because the jobs row
     // is what enforces it: §5 gives (project, idempotency_key) a unique index, so the worker owns
     // the replay and a second caller cannot slip an unkeyed verification past it.

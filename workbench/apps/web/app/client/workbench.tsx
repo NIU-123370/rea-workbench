@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, jobUpdateSignalOf, streamLineOf, uploadDraftOf } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -286,6 +286,10 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [jobsNotice, setJobsNotice] = useState<string | null>(null);
   const [verifyNotice, setVerifyNotice] = useState<string | null>(null);
   const [comparator, setComparator] = useState("");
+  // The installed comparator policies, read from the worker (issue #82). `null` means "the list did
+  // not arrive", which is a different state from an empty array ("this build installs none"), and the
+  // select shows its own sentence for each instead of being silently empty.
+  const [comparators, setComparators] = useState<ComparatorPolicyOption[] | null>(null);
   // The journal is what tells this page which plans may be frozen and which blueprints may be
   // generated from (§8 gives no list route for either), so it is read like any other panel: null
   // means "not read", and the panel says so instead of offering an empty list.
@@ -310,10 +314,16 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       // caught the 样本 tab doing exactly that while the worker was stopped).
       setSamples(null);
       setSamplesNotice(SAMPLES_EMPTY_LINE["no-session"]);
+      setComparators(null);
       return;
     }
     const issued = relayData(health.value) as { csrfToken?: string } | null;
     setCsrf(typeof issued?.csrfToken === "string" ? issued.csrfToken : "");
+    // The comparator names live in the worker's installed table, not in this bundle (issue #82):
+    // read once with the page so the operator chooses from what exists instead of typing a guess at
+    // a name the door will refuse.
+    const policies = await getJson("/api/v1/comparator-policies");
+    setComparators(policies.ok ? comparatorOptionsOf(relayData(policies.value)) : null);
     // The inventory is indexed per target (§5), so the page asks the project which targets it
     // has rather than guessing one from a graph node.
     const project = await getJson(`/api/v1/projects/${props.projectId}`);
@@ -472,19 +482,20 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     [csrf, props.projectId],
   );
 
-  // §8 line 297 from the browser. The comparator is typed by the operator because no door lists
-  // the installed names (recorded on issue #58): the page deliberately does not guess one, and a
-  // wrong name comes back as `comparator-policy-not-installed` with how many this build installs.
+  // §8 line 297 from the browser. The comparator is chosen from the list this build installed
+  // (issue #82) rather than typed at a name the door would refuse, and the page never picks one:
+  // an unmade choice stops here with its own sentence, because defaulting to the looser policy is
+  // §10's exact prohibition.
   const requestVerification = useCallback(
     async (candidateId: string) => {
-      const verifyNoticeGate = sessionGate(csrf);
-        if (!verifyNoticeGate.ok) {
-          setVerifyNotice(verifyNoticeGate.line);
-          return;
-        }
+      const draft = verifyDraftOf({ csrf, options: comparators, chosen: comparator });
+      if (!draft.ok) {
+        setVerifyNotice(draft.line);
+        return;
+      }
       const got = await postJson(
         `/api/v1/projects/${props.projectId}/verifications`,
-        { candidateId, comparatorPolicyId: comparator },
+        { candidateId, comparatorPolicyId: draft.comparatorPolicyId },
         csrf,
         crypto.randomUUID(),
       );
@@ -496,7 +507,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
       if (page.ok) setJobs(page.value as JobsPagePayload);
     },
-    [comparator, csrf, props.projectId],
+    [comparator, comparators, csrf, props.projectId],
   );
 
   // §8 line 272 from the browser: the file goes out as the multipart part the door names, with the
@@ -836,14 +847,26 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                 ))}
               </ul>
               <div data-verification-request>
-                <label htmlFor="comparator-policy">比较器策略名（§8 line 297 只收已安装的具名版本，不收代码）</label>
-                <input
+                <label htmlFor="comparator-policy">比较器策略（§8 line 297 只收已安装的具名版本，不收代码；名单由 worker 答，页面不替你选）</label>
+                <select
                   id="comparator-policy"
-                  type="text"
-                  autoComplete="off"
                   value={comparator}
+                  disabled={comparators === null || comparators.length === 0}
+                  data-comparator-list={comparators === null ? "unreadable" : comparators.length === 0 ? "empty" : "ready"}
                   onChange={(event) => setComparator(event.target.value)}
-                />
+                >
+                  <option value="">（还没有选：页面不默认任何一档）</option>
+                  {(comparators ?? []).map((option) => (
+                    <option key={option.policyId} value={option.policyId}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {comparators === null ? (
+                  <span data-comparator-notice>{COMPARATOR_UNREADABLE_LINE}</span>
+                ) : comparators.length === 0 ? (
+                  <span data-comparator-notice>{COMPARATOR_EMPTY_LINE}</span>
+                ) : null}
                 <button type="button" data-verify-request={candidate.id} onClick={() => void requestVerification(candidate.id)}>
                   发起验证
                 </button>

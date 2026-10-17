@@ -14,16 +14,21 @@ import { CASE_STATES } from "../domain/report.ts";
 // §10: method, encoded path, repeated query and body bytes are exact by default.
 // Anything else has to be an explicitly named normalization, and the closed list
 // is what stops a policy from growing a "ignore volatile fields" escape hatch.
-export const comparatorNormalizations = [
-  "http-header-name-case",
-  "json-key-order",
-  "timestamp-second-rounding",
-] as const;
+//
+// The list itself is owned by `domain/comparators.ts` (node-free and zod-free) because the page has
+// to name these same three things when it shows the operator what each policy will ignore; reaching
+// them through this contract would pull zod into the browser bundle, which §3 forbids. Imported for
+// the schema below *and* re-exported, so every existing importer of this name keeps one owner.
+import { COMPARATOR_NORMALIZATIONS } from "../domain/comparators.ts";
+import type { ComparatorNormalization } from "../domain/comparators.ts";
+
+export { COMPARATOR_NORMALIZATIONS as comparatorNormalizations } from "../domain/comparators.ts";
+export type { ComparatorNormalization };
 
 export const installedComparatorPolicySchema = z.strictObject({
   policyId: nonEmptyString,
   version: nonEmptyString,
-  normalization: z.array(z.enum(comparatorNormalizations)).default([]),
+  normalization: z.array(z.enum(COMPARATOR_NORMALIZATIONS)).default([]),
 });
 
 export type InstalledComparatorPolicy = z.infer<typeof installedComparatorPolicySchema>;
@@ -55,6 +60,22 @@ export const verificationRequestSchema = z.strictObject({
 });
 
 export type VerificationRequest = z.infer<typeof verificationRequestSchema>;
+
+// Reading the names (§8 line 297 requires one and the table gives no way to enumerate them;
+// issue #82's option 1, which the operator was asked to choose). Before this read existed, the
+// only way an operator could find out whether a name was right was to send it and be refused -
+// and a refusal writes a journal entry, so "trying a name" was not a free question.
+//
+// The answer is the very table the gate consults, not a second copy of it: `findComparatorPolicy`
+// and this read are two views of one array, which is what keeps the read from ever offering a name
+// the write would reject. There is deliberately **no default and no "recommended" flag** in this
+// shape: picking either policy for a caller is the mistake §10 names (把松的一档当默认), so the
+// choice stays with the operator and the page has to say so instead of preselecting.
+export const comparatorPolicyReadSchema = z.strictObject({
+  policies: z.array(installedComparatorPolicySchema),
+});
+
+export type ComparatorPolicyRead = z.infer<typeof comparatorPolicyReadSchema>;
 
 // One observed behaviour per plan entry, as the trusted evaluator saw it.
 // `expectedMatches` compares against the independently reviewed expected outcome;

@@ -20,7 +20,7 @@ import { AUDIT_LIST_MAX_LIMIT, auditPageSchema } from "../../packages/contracts/
 import { vectorCommitReceiptSchema, vectorPageSchema } from "../../packages/contracts/vectors.ts";
 import { contractCommitReceiptSchema, contractRevisionSchema, planCommitReceiptSchema } from "../../packages/contracts/behaviors.ts";
 import { targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
-import { verificationReportSchema } from "../../packages/contracts/verification.ts";
+import { comparatorPolicyReadSchema, INSTALLED_COMPARATOR_POLICIES, verificationReportSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { cleanupRetryReceiptSchema, JOB_LIST_MAX_LIMIT, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
 import { harImportHttpResponseSchema } from "../../packages/contracts/imports.ts";
@@ -4158,5 +4158,63 @@ describe("the job request door (§8 line 275 / issue #58)", () => {
     const missingTarget = await post(fix.session, fix.path, { targetId: newId(), expectedGraphRevision: 0, task: captureTask() }, "job-key-no-target");
     expect(missingTarget.status, missingTarget.text).toBe(404);
     expect(errorOf(missingTarget.text).details["reason"]).toBe("target-unknown");
+  });
+});
+
+// The comparator read (issue #82): a door §8's table does not list, mounted because §8 line 297
+// demands a name from a list nothing could read. What these cases hold is not "the list is there" but
+// what the answer may not do with it: pick a default, reorder it, or name a policy the worker's own
+// gate would reject.
+describe("the comparator policy read (issue #82)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+
+  async function pairCookie(): Promise<string> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    return (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+  }
+
+  it("holds the read behind a session and answers with the names this build installed", async () => {
+    const unpaired = await call("GET", `${API_PREFIX}/comparator-policies`, { headers: { host: host() } });
+    expect(unpaired.status, unpaired.text).toBe(401);
+
+    const cookie = await pairCookie();
+    const read = await call("GET", `${API_PREFIX}/comparator-policies`, { headers: { host: host(), cookie } });
+    expect(read.status, read.text).toBe(200);
+    const parsed = comparatorPolicyReadSchema.safeParse(JSON.parse(read.text) as JsonValue);
+    if (!parsed.success) throw new Error(`the read refused its own contract: ${read.text}`);
+    // The very table the write gate consults, in the order it is written in. A filtered or sorted
+    // copy would still be "a list of policies" and still be wrong: alphabetically the looser policy
+    // sorts first, and first is what a screen reads as suggested.
+    expect(parsed.data.policies.map((policy) => policy.policyId)).toEqual(INSTALLED_COMPARATOR_POLICIES.map((policy) => policy.policyId));
+    expect(parsed.data.policies.map((policy) => policy.normalization)).toEqual(INSTALLED_COMPARATOR_POLICIES.map((policy) => policy.normalization));
+  });
+
+  it("answers with names and normalizations only - no default, no recommendation, no version guess", async () => {
+    const cookie = await pairCookie();
+    const read = await call("GET", `${API_PREFIX}/comparator-policies`, { headers: { host: host(), cookie } });
+    expect(read.status, read.text).toBe(200);
+    const body = JSON.parse(read.text) as { policies: Record<string, unknown>[] };
+    for (const policy of body.policies) {
+      expect(Object.keys(policy).sort()).toEqual(["normalization", "policyId", "version"]);
+    }
+    // The negative half, stated on the bytes rather than on the parsed keys: a field added upstream
+    // would have to arrive here too before the door could strip it.
+    expect(read.text).not.toContain("default");
+    expect(read.text).not.toContain("recommended");
+  });
+
+  it("is the same answer for two sessions and carries no project state", async () => {
+    const first = await call("GET", `${API_PREFIX}/comparator-policies`, { headers: { host: host(), cookie: await pairCookie() } });
+    const second = await call("GET", `${API_PREFIX}/comparator-policies`, { headers: { host: host(), cookie: await pairCookie() } });
+    expect(first.status, first.text).toBe(200);
+    expect(second.status, second.text).toBe(200);
+    // What it reports is this build, so two sessions must not be able to read two answers - and the
+    // route takes no project segment, which is why no project's data can ride along with it.
+    expect(second.text).toBe(first.text);
   });
 });

@@ -14,6 +14,7 @@ import {
   listView,
   presentStatus,
   blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, importReceiptLine, NO_SESSION_LINE, projectDraftOf, PROJECT_NAME_EMPTY_LINE, projectCreateLine, sessionGate, uploadDraftOf, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, jobUpdateSignalOf, STREAM_LINE, streamLineOf, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, UPLOAD_NO_FILE_LINE, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
+  COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
 
@@ -856,5 +857,93 @@ describe("the job stream a panel subscribes to (§13, issue #85)", () => {
     expect(streamLineOf("closed", 12)).toContain("快照");
     expect(STREAM_LINE.connecting).not.toBe(STREAM_LINE.open);
     expect(STREAM_LINE.closed).not.toBe(STREAM_LINE.open);
+  });
+});
+
+// The comparator list a verification request is chosen from (issue #82). Three rules the tests are
+// built to hold: the page never preselects, it never shows a list it cannot read, and the three
+// "nothing to choose" states are three different sentences.
+describe("choosing a comparator from what this build installed (§8 line 297, issue #82)", () => {
+  // The two policies the contracts install, in the installed order, exactly as the read door answers.
+  const INSTALLED = {
+    policies: [
+      { policyId: "exact-http-v1", version: "1.0.0", normalization: [] },
+      { policyId: "exact-http-normalized-v1", version: "1.0.0", normalization: ["http-header-name-case", "json-key-order"] },
+    ],
+  };
+
+  function readyDraft(chosen: string) {
+    return verifyDraftOf({ csrf: "token-1234567890", options: comparatorOptionsOf(INSTALLED), chosen });
+  }
+
+  it("labels each policy with what it will treat as equal, in the order it was installed", () => {
+    const options = comparatorOptionsOf(INSTALLED);
+    if (options === null) throw new Error("the installed list should read");
+    // The order is the worker's, not alphabetical: sorting would put the looser policy first, and a
+    // first option is what a screen reads as a suggestion.
+    expect(options.map((option) => option.policyId)).toEqual(["exact-http-v1", "exact-http-normalized-v1"]);
+    expect(options[0]?.label).toContain("逐字节严格");
+    expect(options[1]?.label).toContain("header 名大小写");
+    expect(options[1]?.label).toContain("JSON 键序");
+    // A name the operator cannot see is a name they cannot choose, so the id is in the label.
+    expect(options[1]?.label).toContain("exact-http-normalized-v1");
+  });
+
+  it("refuses to render a list it cannot read, in each of the ways that happens", () => {
+    expect(comparatorOptionsOf(undefined)).toBeNull();
+    expect(comparatorOptionsOf({})).toBeNull();
+    expect(comparatorOptionsOf({ policies: "two of them" })).toBeNull();
+    // An unknown normalization is the important one: the page would have to label a rule it does
+    // not know, and half a list labelled is worse than none.
+    expect(comparatorOptionsOf({ policies: [{ policyId: "x", version: "1", normalization: ["ignore-volatile-fields"] }] })).toBeNull();
+    expect(comparatorOptionsOf({ policies: [{ policyId: "", version: "1", normalization: [] }] })).toBeNull();
+    expect(comparatorOptionsOf({ policies: [{ policyId: "x", normalization: [] }] })).toBeNull();
+    // And the positive case, so none of the above is passing because nothing ever reads.
+    expect(comparatorOptionsOf({ policies: [{ policyId: "x", version: "1", normalization: ["timestamp-second-rounding"] }] })).not.toBeNull();
+  });
+
+  it("keeps the three nothing-to-choose states in three different sentences", () => {
+    const lines = [COMPARATOR_UNREADABLE_LINE, COMPARATOR_EMPTY_LINE, COMPARATOR_UNSELECTED_LINE];
+    expect(new Set(lines).size).toBe(3);
+    expect(COMPARATOR_UNREADABLE_LINE).toContain("读不到");
+    expect(COMPARATOR_EMPTY_LINE).toContain("没有安装");
+    expect(COMPARATOR_UNSELECTED_LINE).toContain("还没有选");
+    // An empty list is a reading, not a failure to read: the two must not share a state.
+    const empty = comparatorOptionsOf({ policies: [] });
+    expect(empty).toEqual([]);
+    const withEmpty = verifyDraftOf({ csrf: "token-1234567890", options: empty, chosen: "" });
+    expect(withEmpty.ok).toBe(false);
+    if (withEmpty.ok) return;
+    expect(withEmpty.line).toBe(COMPARATOR_EMPTY_LINE);
+
+    // …and a list that never arrived is neither of those: folding it into "empty" would tell the
+    // operator this build installs nothing, which is a claim about the deployment the page cannot make.
+    const unreadable = verifyDraftOf({ csrf: "token-1234567890", options: null, chosen: "" });
+    expect(unreadable.ok).toBe(false);
+    if (unreadable.ok) return;
+    expect(unreadable.line).toBe(COMPARATOR_UNREADABLE_LINE);
+  });
+
+  it("asks before anything else whether there is a session to sign with", () => {
+    // Both other failures are present here, and the session sentence still wins: an unpaired page
+    // has no door to send through, and telling it about its list would send it to fix the wrong thing.
+    const draft = verifyDraftOf({ csrf: "", options: null, chosen: "" });
+    expect(draft.ok).toBe(false);
+    if (draft.ok) return;
+    expect(draft.line).toBe(NO_SESSION_LINE);
+  });
+
+  it("lets a request go only once the operator has actually chosen", () => {
+    const unchosen = readyDraft("");
+    expect(unchosen.ok).toBe(false);
+    if (unchosen.ok) return;
+    expect(unchosen.line).toBe(COMPARATOR_UNSELECTED_LINE);
+
+    const chosen = readyDraft("exact-http-normalized-v1");
+    expect(chosen.ok).toBe(true);
+    if (!chosen.ok) return;
+    // What goes out is the name from the list, byte for byte - the page adds no default and no
+    // rewriting, so the door's own refusal vocabulary is still the thing being tested.
+    expect(chosen.comparatorPolicyId).toBe("exact-http-normalized-v1");
   });
 });
