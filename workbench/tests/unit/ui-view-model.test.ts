@@ -15,7 +15,7 @@ import {
   COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
   inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, inspectClaimsNoteFor,
   INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES, INSPECT_CAPTURE_NOTE,
-  captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
+  captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, TARGET_URL_EMPTY_LINE, targetDraftOf, targetReceiptLine, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
 } from "../../apps/web/ui/view-model.ts";
 import type { CaptureActionRow, CaptureProfileOption, GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
 
@@ -1499,5 +1499,85 @@ describe("capture composer (DESIGN §8 line 275's CaptureTask)", () => {
     expect(allThree.body.task.network).toEqual({ requestBody: true, responseBody: true, headerValues: true });
     expect(CAPTURE_NETWORK_NOTE).toContain("全不勾");
     expect(CAPTURE_NETWORK_NOTE).toContain("骨架");
+  });
+});
+
+// §8 line 273's control (issue #58's last missing handle). The rule that shapes both tests below:
+// the address is the one input on this page that can carry a credential, so a refusal names the defect
+// and never the value - and the receipt may only say what the door observed, which for a declaration is
+// "this identity is still unknown".
+describe("declare a URL target (DESIGN §8 line 273)", () => {
+  const targetId = "33333333-3333-4333-8333-333333333333";
+  const receipt = { id: targetId, kind: "url", snapshotDigest: null, identityReason: "url-declared-not-captured", auditSeq: 7 };
+
+  it("refuses the four things that are not yet a declaration, by name and never by value", () => {
+    const lineOf = (input: Parameters<typeof targetDraftOf>[0]) => {
+      const draft = targetDraftOf(input);
+      return draft.ok ? "ready" : draft.line;
+    };
+    // Session first, with everything else answered: an unpaired page has no door to send through.
+    expect(lineOf({ csrf: "", url: "https://shop.example/cart" })).toBe(NO_SESSION_LINE);
+    expect(lineOf({ csrf: "token-1234567890", url: "   " })).toBe(TARGET_URL_EMPTY_LINE);
+
+    const refusals = [
+      ["https://user:hunter2@shop.example/cart", "url-credentials-forbidden"],
+      ["file:///etc/passwd", "url-scheme-not-http:file"],
+      ["https://shop.example/cart#access_token=1", "url-fragment-forbidden"],
+      ["not-an-url-at-all", "url-unparseable"],
+      [`https://shop.example/${"a".repeat(2000)}`, "url-over-length:2000"],
+    ] as const;
+    for (const [url, defect] of refusals) {
+      const line = lineOf({ csrf: "token-1234567890", url });
+      // The defect name is the door's own name for the same rule (`urlLocatorDefects` is one owner),
+      // so this is a real reason and not "the form did not like it".
+      expect(line).toContain(defect);
+      expect(line).toContain("这个地址还不能声明成目标");
+      // …and the value that failed is not in the sentence, so a password typed into this box cannot
+      // come back as screen text (§12.1: names, never values).
+      expect(line).not.toContain("hunter2");
+      expect(line).not.toContain("user:");
+      expect(line).not.toContain("access_token");
+      expect(line).not.toContain("etc/passwd");
+    }
+
+    const drafted = targetDraftOf({ csrf: "token-1234567890", url: "  https://shop.example/cart  " });
+    expect(drafted.ok).toBe(true);
+    if (!drafted.ok) return;
+    // Trimmed, two keys, and `kind` fixed at `url`: §8 names nothing else, and the three kinds a target
+    // row may carry are decided by which door wrote the row (a `har` one comes from an import).
+    expect(drafted.body).toEqual({ kind: "url", url: "https://shop.example/cart" });
+    // A zero-length-after-trim address is the empty case, not `url-empty` from the door's list.
+    expect(targetDraftOf({ csrf: "token-1234567890", url: "\t\ntp://x" }).ok).toBe(false);
+  });
+
+  it("says the receipt back without promising an observation nobody made", () => {
+    const line = targetReceiptLine(receipt);
+    expect(line).toContain(targetId);
+    expect(line).toContain("身份未知");
+    expect(line).toContain("url-declared-not-captured");
+    expect(line).toContain("日志 seq 7");
+    // The pair the page actually uses: `relayData` is the one owner of "unwrap the relay's envelope",
+    // so the receipt line is fed what the relay left inside it rather than the envelope itself.
+    expect(targetReceiptLine(relayData({ data: receipt }))).toBe(line);
+
+    // Half-read receipts get their own sentences instead of printing `undefined`.
+    expect(targetReceiptLine({})).toBe("声明已被接受，但回包没带目标 id");
+    expect(targetReceiptLine(null)).toBe("声明已被接受，但回包没带目标 id");
+    expect(targetReceiptLine({ ...receipt, id: "" })).toBe("声明已被接受，但回包没带目标 id");
+
+    // A receipt that is not about a URL target is refused *without echoing what it said* - the same rule
+    // the target-kind read follows for a word outside the three.
+    const wrongKind = targetReceiptLine({ ...receipt, kind: "SNAPSHOT-onerror<svg>" });
+    expect(wrongKind).toContain("不是 url 目标");
+    expect(wrongKind).not.toContain("SNAPSHOT");
+
+    // §8 line 273: a declared URL has no snapshot. A receipt claiming one is a contradiction this page
+    // does not smooth over - it says so, rather than printing 身份未知 beside a digest.
+    expect(targetReceiptLine({ ...receipt, snapshotDigest: "c".repeat(64) })).toContain("不该带摘要");
+
+    // The two absences that would otherwise print `undefined` or silently claim a fact.
+    expect(targetReceiptLine({ ...receipt, identityReason: "" })).toContain("url-declared-not-captured");
+    expect(targetReceiptLine({ ...receipt, auditSeq: undefined })).toContain("日志 seq 没给");
+    expect(targetReceiptLine({ ...receipt, identityReason: "" })).not.toContain("undefined");
   });
 });

@@ -32,7 +32,7 @@ import { BROWSER_ACTION_KINDS, isBrowserActionKind, isLocatorKind, isWaitState, 
 import type { BrowserActionKind, LocatorKind, WaitState } from "../../../packages/domain/capture.ts";
 // §8 line 273's URL rules, so this bundle asks the same owner whether a startUrl may be stored rather
 // than writing a second, weaker version of them.
-import { urlLocatorDefects } from "../../../packages/domain/target.ts";
+import { URL_TARGET_IDENTITY_REASON, urlLocatorDefects } from "../../../packages/domain/target.ts";
 import type { TargetKind } from "../../../packages/domain/target.ts";
 
 // The three-column workbench surface (PRD F04, DESIGN §6, issue #18).
@@ -1357,3 +1357,44 @@ export function captureDraftOf(input: {
 // The capture half is now a real control, so the sentence the inspect section carried has to say what
 // the pair of them can and cannot do, in the same voice.
 export const CAPTURE_NETWORK_NOTE = "网络三格全不勾也是合法的一次采集：那只记录请求与响应的骨架（URL、方法、状态行），正文与 header 值都不落。要哪一格就勾哪一格。";
+
+// §8 line 273 is the door that gives the capture something to visit. It is the last control on this
+// page whose only required input the operator types, and it is the one the rounds above kept borrowing:
+// every capture reading so far started from a URL target declared with a same-origin `fetch`, which is
+// honest about the door and dishonest about the page.
+//
+// Two rules the shape follows:
+//   * the URL is checked by the door's own owner (`urlLocatorDefects`), so the sentence under this box
+//     and the refusal the door would give name the same defect - and neither prints the value it
+//     rejected, because the field this box can receive is one that may carry credentials (§5).
+//   * the receipt says *identity unknown*, because §8 line 273 says so: a declared URL has no snapshot
+//     until a capture runs against it. A receipt that read like "目标已就绪" would promise a fact nothing
+//     has observed.
+export const TARGET_URL_EMPTY_LINE = "还没有填地址：§8 line 273 的这一发要的是一个可访问的 URL，这一格没有默认值也不该有。";
+
+export type TargetDraft = { ok: true; body: { kind: "url"; url: string } } | { ok: false; line: string };
+
+export function targetDraftOf(input: { csrf: string; url: string }): TargetDraft {
+  const gate = sessionGate(input.csrf);
+  if (!gate.ok) return { ok: false, line: gate.line };
+  const url = input.url.trim();
+  if (url === "") return { ok: false, line: TARGET_URL_EMPTY_LINE };
+  const defects = urlLocatorDefects(url);
+  if (defects.length > 0) return { ok: false, line: `这个地址还不能声明成目标：${defects.join("、")}` };
+  return { ok: true, body: { kind: "url", url } };
+}
+
+// The 201 body, said back. §3 keeps zod out of `apps/web`, so this function is how the page reads a
+// body it holds as `unknown` - the four shape checks below are about not printing `undefined` and not
+// claiming a fact the receipt contradicts, not about re-deciding what the door accepted. An unknown
+// `kind` is refused *without echoing it*: that field's vocabulary is closed, and §12.1 publishes names
+// rather than whatever arrived.
+export function targetReceiptLine(created: unknown): string {
+  const row = (created ?? {}) as { id?: unknown; kind?: unknown; snapshotDigest?: unknown; identityReason?: unknown; auditSeq?: unknown };
+  if (typeof row.id !== "string" || row.id === "") return "声明已被接受，但回包没带目标 id";
+  if (row.kind !== "url") return "回包说的那一行不是 url 目标：这一发答的不是本页声明的东西";
+  if (row.snapshotDigest !== null) return "回包说这个目标已经有快照摘要了：声明出来的一条 URL 不该带摘要";
+  const reason = typeof row.identityReason === "string" && row.identityReason !== "" ? row.identityReason : URL_TARGET_IDENTITY_REASON;
+  const seq = typeof row.auditSeq === "number" ? `｜日志 seq ${String(row.auditSeq)}` : "｜日志 seq 没给";
+  return `已声明 URL 目标 ${row.id}｜身份未知（${reason}）${seq}：要等一次采集真跑过，才有可比较的快照。`;
+}

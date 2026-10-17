@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, CaptureActionRow, CaptureProfileOption, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
@@ -334,6 +334,10 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [captureTimeout, setCaptureTimeout] = useState("");
   const [captureSensitive, setCaptureSensitive] = useState("");
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
+  // §8 line 273's own control. It sits above the composer because it is what the composer's subject
+  // read will pick up: a declaration makes this project's newest target the address a capture visits.
+  const [declareUrl, setDeclareUrl] = useState("");
+  const [declareNotice, setDeclareNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -690,6 +694,28 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     graphRevision,
     props.projectId,
   ]);
+
+  // §8 line 273 from the browser. This is the one write control that needs no idempotency key - the
+  // route registers `requiresIdempotencyKey: false`, because a declaration is not one of §8 line 261's
+  // keyed creations - so `postJson` is called without one rather than with a fresh uuid that nothing
+  // would read. The whole page is re-read afterwards for the same reason the upload door is: the new
+  // target is the composer's subject only once the project row has said so, and a panel that edited
+  // `targetIds` from a receipt would be showing what it predicted.
+  const declareTarget = useCallback(async () => {
+    const draft = targetDraftOf({ csrf, url: declareUrl });
+    if (!draft.ok) {
+      setDeclareNotice(draft.line);
+      return;
+    }
+    const got = await postJson(`/api/v1/projects/${props.projectId}/targets`, draft.body, csrf);
+    if (!got.ok) {
+      setDeclareNotice(refusalLine("声明目标被拒", got.reason, got.facts));
+      return;
+    }
+    setDeclareNotice(targetReceiptLine(relayData(got.value)));
+    setDeclareUrl("");
+    await load();
+  }, [csrf, declareUrl, load, props.projectId]);
 
   // §8 line 272 from the browser: the file goes out as the multipart part the door names, with the
   // four fields it lists and nothing else. No client-side size or type gate is added on top - the
@@ -1179,6 +1205,15 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         ) : (
           <ul>{inquiries.map((inquiry, index) => <li key={`${String(inquiry.kind)}-${String(index)}`} data-inquiry={String(inquiry.kind)}>{inquiryQueueLine(inquiry)}</li>)}</ul>
         )}
+      </section>
+      <section aria-label="声明一个 URL 目标" data-panel="target-declare">
+        <h2>声明一个 URL 目标（§8 line 273：这一发只要一个地址）</h2>
+        <label htmlFor="declare-url">要访问的地址（凭据、片段与非 http(s) 协议都会被具名拒收，页面与门口用的是同一条规则）</label>
+        <input id="declare-url" data-declare-url type="text" autoComplete="off" value={declareUrl} onChange={(event) => setDeclareUrl(event.target.value)} />
+        <button type="button" data-declare-submit onClick={() => void declareTarget()}>
+          声明目标
+        </button>
+        <span data-declare-notice>{declareNotice ?? "尚未声明：这一发只写一行目标，不会去访问任何东西。"}</span>
       </section>
       <section aria-label="发起一次采集" data-panel="capture-compose">
         <h2>发起一次采集（§8 line 275 的 capture 半边：同样只排作业，不给结论）</h2>

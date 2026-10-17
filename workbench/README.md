@@ -707,6 +707,35 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件�
   **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
   蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
 
+浏览器实测·第十五轮（2026-10-18 00:38–00:40 UTC，**同一套三个真进程没重启**：这一笔只动 `apps/web`，worker 与 API 的代码没变，
+所以第十四轮那个配对会话还在（配对码一次性，会话只活在那一个 worker 进程的内存里）；这一轮测的是**页面上最后一扇只有门没有把手的写动作**：
+§8 line 273 的 `POST /projects/:p/targets`，`data-panel="target-declare"`）：
+
+- 首屏（什么都还没打）：新节在编排节**之前**（`compareDocumentPosition` = 4，即 declare 在前），地址框 `value=""`、
+  回执格是「尚未声明：这一发只写一行目标，不会去访问任何东西。」，采集节的主题行照旧指着上一次声明的那个目标
+  （`目标 a97af19b…（声明出来的 URL）｜图修订 0｜profile 0 个可用，清单共 1 个`）。
+- **打一个带凭据的地址再点**：回执逐字「这个地址还不能声明成目标：url-credentials-forbidden」，
+  句子里没有 `hunter2` 也没有 `user:`；**`/targets` 那条 URL 在资源计时里出现 0 次**，也就是这一下压根没出网。
+  这一句的**规则名与门口那条一模一样**（同一条用例把三个缺陷各打一遍 HTTP 门，逐条比 reason 字符串）。
+- **打 `https://api.example/orders` 点「声明目标」**：一次 POST，回执逐字
+  「已声明 URL 目标 3d1a85ff-874b-4c88-b5d0-07034c732c2a｜身份未知（url-declared-not-captured）｜日志 seq 6：要等一次采集真跑过，才有可比较的快照。」
+  ——**没有把"已声明"说成"已就绪"**：§8 line 273 明写 URL 未捕获前身份未知，`snapshot_digest` 在库里就是 `null`。
+  输入框自己清空（回执留着），所以下一次声明不会带着上一次的地址。
+- **紧接着只看页面、不碰脚本**：采集节主题行的目标 id **换成了刚点出来的那一个**
+  （`3d1a85ff…`），状态仍是 ready——这一条是"成功后整页重读"的证据：门写的那一行，页面是**读回来**的而不是照回执拼的。
+  同时定向调查那一节自己翻成「这个目标是声明的 URL，背后还没有导入的字节…」（与 #58 第十三轮那条语义读数同一形状）。
+- **然后一次纯点击的采集**：勾 profile `har-capture`、起点 `https://api.example/orders`、第 1 行 role=heading/name=订单 →
+  「已排入采集：作业 de0bc4a7-9d53-4683-b103-24eba6e551eb（queued）」，作业面板三行（新行 queued、上一轮的 80be0166 queued、37c09a0c cancelled）。
+- 库侧独立核对（只读连接，worker 仍持写锁）：那条作业的 `target_id` **等于刚声明的 `3d1a85ff…`**，
+  `input_json` 里 `scenario.startUrl="https://api.example/orders"`、`actions[0].locator={kind:"role",role:"heading",name:"订单"}`、
+  三个网络格 `false`；`targets` 表那两行的 `original_locator` 就是打进去的两个地址、`snapshot_digest` 均 `null`；
+  日志 seq 6 是 `target.create|url-declared|{"host":"api.example"}`——**记的是 host 而不是 locator**（§5 不把可含凭据的 locator 写进日志），
+  seq 7 才是 `job.request|job-queued|{"taskKind":"capture"}`。
+- console 全程 2 条（`[Fast Refresh] rebuilding` / `done in 144ms`，即这一笔新代码被 dev 编译），**0 条报错**。
+- 这一轮**没验到的**：截图（工具的路径白名单照旧既不收 `/tmp` 也不收工作区）；"成功后重读整页"这一条**没有自动守卫**——
+  静态渲染不跑 effect，我把 `await load()` 删掉的话 unit 与 render 两条都不会红，所以这条只在浏览器里读到了；
+  一次真采集的执行（`capture` 作业仍无执行者，与 `verify` 同一类已声明的缺席）。
+
 浏览器实测·第十四轮（2026-10-18 00:20–00:26 UTC，三个真进程：worker（数据目录 `/private/tmp/wb-rig-1018/data`，
 profile `har-capture`、`queueWaitMs:30000`、`maxGenerationAttempts:3`）＋web(127.0.0.1:4310)＋`next dev apps/web -p 4496`
 （`WB_UI_ORIGIN=http://localhost:4496`）；这一轮测的是**页面最后一把手**：§8 line 275 的 capture 半边，
@@ -986,8 +1015,8 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 明确**未实现 / 未验证**的范围：
 
 - 页面上的写控件现在覆盖到「建项目 → 声明 URL 目标 → 上传采集 → 采集编排 → 定向调查 → 批 → 冻 → 生成」以及作业的两扇门（第九、十轮有浏览器
-  读数）：**有**按钮的是落地清单、新建项目、配对表单、采集上传、**发起一次采集（第十四轮的编排控件）**、**定向调查**、样本决定、作业取消、清理重排、验证请求、
-  蓝图冻结、发起生成；**没有**控件的是 `vector.create`、`contract`(草稿) 与 `plan.build` 三扇创建门、以及 §8 line 273 的声明 URL 目标（第十四轮仍用同源 `fetch` 打的）——
+  读数）：**有**按钮的是落地清单、新建项目、配对表单、采集上传、**声明 URL 目标（第十五轮）**、**发起一次采集（第十四轮的编排控件）**、**定向调查**、样本决定、作业取消、清理重排、验证请求、
+  蓝图冻结、发起生成；**没有**控件的是 `vector.create`、`contract`(草稿) 与 `plan.build` 三扇创建门——
   它们的必填输入要从证据正文里派生（record ordinal、schema 体、requiredCases 联集），页面上做一个能填的
   表就等于做一个会猜的表，所以这三扇仍靠 `fetch` 驱动，是 issue #58 剩下的账。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
@@ -1035,8 +1064,9 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 - §8 line 275 的**两半把手现在都在页面上**（第十四轮补的是 capture 那一半，第十三轮补的是 inspect 那一半）：
   编排控件不按自由文本收动作——`packages/domain/capture.ts` 一份具名清单同时喂给页面与契约（第十四轮的守卫用例把
   三者按值钉在一起），所以"能填的表"与"能收的体"不可能各长一份。剩下的账不在这一道上，在下面三条里：
-  `vector.create`、`contract`(草稿)、`plan.build` 三扇创建门的必填输入要从证据正文派生，页面还没有把手，
-  §8 line 273 的声明 URL 目标同样只有门、没有把手（第十四轮的读数是用同源 `fetch` 打的）。
+  `vector.create`、`contract`(草稿)、`plan.build` 三扇创建门的必填输入要从证据正文派生，页面还没有把手。
+  §8 line 273 的声明 URL 目标在第十五轮补上了把手，于是"配对 → 建项目 → 声明地址 → 编排并排一次采集"
+  这一条链在浏览器里**一次脚本都不用**（那轮的读数就是全部靠点出来的）。
   inspect 那一半的做法是：目标取图读自己给的 `targetId`，
   类型由 `GET /projects/:p/targets/:t` 读回来（页面不再猜 `kind`），主张清单取同一张图读的 `claims[]`，
   并发令牌取项目行的 `graphRevision`——操作者只回答两件事：问什么、勾选哪几条。
