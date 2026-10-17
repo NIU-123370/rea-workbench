@@ -12,7 +12,8 @@ import { verificationReportSchema, verificationRequestSchema } from "../../packa
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
-import { cancelRequestSchema, cleanupRetryReceiptSchema, jobPageSchema, jobRecordSchema } from "../../packages/contracts/jobs.ts";
+import { cancelRequestSchema, cleanupRetryReceiptSchema, jobPageSchema, jobRecordSchema, jobRequestSchema } from "../../packages/contracts/jobs.ts";
+import type { JobRecord } from "../../packages/contracts/jobs.ts";
 import { CAPTURE_MEDIA_TYPES, harImportHttpResponseSchema } from "../../packages/contracts/imports.ts";
 import { instantSchema } from "../../packages/contracts/primitives.ts";
 import { auditPageSchema } from "../../packages/contracts/audit.ts";
@@ -44,6 +45,10 @@ import {
   sessionCookieHeader,
 } from "../../packages/application/session.ts";
 import { IdempotencyJournal, idempotencyDigest, isIdempotencyKey, journalScope } from "../../packages/application/idempotency.ts";
+// The storable half of a task, decided by the module that owns the rule. The door needs it for one
+// thing - the digest it stores must not contain a secret - and re-implementing the field list here
+// would be a second copy of §12.1 that could disagree with the first.
+import { taskForStorage } from "../../packages/application/job-request.ts";
 import type { SensitiveDeclaration } from "../../packages/application/sanitizer.ts";
 import { emptySuccess, errorResponse, jsonSuccess } from "./api-envelope.ts";
 import { openEventStream } from "./event-stream.ts";
@@ -182,6 +187,12 @@ const ROUTES: readonly RouteSpec[] = [
   // import among the creations. The body is multipart, so this is the one route the JSON budget
   // above does not govern.
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/imports`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
+  // Asking for work against a target (§8 line 275) - the last row in §8's table this build can mount.
+  // Keyed because §8 line 261 lists `job` among the creations, and answered with a `Location` header
+  // because §8's third column names one. The body is the task union, so this is also the only route
+  // whose request can carry short-lived secrets: they are neither stored nor digested (§12.1), and
+  // that is decided in the service rather than here, so the door cannot be talked into keeping them.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/jobs`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The two lifecycle writes (§8 lines 278-279). Only the cleanup retry is in §8 line 261's list of
   // keyed operations, and §8 line 279 says so itself (需幂等键与本地会话); the cancel door therefore
   // takes no key and its repeat-safety comes from the state machine, not from a journal.
@@ -744,6 +755,24 @@ type CommitProjection = {
   readonly message: string;
 };
 
+// §8's JobRecord is the answer of three doors - the queued job (line 275), the build (line 294) and
+// the verification (line 297) - and each of them parses it with the same schema. The *list* of names
+// to pick out of the worker's receipt was written per door, which is three lists that can drift away
+// from the schema they are checked against; this one constant is why they cannot, and the `satisfies`
+// is what makes adding a field to §8's JobRecord show up here as a compile error rather than as a
+// door that quietly stopped answering it.
+const JOB_RECORD_FIELDS = [
+  "id",
+  "kind",
+  "state",
+  "cleanupState",
+  "deadlineAt",
+  "retryAt",
+  "cleanupRetryAt",
+  "resultRef",
+  "error",
+] as const satisfies readonly (keyof JobRecord)[];
+
 const COMMIT_PROJECTIONS = {
   project: {
     fields: ["id", "name", "graphRevision", "createdAt"],
@@ -785,7 +814,7 @@ const COMMIT_PROJECTIONS = {
   // doors use. Written twice it would be two field lists that can drift apart, and the queued job
   // the request answers with is the same row a later `GET /jobs/:j` reads back.
   verification: {
-    fields: ["id", "kind", "state", "cleanupState", "deadlineAt", "retryAt", "cleanupRetryAt", "resultRef", "error"],
+    fields: JOB_RECORD_FIELDS,
     schema: jobRecordSchema,
     reason: "verification-request-shape",
     message: "the worker did not answer with a queued verification job",
@@ -794,10 +823,18 @@ const COMMIT_PROJECTIONS = {
   // request writes is what the runner later settles, so the answer and the read-back are one
   // projection with two readers.
   candidate: {
-    fields: ["id", "kind", "state", "cleanupState", "deadlineAt", "retryAt", "cleanupRetryAt", "resultRef", "error"],
+    fields: JOB_RECORD_FIELDS,
     schema: jobRecordSchema,
     reason: "candidate-request-shape",
     message: "the worker did not answer with a queued build job",
+  },
+  // §8 line 275's 202 is the same row shape again: the job this request queued is what `GET /jobs/:j`
+  // reads back and what `job.updated` names, so the door has no field list of its own to drift.
+  job: {
+    fields: JOB_RECORD_FIELDS,
+    schema: jobRecordSchema,
+    reason: "job-request-shape",
+    message: "the worker did not answer with a queued job",
   },
   // §8 line 272's 202 body is `{targetId,job}` and nothing else. The worker's receipt also names
   // the lease and the source artifact it minted; those are real, but this route's third column
@@ -855,8 +892,13 @@ async function commitCreation(
     // §8's creations answer 201 and its keyed lifecycle write answers 202, so the status is named by
     // the caller and recorded with the answer it replays.
     status?: number;
+    // A route §8 gives a `Location` header (line 275). It is *derived from the recorded body* on
+    // both the first answer and a replay, rather than journaled as a second copy: the header and the
+    // body must not be able to name different rows, and the row id is already in the body.
+    locate?: (body: JsonValue) => string;
   },
 ): Promise<ApiResponse> {
+  const located = (body: JsonValue): [string, string][] => (input.locate === undefined ? [] : [["location", input.locate(body)]]);
   const digest = idempotencyDigest({ route: input.template, method: "POST", body: input.body }, ctx.declaration, deps.limits);
   if (!digest.ok) return refused(ctx.requestId, digest.error.code, digest.error.reason, digest.error.message, ctx.declaration);
   const scope = journalScope(String((ctx.session as CurrentSession).reviewerId), input.scope);
@@ -868,7 +910,7 @@ async function commitCreation(
     return refused(ctx.requestId, "IDEMPOTENCY_CONFLICT", "idempotency-key-in-flight", "the first request with that key has not produced a result yet", ctx.declaration);
   }
   if (claim.kind === "replay") {
-    return jsonSuccess(ctx.requestId, claim.recorded.status, claim.recorded.body);
+    return jsonSuccess(ctx.requestId, claim.recorded.status, claim.recorded.body, located(claim.recorded.body));
   }
   const outcome = await deps.worker.call(input.command, input.payload, ctx.actor);
   if (!outcome.ok) {
@@ -884,7 +926,7 @@ async function commitCreation(
   }
   const status = input.status ?? 201;
   deps.journal.record(scope, input.key, digest.value, { status, body: receipt.value });
-  return jsonSuccess(ctx.requestId, status, receipt.value);
+  return jsonSuccess(ctx.requestId, status, receipt.value, located(receipt.value));
 }
 
 type ReviewInput = { decision: "approved" | "rejected"; expectedDigest: JsonValue; expectedInventoryRevision?: number };
@@ -996,6 +1038,48 @@ async function requestCandidate(ctx: Context, deps: ApiDependencies, key: string
     body: request,
     projection: COMMIT_PROJECTIONS.candidate,
     status: 202,
+  });
+}
+
+// §8 line 275: asking for work against a target. The body is the document's own `jobRequestSchema`,
+// task union included, which makes this the one creation whose request can carry short-lived secrets
+// (`sensitiveValues` inside a capture task). The door hands the request over whole and the service
+// decides what may be written down, so that rule has exactly one owner (§12.1); a door that filtered
+// the secrets itself would be a second place that has to remember which fields are secret.
+//
+// The answer is the queued row plus §8's `Location` header, and the header is *derived* from the
+// projected body's own id rather than journaled beside it - a replay must point at the row its body
+// names, and two stored copies of that address are one way to make them disagree.
+async function requestJob(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(jobRequestSchema, body.value);
+  if (!parsed.ok) return invalidBody(ctx, "the job request does not match the named schema", parsed.error);
+  const projectPath = String(projectId);
+  // Two shapes leave this door and they are deliberately not the same object. The frame carries what
+  // the caller sent, short-lived capture secrets included - the worker needs them to run the task, and
+  // this is the same route `POST /imports` takes with its declared sensitive values. The *digest* the
+  // journal stores is rebuilt from the storable half, because §12.1 says a persisted request digest
+  // holds no sensitive original: pinning the whole body would put a secret into a column that outlives
+  // the job, and a replay check that can see the secret is a disclosure surface wearing a hash.
+  const digestBody: Record<string, JsonValue> = {
+    targetId: parsed.value.targetId,
+    expectedGraphRevision: parsed.value.expectedGraphRevision,
+    task: taskForStorage(parsed.value.task),
+  };
+  if (parsed.value.deadlineAt !== undefined) digestBody.deadlineAt = parsed.value.deadlineAt;
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${projectPath}/jobs`,
+    template: `${API_PREFIX}/projects/:projectId/jobs`,
+    command: "job.request",
+    payload: { projectId, idempotencyKey: key, request: body.value },
+    body: digestBody,
+    projection: COMMIT_PROJECTIONS.job,
+    status: 202,
+    locate: (record) => `${API_PREFIX}/projects/${projectPath}/jobs/${String((record as JobRecord).id)}`,
   });
 }
 
@@ -1639,6 +1723,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await requestCandidate(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/imports`) {
       response = await importCapture(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/jobs`) {
+      response = await requestJob(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/cancel")) {
       response = await cancelJob(ctx, deps);
     } else if (route.method === "POST" && route.template.endsWith("/cleanup-retry")) {

@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { asId, newId } from "../../packages/domain/identity.ts";
+import { asId, newId, nowInstant } from "../../packages/domain/identity.ts";
+import { URL_TARGET_IDENTITY_REASON } from "../../packages/domain/target.ts";
 import type { Id, Instant } from "../../packages/domain/identity.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
@@ -38,6 +39,9 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "jobs.list",
   "job.cancel",
   "job.cleanupRetry",
+  // §8 line 275's door: asking for a capture or an inspect against a target. Written here as well as
+  // in the handler table because §14 makes this list a boundary a reviewer has to cross on purpose.
+  "job.request",
   "audit.list",
   "audit.listGlobal",
   "evidence.get",
@@ -369,6 +373,147 @@ describe("named commands and the local RPC (§14)", () => {
     if (builders.ok) return;
     expect(builders.error.code).toBe("ACCESS_DENIED");
     expect(builders.error.reason).toBe("role-may-not-request-verification");
+  });
+
+  // The cell §8 line 275's door makes necessary: a `capture` or an `inspect` row can now be asked for
+  // over HTTP, and the runner takes `build` rows only, so nothing in this build moves them. The claim
+  // has to be about *those* kinds - "there are queued jobs" is a different sentence - so a queued
+  // build row, which does have an executor here, has to leave the check quiet.
+  // This test sits before the job-door tests below for the same reason the evaluator cell does: the
+  // empty half of the claim can only be read while the queue really holds none of these kinds.
+  it("names the missing executor for the two kinds the job door can queue (§7.5)", async () => {
+    const quiet = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
+    expect(quiet?.state).toBe("ok");
+    expect(quiet?.facts).toEqual({ queuedCaptureCount: 0, queuedInspectCount: 0 });
+
+    const created = unwrap(await request("project.create", { name: "target-work-executor" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const at = new Date().toISOString() as Instant;
+    const seed = (kind: "build" | "inspect"): void => {
+      const jobId = newId();
+      const inserted = worker.writeConnection.transact((tx) => {
+        tx.insertJob({
+          id: jobId,
+          projectId,
+          targetId: null,
+          kind,
+          state: "queued",
+          cleanupState: "pending",
+          inputJson: { seededFor: "executor-absence-check" },
+          resultRef: null,
+          errorJson: null,
+          idempotencyKey: `${kind}-${jobId}`,
+          requestDigest: ("9".repeat(64)) as Digest,
+          deadlineAt: null,
+          retryAt: null,
+          createdAt: at,
+          updatedAt: at,
+        });
+        return true;
+      });
+      if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+    };
+
+    seed("build");
+    const stillQuiet = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
+    expect(stillQuiet?.state).toBe("ok");
+    expect(stillQuiet?.facts).toEqual({ queuedCaptureCount: 0, queuedInspectCount: 0 });
+
+    seed("inspect");
+    const loud = (await worker.doctor()).checks.find((check) => check.name === "target-work-executor");
+    expect(loud?.state).toBe("degraded");
+    expect(loud?.reasons).toEqual(["target-work-executor-not-installed"]);
+  });
+
+  // §8 line 275 asked on the worker's own socket, because two of its rules are not visible from a
+  // door: the role gate belongs to the service rather than to a route guard, and the order is
+  // key → role → shape. A Builder whose body would also fail validation has to hear the role
+  // sentence, since that is the one thing it cannot fix by editing JSON.
+  it("refuses a job request by role, after the key and before the body (§7.3, §8 line 275)", async () => {
+    const created = unwrap(await request("project.create", { name: "job-request-roles" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const task: Record<string, JsonValue> = {
+      kind: "capture",
+      profileId: "har-capture",
+      scenario: { startUrl: "https://shop.example/cart", actions: [] },
+      network: { requestBody: false, responseBody: false, headerValues: false },
+    };
+    const body: Record<string, JsonValue> = { targetId: newId(), expectedGraphRevision: 0, task };
+
+    const noKey = await request("job.request", { projectId, request: body }, inspector);
+    expect(noKey.ok).toBe(false);
+    if (noKey.ok) return;
+    expect(noKey.error.reason).toBe("idempotency-key-required");
+
+    const wrongRole = await request("job.request", { projectId, idempotencyKey: "roles-builder", request: { ...body, task: { ...task, bogusField: 1 } } }, builder);
+    expect(wrongRole.ok).toBe(false);
+    if (wrongRole.ok) return;
+    expect(wrongRole.error.code).toBe("ACCESS_DENIED");
+    expect(wrongRole.error.reason).toBe("role-may-not-request-jobs");
+
+    // Past both gates, the control plane reaches the service's own question about the task: the
+    // profile a capture names is read from the installed registry, and a name that is not there is
+    // refused rather than answered with a number invented here (§14).
+    const unknownProfile = await request(
+      "job.request",
+      { projectId, idempotencyKey: "roles-inspector", request: { ...body, task: { ...task, profileId: "profile-nobody-installed" } } },
+      inspector,
+    );
+    expect(unknownProfile.ok).toBe(false);
+    if (unknownProfile.ok) return;
+    expect(unknownProfile.error.code).toBe("CAPABILITY_UNAVAILABLE");
+    expect(unknownProfile.error.reason).toBe("task-profile-not-installed");
+  });
+
+  // The same key asked twice, this time *past* the web process's journal: the idempotency journal is
+  // this process's memory (§14), while the jobs row and its unique (project, key) index are durable,
+  // so a restart leaves the second caller's retry to be answered by the row that already exists. The
+  // rule being proved is §13's: a key that created nothing announces nothing.
+  it("a repeated key reaches the row that exists and writes no second event (§8 line 261, §13)", async () => {
+    const created = unwrap(await request("project.create", { name: "job-request-dup" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const targetId = newId();
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertTarget({
+        id: targetId,
+        projectId,
+        kind: "url",
+        originalLocator: "https://shop.example/cart",
+        sourceSha256: null,
+        sourceArtifactId: null,
+        snapshotDigest: null,
+        identityReason: URL_TARGET_IDENTITY_REASON,
+        createdAt: nowInstant(),
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+
+    const request1 = {
+      targetId,
+      expectedGraphRevision: 0,
+      task: {
+        kind: "capture",
+        profileId: "har-capture",
+        scenario: { startUrl: "https://shop.example/cart", actions: [] },
+        network: { requestBody: true, responseBody: false, headerValues: false },
+      },
+    };
+    const first = await request("job.request", { projectId, idempotencyKey: "dup-key", request: request1 }, inspector);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = await request("job.request", { projectId, idempotencyKey: "dup-key", request: request1 }, inspector);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect((second.value as { id: string }).id).toBe((first.value as { id: string }).id);
+
+    const events = worker.writeConnection.transact((tx) => tx.eventsAfter(projectId, 0, 50));
+    if (!events.ok) throw new Error(JSON.stringify(events.error));
+    expect(events.value.filter((row) => row.type === "job.updated")).toHaveLength(1);
+    // And the queue really holds one row, not two wearing the same key.
+    const rows = worker.writeConnection.transact((tx) => tx.listJobsByStates(["queued"], 50).filter((job) => job.projectId === projectId));
+    if (!rows.ok) throw new Error(JSON.stringify(rows.error));
+    expect(rows.value).toHaveLength(1);
   });
 
   it("marks a lost executor interrupted and keeps its evidence", async () => {

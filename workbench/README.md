@@ -286,11 +286,33 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 游标编解码抽成 `packages/application/page-cursor.ts` 一份（作业页与库存页共用；base64url 解码
 是宽容的，所以唯一证明是「能原样回编」）。
 
-§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **38 条**，仍缺 **2 条**——
-`POST /projects/:p/jobs`（275，要的是 `CaptureTask|InspectTask` 的执行者，与 #75 那半边同一空缺）与
+§8 的 HTTP 面（issue #58）现在的真实刻度：文档那张表 **40 条路由**，本仓挂了 **39 条**，仍缺 **1 条**——
 `GET /projects/:p/jobs/:j/preview`（304，卡的是「像素图由隔离 origin 提供」那半边：本 build 里**没有任何东西持有预览帧**
 （`imageUrl`/`actionState` 全仓零命中，`buildLeftPanel` 的 `frameLabels` 没有生产者，
 `artifacts` 的 class 名录里也没有 frame/preview），所以那道门今天能如实答的只有「没有画面」）。
+这一轮补的是最后一条**挂得上**的 `POST /projects/:p/jobs`（275）。它缺的从来不是路由形状而是**判定者**，
+所以门里每一条规则都指着一个已有的人：体的 `task` 是 `contracts/tasks.ts` 那份具名联合（本仓此前只有
+契约测试读它，没有第二个调用者）；`expectedGraphRevision` 在这里是**必填并真的比对**——§8 表下那句
+「依赖图版本的写入必须带 expectedGraphRevision」在 contract/plan 那两扇是"没有存储者所以具名拒收"，
+在这一扇是有主之物（`projects.graph_revision`），对不上就 409 并报出两个数；`profileId` 走
+worker 的 profile 名录问一句（§14：预算只从装好的 profile 来，名字不在就 503，不编数字），
+`queueWaitMs` 因此是那一格的等待预算而不是门自己定的；capture 的 `startUrl` 与目标的 host 不同就 403
+（§8：不能任意换目标；两侧主机名都不回显，§12.1 报名字不报值），而 §8 留的"profile 明确允许的 fixture
+origin"那一半**没有判定者**——`profileSchema` 只有 `networkPolicyId`，没有 origin 名录，所以这里不写
+一份假的 allowlist 去查；inspect 的空 `claimIds` 只在"该目标还没有主张"时合法（用
+`listClaimsForTarget` 现读），非空则每一 id 都要 `getClaim` 查得到。
+`sensitiveValues` 是这扇唯一的**双层**规则：帧里带着它走（执行者要用，与 272 的导入同一待遇），
+但落库的 `input_json` 与两处 digest（journal 的与行的）都不含它——落库那份由 `taskForStorage`
+逐字段重建而不是 copy+delete，因为"不能被写下的字段不在被写下的东西里"这句话只有重建才成立。
+这道门也新添一格 doctor：`target-work-executor`——runner 仍只认 `build`，所以现在能排出来的
+capture/inspect 行没有执行者；队列里没有这两类时它 `ok`（facts 是那两个计数），有就 degraded 报
+`target-work-executor-not-installed`，形状与 #75 那格一致。
+另外记一处**测试 rig 自己的陈旧**：`tests/integration/web-api.test.ts` 写的 profile 文件用的是
+`image`/`network`/`hostMounts`/`wallClockMs` 那套词汇，`profileSchema` 从来没这些键——也就是说那份 profile
+**一直解析失败**，registry 回的是"没有这个 profile"。此前没有一条测试问我要过 profile 里的数字（每个需要
+数字的门都在更早的门被拒），所以这个洞不出声；这道门要 `queueWaitMs`，于是把 rig 的 profile 改成契约
+真正的形状（`har-capture` + 八项 limits）。同一轮把 `JOB_RECORD_FIELDS` 收成一份具名常量：三扇门
+（275/294/297）此前各抄一遍 §8 JobRecord 的九个字段名，抄三份就是三处会各自漂的清单。
 这一轮补上的是 `POST /projects/:p/candidates`（294）——它缺的既不是命令也不是 schema，而是**执行者**：
 以前 `queued` 只是「有人想过」，本仓没有任何东西把队列里的作业跑起来，所以生成只能由脚本同步触发。
 这一轮补的是 `POST /projects/:p/imports`（272），它缺的不是命令而是**transport**：
@@ -812,6 +834,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   仍未裁决的两点留在 #75：提交的字节走 staging 还是 RPC body（现在按 `evaluatorCompletionSchema` 的
   `reportStagingId + reportSha256`，即前者），以及谁把 `queued` 变 `running`（本 build 的答案是"没人"，
   所以才有上面那格报警）。
+- §8 line 275 的**页面把手没做**：门能收 `CaptureTask|InspectTask`，但页面现在没有任何东西能编出一份
+  `BrowserAction` 序列（`click/fill/waitFor` + `Locator`），也没有一处能让操作员挑"这个目标已有的主张"。
+  硬做一个输入框等于把 §8 的具名动作序列变成一个 JSON 文本域——那正是 tasks.ts 那份联合要避免的形状。
+  所以这一扇的状态是"有门没把手"，与 #82（比较器策略名没有读门）同一类：缺的是**页面读得到什么**，
+  不是 HTTP。
 - 页面**已订阅 §13 的 `job.updated`**（issue #85，第十一轮读到的是不重载就翻页）：一帧到达就是"整页重读"，
   面板不由事件自己拼状态，读门仍是页面唯一的来源；断开时那一行改说「下面这些行是上一次读到的快照，不是现在的
   状态」。仍然留着的两格边界：`job.cleanup-retry` 只重排租约、不改作业行，所以它**不产生**事件（写了就是

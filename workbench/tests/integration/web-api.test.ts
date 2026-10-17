@@ -59,25 +59,31 @@ const journal = new IdempotencyJournal();
 const access = new AccessLog();
 let baseUrl = "";
 
+// The rig's installed profile, written in the shape `profileSchema` actually parses (§14). What this
+// fixture used to write named `image`, `network`, `hostMounts` and a `wallClockMs` - keys the contract
+// has never had - so the registry read the file, refused it, and every profile-dependent number in
+// this suite resolved to "no profile". Nothing here asked, because every door that needs a number was
+// refused for a different reason first. The job door (§8 line 275) does ask: a capture's deadline
+// comes from the installed profile's queue wait, so a rig whose profile never parsed could only ever
+// test the refusal.
 const PROFILE = {
-  schemaVersion: 1,
   id: "har-capture",
-  label: "har-capture",
-  image: { ref: "example.invalid/har@sha256:" + "a".repeat(64), digest: "sha256:" + "a".repeat(64) },
-  capabilities: ["har-capture"],
+  schemaVersion: 1,
+  reaPackageDigest: "a".repeat(64),
+  reaContainerEntrypoint: "/usr/local/bin/rea",
+  browserImageDigest: "b".repeat(64),
+  browserVersion: "141.0.7390.107",
   limits: {
-    memoryBytes: 512 * 1024 * 1024,
-    cpuShares: 1,
+    cpuCores: 2,
+    memoryBytes: 2147483648,
     pids: 128,
-    wallClockMs: 600_000,
-    maxUploadBytes: 128 * 1024 * 1024,
-    maxArtifactBytes: 512 * 1024 * 1024,
-    maxEvidenceRecords: 20_000,
-    maxConcurrency: 1,
+    diskBytes: 10737418240,
+    maxExpandedBytes: 67108864,
+    queueWaitMs: 30000,
+    timeoutMs: 120000,
+    maxGenerationAttempts: 1,
   },
-  network: "none",
-  hostMounts: [],
-  devices: [],
+  networkPolicyId: "deny-egress",
 };
 
 // undici (global `fetch`) sets Host from the URL and refuses a caller-supplied one,
@@ -3808,5 +3814,349 @@ describe("the generation door (§8 line 294 / issue #57)", () => {
     expect(page.status, page.text).toBe(200);
     const listed = (JSON.parse(page.text) as { data?: { items?: unknown[] } }).data ?? (JSON.parse(page.text) as { items?: unknown[] });
     expect(listed.items ?? []).toEqual([]);
+  });
+});
+
+// §8 line 275 over HTTP: the last row in the document's table, and the only creation whose body is a
+// *task* rather than a reference. The tests below are grouped by the owner of each rule, because the
+// door has several: the key belongs to the journal, the shape to the schema, the scope and the budget
+// to the service, and the secret to §12.1.
+describe("the job request door (§8 line 275 / issue #58)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `create-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  function post(session: Session, pathname: string, payload: Record<string, JsonValue>, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    return call("POST", pathname, { body: JSON.stringify(payload), headers });
+  }
+
+  function errorOf(text: string): { code: string; message: string; details: Record<string, unknown> } {
+    return (JSON.parse(text) as { error: { code: string; message: string; details: Record<string, unknown> } }).error;
+  }
+
+  async function urlTarget(session: Session, projectId: Id, url = "https://shop.example/cart"): Promise<Id> {
+    const declared = await post(session, `${API_PREFIX}/projects/${String(projectId)}/targets`, { kind: "url", url }, null);
+    expect(declared.status, declared.text).toBe(201);
+    return asId((targetCreatedSchema.parse(JSON.parse(declared.text) as JsonValue) as { id: string }).id);
+  }
+
+  // A capture task in the shape §8's paragraph under the table draws. `profileId` names the one
+  // profile this rig installs, and the start URL is the declared target's own host.
+  function captureTask(targetUrl = "https://shop.example/cart"): Record<string, JsonValue> {
+    return {
+      kind: "capture",
+      profileId: "har-capture",
+      scenario: { startUrl: targetUrl, actions: [{ kind: "click", locator: { kind: "testId", value: "add-to-cart" } }] },
+      network: { requestBody: true, responseBody: true, headerValues: false },
+    };
+  }
+
+  function inspectTask(claimIds: string[] = [], question = "does the cart route answer with the include set?"): Record<string, JsonValue> {
+    return { kind: "inspect", claimIds, question, scope: "static" };
+  }
+
+  async function rig(name: string, url = "https://shop.example/cart"): Promise<{ session: Session; projectId: Id; targetId: Id; path: string }> {
+    const session = await pairSession();
+    const projectId = await freshProject(session, name);
+    const targetId = await urlTarget(session, projectId, url);
+    return { session, projectId, targetId, path: `${API_PREFIX}/projects/${String(projectId)}/jobs` };
+  }
+
+  // A file target on the same project, written through the only owner of target rows: §5's table
+  // requires a target to carry either a measured snapshot or a stated identity reason, so an
+  // "imported bytes" row here is one that has been digested.
+  function fileTarget(projectId: Id): Id {
+    const targetId = newId();
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertTarget({
+        id: targetId,
+        projectId,
+        kind: "har",
+        originalLocator: null,
+        sourceSha256: null,
+        sourceArtifactId: null,
+        snapshotDigest: asDigest(hex(`job-door-file-${String(targetId)}`)),
+        identityReason: null,
+        createdAt: nowInstant(),
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+    return targetId;
+  }
+
+  function claimRow(projectId: Id, targetId: Id): Id {
+    const claimId = newId();
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertClaim({
+        id: claimId,
+        projectId,
+        targetId,
+        entityKey: "GET /api/cart",
+        claimKey: "route-exists",
+        assertion: "the cart route answers",
+        scopeJson: { sourceEvidenceIds: [] },
+        basis: "observed",
+        sourceState: null,
+        coverageJson: { state: "unknown", examined: null, total: null, reasons: [] },
+        validity: "current",
+        revision: 1,
+        unknownReasonsJson: [],
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+    return claimId;
+  }
+
+  function queuedJob(projectId: Id, jobId: Id): { inputJson: JsonValue; requestDigest: string; targetId: Id | null; kind: string; state: string } | null {
+    const read = worker.writeConnection.transact((tx) => tx.getJob(projectId, jobId));
+    if (!read.ok) throw new Error(JSON.stringify(read.error));
+    return read.value as unknown as ReturnType<typeof queuedJob>;
+  }
+
+  function eventCount(projectId: Id): number {
+    const read = worker.writeConnection.transact((tx) => tx.eventsAfter(projectId, 0, 50));
+    if (!read.ok) throw new Error(JSON.stringify(read.error));
+    return read.value.length;
+  }
+
+  it("queues a capture against the declared URL target and answers 202 with the row and its Location", async () => {
+    const fix = await rig("job-door-capture");
+    const asked = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: captureTask() }, "job-key-capture");
+    expect(asked.status, asked.text).toBe(202);
+    const record = jobRecordSchema.safeParse(JSON.parse(asked.text) as JsonValue);
+    if (!record.success) throw new Error(asked.text);
+    expect(record.data.kind).toBe("capture");
+    expect(record.data.state).toBe("queued");
+    expect(record.data.resultRef).toBeNull();
+    // §14: the deadline is the installed profile's queue wait, not a number this file or the door
+    // invented - so an absent `deadlineAt` still produces a real, bounded one.
+    expect(record.data.deadlineAt).not.toBeNull();
+
+    // §8's third column names a `Location` header, and it must address the very row in the body.
+    const location = asked.headers.get("location") ?? "";
+    expect(location).toBe(`${API_PREFIX}/projects/${String(fix.projectId)}/jobs/${String(record.data.id)}`);
+    const readBack = await call("GET", location, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(readBack.status, readBack.text).toBe(200);
+    expect(jobRecordSchema.parse(JSON.parse(readBack.text) as JsonValue)).toEqual(record.data);
+
+    const row = queuedJob(fix.projectId, asId(record.data.id));
+    expect(row?.targetId).toBe(fix.targetId);
+    expect(row?.kind).toBe("capture");
+    // The outbox carries the queueing, so the page's stream can show this row move without a reload.
+    expect(eventCount(fix.projectId)).toBe(1);
+  });
+
+  it("honours an explicit deadline instead of overwriting it with the profile's wait", async () => {
+    const fix = await rig("job-door-deadline");
+    const stated = new Date(Date.now() + 600_000).toISOString();
+    const asked = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, deadlineAt: stated, task: captureTask() }, "job-key-deadline");
+    expect(asked.status, asked.text).toBe(202);
+    expect(jobRecordSchema.parse(JSON.parse(asked.text) as JsonValue).deadlineAt).toBe(stated);
+  });
+
+  it("replays one key to the same row, the same Location and no second event", async () => {
+    const fix = await rig("job-door-replay");
+    const body = { targetId: fix.targetId, expectedGraphRevision: 0, task: captureTask() };
+    const first = await post(fix.session, fix.path, body, "job-key-replay");
+    const second = await post(fix.session, fix.path, body, "job-key-replay");
+    expect(first.status, first.text).toBe(202);
+    expect(second.status, second.text).toBe(202);
+    expect(JSON.parse(second.text)).toEqual(JSON.parse(first.text));
+    // A replay answers the header too: the journal stored the body, and the address is derived from
+    // it, so the two cannot name different rows.
+    expect(second.headers.get("location")).toBe(first.headers.get("location"));
+    const page = await call("GET", fix.path, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(((JSON.parse(page.text) as { items: unknown[] }).items ?? []).length).toBe(1);
+    expect(eventCount(fix.projectId)).toBe(1);
+  });
+
+  it("refuses the same key carrying a different task, and asks for the key when none is sent", async () => {
+    const fix = await rig("job-door-divergent");
+    const first = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: captureTask() }, "job-key-divergent");
+    expect(first.status, first.text).toBe(202);
+    const other = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: inspectTask() }, "job-key-divergent");
+    expect(other.status, other.text).toBe(409);
+    expect(errorOf(other.text).details["reason"]).toBe("idempotency-key-reused");
+
+    const noKey = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: captureTask() }, null);
+    expect(noKey.status, noKey.text).toBe(400);
+    expect(errorOf(noKey.text).details["reason"]).toBe("idempotency-key-required");
+  });
+
+  // §12.1: 认证与显式敏感原文不进入持久 request_digest. Two requests that differ *only* in their
+  // short-lived secrets are the same safe request, so they are the same job - and nothing in the row
+  // remembers the secret. This is the pair that makes both halves readable at once: a digest that
+  // included the secret would answer 409 here, and a stored input that included it would show up below.
+  it("keeps a capture's sensitive values out of the stored row and out of both digests", async () => {
+    const fix = await rig("job-door-secrets");
+    const withSecret = { ...captureTask(), sensitiveValues: ["hunter2-session-token"] } as Record<string, JsonValue>;
+    const first = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: withSecret }, "job-key-secrets");
+    expect(first.status, first.text).toBe(202);
+    const again = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: { ...captureTask(), sensitiveValues: ["different-secret"] } }, "job-key-secrets");
+    expect(again.status, again.text).toBe(202);
+    expect(JSON.parse(again.text)).toEqual(JSON.parse(first.text));
+
+    const record = jobRecordSchema.parse(JSON.parse(first.text) as JsonValue);
+    const row = queuedJob(fix.projectId, asId(record.id));
+    const persisted = JSON.stringify(row?.inputJson ?? {});
+    expect(persisted).not.toContain("hunter2-session-token");
+    expect(persisted).not.toContain("different-secret");
+    // The task itself is still there in the half that may be written down, so an executor can act.
+    expect(persisted).toContain("add-to-cart");
+
+    // The replay above was answered by the journal, which never reached the row's own digest column.
+    // A second key does: §12.1 says 显式敏感原文不进入持久 request_digest, so two rows asked for the
+    // same work under two different secrets have to store the *same* digest. A digest that covered
+    // the secret would split them, and the split is the leak wearing a hash.
+    const separate = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: { ...captureTask(), sensitiveValues: ["third-secret"] } }, "job-key-secrets-separate");
+    expect(separate.status, separate.text).toBe(202);
+    const firstId = asId(jobRecordSchema.parse(JSON.parse(first.text) as JsonValue).id);
+    const separateId = asId(jobRecordSchema.parse(JSON.parse(separate.text) as JsonValue).id);
+    expect(separateId).not.toBe(firstId);
+    expect(queuedJob(fix.projectId, separateId)?.requestDigest).toBe(row?.requestDigest);
+  });
+
+  it("answers a moved graph with the two revisions it compared", async () => {
+    const fix = await rig("job-door-stale");
+    const stale = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 7, task: captureTask() }, "job-key-stale");
+    expect(stale.status, stale.text).toBe(409);
+    const refusal = errorOf(stale.text);
+    expect(refusal.code).toBe("REVISION_CONFLICT");
+    expect(refusal.details["reason"]).toBe("graph-revision-changed");
+    expect(refusal.details["expected"]).toBe(7);
+    expect(refusal.details["actual"]).toBe(0);
+    expect(eventCount(fix.projectId)).toBe(0);
+  });
+
+  it("keeps each half of the task union on the kind of target §8 names", async () => {
+    const fix = await rig("job-door-kinds");
+    const inspectOnUrl = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: inspectTask() }, "job-key-inspect-url");
+    expect(inspectOnUrl.status, inspectOnUrl.text).toBe(400);
+    expect(errorOf(inspectOnUrl.text).details["reason"]).toBe("inspect-needs-file-target");
+
+    // A file target on the same project: §8 puts an inspect on imported bytes, and a capture on a URL.
+    const file = fileTarget(fix.projectId);
+    const captureOnFile = await post(fix.session, fix.path, { targetId: file, expectedGraphRevision: 0, task: captureTask() }, "job-key-capture-file");
+    expect(captureOnFile.status, captureOnFile.text).toBe(400);
+    expect(errorOf(captureOnFile.text).details["reason"]).toBe("capture-needs-url-target");
+  });
+
+  it("refuses a capture that jumps to another host, and names nothing but the rule", async () => {
+    const fix = await rig("job-door-scope");
+    const jumped = await post(fix.session, fix.path, { targetId: fix.targetId, expectedGraphRevision: 0, task: captureTask("https://other.example/cart") }, "job-key-jump");
+    expect(jumped.status, jumped.text).toBe(403);
+    expect(errorOf(jumped.text).details["reason"]).toBe("start-url-outside-target-scope");
+    // The two hostnames stay out of the answer (§12.1), and no row was made.
+    expect(jumped.text).not.toContain("other.example");
+    expect(jumped.text).not.toContain("shop.example");
+    const page = await call("GET", fix.path, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(((JSON.parse(page.text) as { items: unknown[] }).items ?? []).length).toBe(0);
+  });
+
+  it("refuses a task that names a profile nobody installed, before any row exists", async () => {
+    const fix = await rig("job-door-profile");
+    const unknown = await post(fix.session, fix.path, {
+      targetId: fix.targetId,
+      expectedGraphRevision: 0,
+      task: { ...captureTask(), profileId: "made-up-profile" },
+    }, "job-key-profile");
+    expect(unknown.status, unknown.text).toBe(503);
+    expect(errorOf(unknown.text).details["reason"]).toBe("task-profile-not-installed");
+    const page = await call("GET", fix.path, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(((JSON.parse(page.text) as { items: unknown[] }).items ?? []).length).toBe(0);
+  });
+
+  it("lets an inspect name only claims the project already holds, and only skip the list on a first read", async () => {
+    const fix = await rig("job-door-claims");
+    const file = fileTarget(fix.projectId);
+    const invented = newId();
+    const unknownClaim = await post(fix.session, fix.path, { targetId: file, expectedGraphRevision: 0, task: inspectTask([invented]) }, "job-key-unknown-claim");
+    expect(unknownClaim.status, unknownClaim.text).toBe(404);
+    expect(errorOf(unknownClaim.text).details["reason"]).toBe("claim-unknown");
+
+    // One claim row makes this target no longer a first analysis, so an empty list stops being legal.
+    const claimId = claimRow(fix.projectId, file);
+    const empty = await post(fix.session, fix.path, { targetId: file, expectedGraphRevision: 0, task: inspectTask() }, "job-key-empty-claims");
+    expect(empty.status, empty.text).toBe(400);
+    expect(errorOf(empty.text).details["reason"]).toBe("directed-inspect-needs-claims");
+
+    const directed = await post(fix.session, fix.path, { targetId: file, expectedGraphRevision: 0, task: inspectTask([claimId]) }, "job-key-directed");
+    expect(directed.status, directed.text).toBe(202);
+    expect(jobRecordSchema.parse(JSON.parse(directed.text) as JsonValue).kind).toBe("inspect");
+
+    // And the first analysis is still legal where nothing has been claimed yet: the rule is about this
+    // target's claims, not about the project having any.
+    const second = fileTarget(fix.projectId);
+    const firstRead = await post(fix.session, fix.path, { targetId: second, expectedGraphRevision: 0, task: inspectTask() }, "job-key-first-read");
+    expect(firstRead.status, firstRead.text).toBe(202);
+  });
+
+  it("refuses the fields §8 does not list on this route, by name", async () => {
+    const fix = await rig("job-door-shape");
+    const forged = await post(fix.session, fix.path, {
+      targetId: fix.targetId,
+      expectedGraphRevision: 0,
+      // Both of these are the shape of the request the closed command table used to take from a
+      // caller (issue #57): a job id and an attempt budget. Neither is in §8's line 275.
+      jobId: newId(),
+      maxAttempts: 3,
+      task: captureTask(),
+    }, "job-key-forged");
+    expect(forged.status, forged.text).toBe(400);
+    expect(JSON.stringify(errorOf(forged.text).details)).toContain("jobId");
+    expect(JSON.stringify(errorOf(forged.text).details)).toContain("maxAttempts");
+
+    const unknownAction = await post(fix.session, fix.path, {
+      targetId: fix.targetId,
+      expectedGraphRevision: 0,
+      task: { ...captureTask(), scenario: { startUrl: "https://shop.example/cart", actions: [{ kind: "eval", script: "window.x = 1" }] } },
+    }, "job-key-js");
+    expect(unknownAction.status, unknownAction.text).toBe(400);
+    expect(unknownAction.text).not.toContain("window.x");
+  });
+
+  it("refuses a target this project does not have", async () => {
+    const fix = await rig("job-door-target");
+    const missingTarget = await post(fix.session, fix.path, { targetId: newId(), expectedGraphRevision: 0, task: captureTask() }, "job-key-no-target");
+    expect(missingTarget.status, missingTarget.text).toBe(404);
+    expect(errorOf(missingTarget.text).details["reason"]).toBe("target-unknown");
   });
 });

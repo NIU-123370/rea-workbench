@@ -20,7 +20,12 @@ export type CheckName =
   // §10's trusted evaluator is a separate process this build does not ship, so a queued `verify`
   // job has no executor here. The doctor is the surface that says "this capability is absent" out
   // loud, which is what keeps `queued` from reading as "someone is working on it" (issue #75).
-  | "verification-executor";
+  | "verification-executor"
+  // The same absence for the two kinds §8 line 275 can queue: a capture needs a browser lane and an
+  // inspect needs the archive decoder, and the runner's kind list is `build` only. Kept as its own
+  // name rather than folded into the one above because they are different absences - installing an
+  // evaluator would not make a queued capture go anywhere (issue #58's last door).
+  | "target-work-executor";
 
 export type CheckOutcome =
   | { state: "ok"; facts: JsonValue }
