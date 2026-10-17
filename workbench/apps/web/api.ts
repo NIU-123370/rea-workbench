@@ -8,7 +8,7 @@ import {
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createUrlTargetRequestSchema, createdProjectSchema, evidenceViewSchema, projectPageSchema, projectViewSchema, targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
 import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
-import { verificationReportSchema } from "../../packages/contracts/verification.ts";
+import { verificationReportSchema, verificationRequestSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
 import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
@@ -154,6 +154,10 @@ const ROUTES: readonly RouteSpec[] = [
   // §8 line 261, so it carries an Idempotency-Key: a retried freeze must replay the blueprint it
   // already made rather than mint a second one beside it.
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/blueprints`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
+  // Asking for a verification (§8 line 297). Keyed because §8 line 261 lists it among the
+  // creations, and the answer is 202 rather than 201: what this creates is a job that has not
+  // run yet, so there is no report to point at on the way out.
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/verifications`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The two lifecycle writes (§8 lines 278-279). Only the cleanup retry is in §8 line 261's list of
   // keyed operations, and §8 line 279 says so itself (需幂等键与本地会话); the cancel door therefore
   // takes no key and its repeat-safety comes from the state machine, not from a journal.
@@ -749,6 +753,15 @@ const COMMIT_PROJECTIONS = {
     reason: "cleanup-retry-shape",
     message: "the worker did not answer with a cleanup retry",
   },
+  // §8 line 297's 202 body is a JobRecord, so this door projects the very schema the job read
+  // doors use. Written twice it would be two field lists that can drift apart, and the queued job
+  // the request answers with is the same row a later `GET /jobs/:j` reads back.
+  verification: {
+    fields: ["id", "kind", "state", "cleanupState", "deadlineAt", "retryAt", "cleanupRetryAt", "resultRef", "error"],
+    schema: jobRecordSchema,
+    reason: "verification-request-shape",
+    message: "the worker did not answer with a queued verification job",
+  },
 } as const satisfies Record<string, CommitProjection>;
 
 function projectCommit(
@@ -881,6 +894,36 @@ async function freezeBlueprint(ctx: Context, deps: ApiDependencies, key: string)
     payload: { projectId, request: { planId: parsed.value.verificationPlanId } },
     body: parsed.value,
     projection: COMMIT_PROJECTIONS.blueprint,
+  });
+}
+
+// §8 line 297: asking for a verification. The body is `verificationRequestSchema` itself - the
+// contract already spells §8's three fields, so the door reuses it instead of keeping a second
+// copy that could drift. `comparatorPolicyId` is a name and the schema has no field for a policy
+// body, which is the checkable form of 不接受代码: what this door can send is an id.
+async function requestVerification(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(verificationRequestSchema, body.value);
+  if (!parsed.ok) return invalidBody(ctx, "the verification request does not match the named schema", parsed.error);
+  // Rebuilt field by field rather than forwarded whole, so an absent deadline stays absent instead
+  // of arriving as a null the service's own schema would refuse.
+  const request: Record<string, JsonValue> = {
+    candidateId: parsed.value.candidateId,
+    comparatorPolicyId: parsed.value.comparatorPolicyId,
+  };
+  if (parsed.value.deadlineAt !== undefined) request.deadlineAt = parsed.value.deadlineAt;
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${String(projectId)}/verifications`,
+    template: `${API_PREFIX}/projects/:projectId/verifications`,
+    command: "verification.request",
+    payload: { projectId, idempotencyKey: key, request },
+    body: request,
+    projection: COMMIT_PROJECTIONS.verification,
+    status: 202,
   });
 }
 
@@ -1397,6 +1440,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createContract(ctx, deps);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/verification-plans`) {
       response = await createPlan(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/verifications`) {
+      response = await requestVerification(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/cancel")) {
       response = await cancelJob(ctx, deps);
     } else if (route.method === "POST" && route.template.endsWith("/cleanup-retry")) {

@@ -53,6 +53,7 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "plan.review",
   "plan.read",
   "verification.read",
+  "verification.request",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -332,6 +333,41 @@ describe("named commands and the local RPC (§14)", () => {
       if (looked.ok) continue;
       expect(looked.error.code).toBe("NOT_FOUND");
     }
+  });
+
+  // §8 line 297's key is enforced here rather than only at the HTTP gate, because the jobs row's
+  // own uniqueness lives on this side of the socket: an unkeyed frame would write an empty key
+  // that every later unkeyed request collides with.
+  it("refuses an unkeyed verification request at the command boundary (§8 line 297)", async () => {
+    const created = unwrap(await request("project.create", { name: "verify-key" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const base: Record<string, JsonValue> = {
+      projectId,
+      request: { candidateId: newId(), comparatorPolicyId: "exact-http-v1" },
+    };
+    for (const key of ["", "x".repeat(201)]) {
+      const refused = await request("verification.request", { ...base, idempotencyKey: key }, inspector);
+      expect(refused.ok).toBe(false);
+      if (refused.ok) continue;
+      expect(refused.error.code).toBe("INVALID_INPUT");
+      expect(refused.error.reason).toBe("idempotency-key-required");
+    }
+    const nameless = await request("verification.request", base, inspector);
+    expect(nameless.ok).toBe(false);
+    if (nameless.ok) return;
+    expect(nameless.error.reason).toBe("idempotency-key-required");
+    // With a key the very same frame reaches the service's own question about the candidate, so
+    // the refusals above are the key rule and not a missing row wearing the key's clothes.
+    const keyed = await request("verification.request", { ...base, idempotencyKey: "key-composition" }, inspector);
+    expect(keyed.ok).toBe(false);
+    if (keyed.ok) return;
+    expect(keyed.error.reason).toBe("candidate-unknown");
+    // The Builder is refused by the service, and for its own named reason.
+    const builders = await request("verification.request", { ...base, idempotencyKey: "key-builder" }, builder);
+    expect(builders.ok).toBe(false);
+    if (builders.ok) return;
+    expect(builders.error.code).toBe("ACCESS_DENIED");
+    expect(builders.error.reason).toBe("role-may-not-request-verification");
   });
 
   it("marks a lost executor interrupted and keeps its evidence", async () => {

@@ -28,6 +28,7 @@ import {
   deriveOutcomes,
   hasReviewedOracle,
 } from "../../packages/application/verification-service.ts";
+import { INSTALLED_COMPARATOR_POLICIES } from "../../packages/contracts/verification.ts";
 import { readAudit } from "../../packages/application/audit.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
@@ -833,5 +834,147 @@ describe("the outcome derivation itself (DESIGN §10)", () => {
     expect(derived.cases[0]?.state).toBe("blocked");
     expect(derived.cases[0]?.safeDiff).toBeNull();
     expect(derived.defects).toEqual([]);
+  });
+});
+
+
+// §8 line 297: asking for a verification. The rule this block keeps is that asking creates
+// *work*, never a verdict - one `verify` job in `queued`, no `verifications` row anywhere near
+// it - and that the request itself is what the idempotency key names, so a key cannot be
+// re-pointed at a different candidate after the fact.
+describe("asking for a verification (DESIGN §8 line 297)", async () => {
+  const requestFor = (scenario: Scenario, overrides: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({
+    candidateId: scenario.candidateId,
+    comparatorPolicyId: "exact-http-v1",
+    ...overrides,
+  });
+
+  function jobCount(): number {
+    return Number((db.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n);
+  }
+
+  function verificationCount(): number {
+    return Number((db.prepare("SELECT COUNT(*) AS n FROM verifications").get() as { n: number }).n);
+  }
+
+  function jobFields(id: string): Record<string, unknown> {
+    const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (row === undefined) throw new Error(`no job row ${id}`);
+    return row;
+  }
+
+  function eventsFor(id: string): string[] {
+    return (db.prepare("SELECT type FROM events WHERE aggregate_id = ?").all(id) as { type: string }[]).map(
+      (event) => event.type,
+    );
+  }
+
+  it("queues the work and writes no verdict", async () => {
+    const scenario = await seedScenario("request-queued");
+    const jobs = jobCount();
+    const reports = verificationCount();
+    const record = unwrap(verifications.request(projectId, inspector, requestFor(scenario), "key-queued"));
+    expect(record).toMatchObject({
+      kind: "verify",
+      state: "queued",
+      cleanupState: "pending",
+      resultRef: null,
+      error: null,
+      deadlineAt: null,
+    });
+    expect(jobCount()).toBe(jobs + 1);
+    // §10: a report exists only once the trusted evaluator answers. Nothing a request can say
+    // puts a row in `verifications`, and this is the test that would notice if it could.
+    expect(verificationCount()).toBe(reports);
+    expect(String(jobFields(record.id)["idempotency_key"])).toBe("key-queued");
+    expect(eventsFor(record.id)).toEqual(["job.updated"]);
+    expect(journal("verification.request", "allow")).toContain("verify-job-queued");
+  });
+
+  it("carries the deadline the operator named into the job", async () => {
+    const scenario = await seedScenario("request-deadline");
+    const deadlineAt = new Date(Date.now() + 600_000).toISOString();
+    const record = unwrap(verifications.request(projectId, inspector, requestFor(scenario, { deadlineAt }), "key-deadline"));
+    expect(record.deadlineAt).toBe(deadlineAt);
+    expect(String(jobFields(record.id)["deadline_at"])).toBe(deadlineAt);
+  });
+
+  it("refuses a role that is not the control plane, before looking anything up", async () => {
+    const jobs = jobCount();
+    // A candidate that does not exist would answer NOT_FOUND, so naming one here proves the role
+    // test runs first: an untrusted kind learns nothing about what is in the project.
+    const body: Record<string, JsonValue> = { candidateId: newId(), comparatorPolicyId: "exact-http-v1" };
+    for (const actor of [builder, evaluator]) {
+      const failure = await failureOf(verifications.request(projectId, actor, body, `key-role-${actor.actorKind}`));
+      expect(failure.code).toBe("ACCESS_DENIED");
+      expect(failure.reason).toBe("role-may-not-request-verification");
+    }
+    expect(jobCount()).toBe(jobs);
+    expect(journal("verification.request", "deny")).toContain("role-may-not-request-verification");
+  });
+
+  it("refuses a comparator this build does not install", async () => {
+    const scenario = await seedScenario("request-comparator");
+    const jobs = jobCount();
+    const failure = await failureOf(
+      verifications.request(projectId, inspector, requestFor(scenario, { comparatorPolicyId: "exact-http-v2" }), "key-comparator"),
+    );
+    expect(failure.code).toBe("INVALID_INPUT");
+    expect(failure.reason).toBe("comparator-policy-not-installed");
+    expect(failure.details["declaredCount"]).toBe(INSTALLED_COMPARATOR_POLICIES.length);
+    expect(jobCount()).toBe(jobs);
+  });
+
+  it("refuses a candidate the project does not have and commits nothing", async () => {
+    const jobs = jobCount();
+    const failure = await failureOf(
+      verifications.request(projectId, inspector, { candidateId: newId(), comparatorPolicyId: "exact-http-v1" }, "key-unknown"),
+    );
+    expect(failure.code).toBe("NOT_FOUND");
+    expect(failure.reason).toBe("candidate-unknown");
+    expect(jobCount()).toBe(jobs);
+    expect(journal("verification.request", "deny")).toContain("candidate-unknown");
+  });
+
+  it("replays the job a key already queued instead of queueing a second one", async () => {
+    const scenario = await seedScenario("request-replay");
+    const first = unwrap(verifications.request(projectId, inspector, requestFor(scenario), "key-replay"));
+    const jobs = jobCount();
+    const second = unwrap(verifications.request(projectId, inspector, requestFor(scenario), "key-replay"));
+    expect(second.id).toBe(first.id);
+    expect(jobCount()).toBe(jobs);
+    // A replay is not a state change, so the stream carries the queue event exactly once.
+    expect(eventsFor(first.id)).toHaveLength(1);
+  });
+
+  it("refuses a key that already carries a different request", async () => {
+    const first = await seedScenario("request-diverge-a");
+    const second = await seedScenario("request-diverge-b");
+    const queued = unwrap(verifications.request(projectId, inspector, requestFor(first), "key-diverge"));
+    const digest = String(jobFields(queued.id)["request_digest"]);
+    const failure = await failureOf(
+      verifications.request(projectId, inspector, requestFor(second), "key-diverge"),
+    );
+    expect(failure.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(failure.reason).toBe("idempotency-key-reused");
+    // The refused call wrote nothing, so the job the key already owns is still what it was.
+    expect(String(jobFields(queued.id)["request_digest"])).toBe(digest);
+    expect(String(jobFields(queued.id)["state"])).toBe("queued");
+    // Two candidates are two requests even under different keys: the digest is of the request,
+    // not of the key it arrived with.
+    const other = unwrap(verifications.request(projectId, inspector, requestFor(second), "key-diverge-other"));
+    expect(String(jobFields(other.id)["request_digest"])).not.toBe(digest);
+  });
+
+  it("refuses a body that names anything §8 does not", async () => {
+    const scenario = await seedScenario("request-strict");
+    const jobs = jobCount();
+    const failure = await failureOf(
+      verifications.request(projectId, inspector, requestFor(scenario, { comparatorCode: "return a === b" }), "key-strict"),
+    );
+    expect(failure.code).toBe("INVALID_INPUT");
+    expect(failure.reason).toBe("verification-request");
+    expect(JSON.stringify(failure.details)).toContain("comparatorCode");
+    expect(jobCount()).toBe(jobs);
   });
 });
