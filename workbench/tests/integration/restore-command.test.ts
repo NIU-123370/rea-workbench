@@ -20,7 +20,7 @@ import { MIGRATION_TABLE } from "../../packages/adapters/storage/database.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 
-// The operator's restore command (DESIGN §13 line 453, D23 / PRD A16, issue #23).
+// The operator's restore command (DESIGN §13 line 453, D23 / PRD A12 / TESTPLAN T16, issue #23).
 //
 // `backup-restore.test.ts` covers the library pieces. What this file pins is the *order* the
 // command is supposed to enforce: it cannot run beside a live worker, it refuses before it
@@ -128,7 +128,7 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe("the restore command (D23 / A16)", () => {
+describe("the restore command (D23 / A12 / T16)", () => {
   it("verifies the bundle the backup command produced, with nothing to complain about", async () => {
     const verified = await runVerify(root, snapshotFile);
     if (!verified.ok) throw new Error(JSON.stringify(verified.failure));

@@ -43,7 +43,7 @@ npm ci
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
-| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
+| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账，**并核对源码里点名的编号确实存在**）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
 | `tests/{unit,integration,fixtures,support}` | 纯逻辑门禁、真 SQLite / 真文件门禁、固定 envelope fixture，以及跨套件共用的交接数据播种（`support/blueprint-seed.ts`）                                       |
 
 Builder 生成支路（F08 / A07 / issue #19）的边界：
@@ -1197,6 +1197,44 @@ runner 的，见下文"这轮没做浏览器"）：
 今天仍只有单测调用方（这是 #56/#107/#108 同一类，规模小于它们，下一步补）。
 大文件仍是 #77（本笔不动协议：HTTP 侧还是 5 MiB 一条路）。
 
+发布门禁·第廿一轮（2026-10-18 03:15–03:28，**源码里点名的验收编号第一次有了对账方**）：
+
+- **缺陷形状**：`packages/contracts/sandbox.ts` 的 `SANDBOX_HOST_REQUIREMENTS.advisory` 是**会过线的字段**
+  （`describeUnsupportedPlatform()` 把它放进 CAPABILITY_UNAVAILABLE 的回包），原文写
+  「…until **T19** isolation acceptance has run」。而 `docs/TESTPLAN.md` 的矩阵是 **T01–T17**，
+  T19 从来没有存在过——`git log -S'T19' -- docs/` 在文档里 **0 命中**，唯一的命中是 9.9 MB 宣传片
+  二进制里的字节（`git show 67b06a5 --stat -- docs/` 显示那一笔只加了 `docs/assets/*.mp4`）。
+  同一形状另两处：`apps/worker/restore.ts` 与 `tests/integration/restore-command.test.ts` 写「PRD **A16**」，
+  而 PRD 声明 A01–A13（`docs:check` 自己就打印「验收 13 条」）。⇒ 注释里的错号会被读成承诺：
+  操作者按它判断「什么时候可以把隔离当已支持能力宣传」，等的是一扇永不排期的门。
+- **锚点不是我编的**：TESTPLAN §8 那行风险自己把 **T07/T14** 配对给「容器共享宿主内核，浏览器与生成代码
+  可能利用漏洞」，所以 advisory 与本文那句 T19 都改成 T07/T14；restore 两处改成隔壁
+  `backup-restore.test.ts` 早就在用的 **A12 / T16**。`docs/` 一个字没动。
+- **闸**：`docs:check` 现在做第三件事——扫 `packages|apps|tests|infra` 的 `.ts/.mts/.mjs`
+  （**本轮实测 199 个文件 / 131 处引用**），凡是**独立**出现的 `T##`/`A##` 必须在两张表里声明过，
+  否则出 `test-case-ref-undeclared:T19(文件:行)` / `acceptance-ref-undeclared:A16(文件:行)`。
+- **三条边界都是现场判的**：① token 前后必须是**非字母数字**——ISO 时间戳里的 `T09`、base64 里的 `A12b`、
+  标识符 `T17Record` 一律不算引用；会在时间戳上误报的扫描器一周内就会被关掉，而**关掉的扫描器和干净树
+  报同一个绿**。② 必须携带错号的夹具（测拒绝本身那几行）在**行内**写 `docs-check-ignore: 原因`，不豁免
+  整文件——本轮之后全仓**共 8 行**带这个标记，全部在 `docs-check.test.ts` 里（其中一行是「豁免自己生效」
+  的夹具，闸侧只有 `IGNORE_MARKER` 那一处常量定义）。③ 扫描规模进回包
+  （`源码引用 N 处（M 个文件）`）并被用例钉住下限 ≥100/≥100。
+- **两支变异把 ③ 变成了读数，也限定它能证什么**：把扩展名改成扫不到任何文件（`.mdx`）⇒ 树级用例红，
+  所以「扫到 0 个」不再等于过；**去掉** `source-root` 守卫再把根名单改错 ⇒ 进程 **ENOENT 崩溃**，
+  exit≠0 但没有具名原因。⇒ 那条守卫的增量是**读得懂的那一行**（实跑读数
+  `- source-root-missing:not-a-directory`），红/绿是下限断言在兜，别把它读成"它负责挡红"。
+- **M7 教我改了测试的形状**：「只认用例表、不认验收表」那支变异**没被任何合成用例打死**——fixture 里
+  没有一个"已声明的验收号"，于是它只在树级用例上红。补了一条 `// A05 and T01` 必须为空 ⇒ 两族各有本地
+  读数，M7 重跑由具名用例红（该文件 10/10 绿）。
+- 末态闸门：typecheck 0／lint **206 文件 0 条**／`test:unit` **670/39**／`test:integration`
+  **503 passed + 6 skipped / 25 files**／`review` **0 命中**／`docs:check` **17·13·131 引用/199 文件**。
+  变异 9 支（M1–M9）全红，无等义变异存活。
+
+**这轮仍然没做的**：`docs/DECISIONS.md` 的 **D##** 族没进闸——源码里同样有 `D23`/`D25` 这类引用，
+而 DECISIONS 的行形状（`- D23｜选了：…`）需要另一个解析器；本轮只钉住已经查出错号的 T/A 两族。
+另：本文里那些 `A11`／`A17` 是**变异批次号**不是验收号，所以源码扫描不含 README——这条限制写在
+`infra/release/docs-check.mjs` 的头注释里，不是漏掉。
+
 
 ## 还没有的东西
 
@@ -1348,7 +1386,7 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 - 没有 seccomp profile 的实际加载；
 - 没有 network namespace 对 egress 的实际拦截（本机只验证了地址与 CIDR 的判定逻辑）。
 
-因此沙箱**不得被宣传为已支持的平台能力**：支持面固定为 Linux x64，且在 T19 的隔离验收于真实
+因此沙箱**不得被宣传为已支持的平台能力**：支持面固定为 Linux x64，且在 T07/T14 的隔离验收于真实
 Linux 宿主通过之前，`GET /health` 的 profile 必须继续报告 `available: false`。隔离条件不满足
 时代码只拒绝、不回退到 `--no-sandbox`；平台判定由注入的 probe 提供，策略里不读
 `process.platform`（`tests/integration/sandbox-broker.test.ts` 有守卫用例）。
