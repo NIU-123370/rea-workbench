@@ -1600,6 +1600,34 @@ runner 的，见下文"这轮没做浏览器"）：
 本轮交的是**进程本体、协议、所有权权威与 doctor 的实答**，不交隔离能力：seccomp 实际加载、
 network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待 Linux x64 宿主）。
 
+
+发布门禁·第三十一轮（2026-10-18 06:26–06:29，**#59 的最后一格：拒绝的数字现在真的走到页面上**）：
+
+- 现读的缺口：`view-model.ts` 早就有 `refusalFactsLine`／`refusalLine`（证据读取与样本面板在用），
+  `candidate-generation.test.ts:351` 也早就断过作业行带回
+  `details {attempt:3, maxAttempts:…}`——**回包里有数字**这一半是齐的。
+  缺的是最后一公里：`buildLeftPanel` 收下 `errorJson` 却从不渲染它（左栏只有 `taskState` 一个词），
+  所以一次预算耗尽的生成在页面上就只是 `failed`，解释它的那两个数字停在一次请求之外。
+- 落地：`jobFailureLine(errorJson)`（放在 `refusalFactsLine` 旁边，同一份格式化 owner）＋
+  `LeftPanel.failure` ＋ `panels.tsx` 的被拒字段 ＋ `JobsPagePayload.items[].error` 补上 `details`。
+  三条规则写死在里面：**没被拒不造字段**（`null` 不是空串）、**数字只从 number/boolean 来**
+  （一条字符串 detail 不会变成页面文本，哪怕未来的键带上了它）、**不发明数字**（只有 reason 名时
+  就只说 `code / reason`，不括号也不 0）。
+- 新增用例 **7** 条（`test:unit` 691→696、`test:integration` 541→543）：文本级 5 条（无错误／带数字／只带 reason 名／混进一条字符串）＋
+  渲染 2 条（字段带着两个数字出现在 DOM 里；未拒绝的行里 `data-job-failure` 与「被拒」两字都不该存在）。
+- 变异 **4 支全红**：U1 左栏恒传 `failure:null`、U2 未拒绝也渲染该字段、U3 字符串 detail 上页面、
+  U4 丢掉发布出来的数字。
+  U1 第一版**活下来**了——因为我最初只测了拼装出来的句子，没测「作业行进到左栏」这条接线；
+  补的那条用例正是钉这个的（`buildLeftPanel` 直接把带 errorJson 的作业行喂进去，两条断言：
+  拒绝行拿到句子、运行行拿到 `null`）。
+- 末态闸门：typecheck 0／lint **206 文件 0 条**／`test:unit` **696/39**／`test:integration`
+  **543 passed + 6 skipped / 27 files**／`docs:check` exit 0（源码引用 276 处／206 文件、设计锚点 394 处）。
+
+**这轮仍然没做的**：**没有真浏览器读数**。上面的 DOM 断言是 `renderToStaticMarkup`，
+不是真 Chrome 里的一次点击；要在页面上真看到那行「被拒：RESOURCE_LIMIT / generation-budget-exhausted
+（attempt 4 · maxAttempts 3）」，需要一次能把生成预算跑穿的 rig（profile 的 `maxAttemptsPerBlueprint` 打到 1，
+再连点两次「发起生成」）。这条挂在下一次的浏览器轮里做，本轮不把 #59 最后一格按「已浏览器验证」读。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配

@@ -68,6 +68,15 @@ function LeftColumn(props: { panel: LeftPanel | { reason: string } }): ReactNode
       createElement("dd", { "data-task-state": panel.taskState }, panel.taskId),
       createElement("dt", null, "清理"),
       createElement("dd", null, panel.cleanupState ?? "—"),
+      // The refusal, with whatever numbers the server published beside it. Absent when the row has
+      // not been refused - the dash would read as "refused, and nothing was said" (§6's honesty
+      // rule for a missing fact, issue #59).
+      ...(panel.failure === null
+        ? []
+        : [
+            createElement("dt", { key: "failure-term" }, "被拒"),
+            createElement("dd", { key: "failure-desc", "data-job-failure": panel.failure }, panel.failure),
+          ]),
       createElement("dt", null, "画面"),
       createElement(
         "dd",
