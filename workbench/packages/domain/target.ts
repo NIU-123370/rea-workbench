@@ -57,3 +57,17 @@ export function normalizeUrlLocator(url: string): Result<UrlLocator, string[]> {
 // fixed vocabulary, not a null the reader has to interpret: the same column also carries the
 // reason a capture could not identify its source, and those two must not look alike.
 export const URL_TARGET_IDENTITY_REASON = "url-declared-not-captured";
+
+// The three kinds a target row may carry (§8's `target.kind`), owned here for the same reason the
+// identity reason above is: a screen has to be able to tell "this target is a URL I declared" from
+// "this target is bytes somebody imported", and the door that refuses an inspect against a URL
+// target refuses it by that difference. `contracts/resources.ts` re-exports this list into its
+// schema, so the value the server stores, the value the read answers with, and the value a panel
+// can name are one vocabulary rather than three that happen to agree today.
+export const TARGET_KINDS = ["url", "har", "asar"] as const;
+
+export type TargetKind = (typeof TARGET_KINDS)[number];
+
+export function isTargetKind(name: string): name is TargetKind {
+  return (TARGET_KINDS as readonly string[]).includes(name);
+}

@@ -9,6 +9,7 @@ import {
   nonEmptyString,
   reaEvidenceIdSchema,
 } from "./primitives.ts";
+import { TARGET_KINDS } from "../domain/target.ts";
 
 // Projects, targets and file imports (DESIGN §8). A file target is only ever
 // created by an import, and a URL target has no snapshot until it is captured.
@@ -94,13 +95,19 @@ export const pendingTargetSchema = z.strictObject({
 
 export const targetViewSchema = z.strictObject({
   id: idSchema,
-  kind: z.enum(["url", "har", "asar"]),
+  // The list is owned by `domain/target.ts` (node-free, zod-free) because the page has to recognise
+  // these same three words to tell an inspectable target from a declared URL one, and §3 keeps zod
+  // out of `apps/web`. Re-exported below, so importer and reader share one owner.
+  kind: z.enum(TARGET_KINDS),
   sourceSha256: digestSchema.nullable(),
   snapshotDigest: digestSchema.nullable(),
   identityReason: nonEmptyString.nullable(),
   evidenceIds: z.array(reaEvidenceIdSchema),
   importJobId: idSchema.nullable(),
 });
+
+export { TARGET_KINDS as targetKinds, isTargetKind } from "../domain/target.ts";
+export type { TargetKind } from "../domain/target.ts";
 
 export const importFieldsSchema = z.strictObject({
   kind: z.enum(["har", "asar"]),

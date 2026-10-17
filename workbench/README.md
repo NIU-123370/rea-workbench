@@ -250,7 +250,9 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 - 每个状态同时给图标、文字与缺口列表，颜色只是加强；列表视图渲染的是同一批 cell，
   所以换视图不会把"未知"洗成"看起来没事"。
 - 未知项生成的是**定向调查草稿**：reason 词表映射到唯一那一种可能改变它的下一步；
-  词表里没有的 reason 会被如实标成 `reasons-unmapped`，不编一个步骤。
+  词表里没有的 reason 会被如实标成 `reasons-unmapped`，不编一个步骤。草稿本身仍只是记录
+  （点格子不等于发请求），但其中 `inspect-runtime` 那一类现在**真能发出去**：页面下方的
+  「定向调查」把手把它交给 §8 line 275 那道门，第十三轮读到的回执是 `202 JobRecord`。
 - 右栏"代码"Tab 对 Builder 永久禁用（`builder-may-not-read-source`），"报告"要有已冻结蓝图；
   中栏只带 Evidence **引用**，正文走各自的鉴权读取。
 - 中栏读的是 `GET /api/v1/projects/:projectId/graph`（§8 封闭命令表里新增的具名命令
@@ -682,6 +684,64 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件�
   **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
   蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
 
+浏览器实测·第十三轮（2026-10-17 11:33–11:45 UTC，同一套三个真进程：worker（数据目录 `rea-rig-s9/data`）＋
+web(127.0.0.1:4310)＋`next dev` 在 4496（`WB_UI_ORIGIN=http://localhost:4496`）；这一轮测的是 §8 line 275
+的 **inspect 把手**，issue #58 剩下的最后一格页面动作）：
+
+- rig 播种两个项目（一个 `har` 目标 + 两条主张，一个只有声明的 URL 目标）；第一次播种脚本因为
+  `asDigest` 导错模块而中途死掉，于是**多出一个"有项目、没有目标"的第三种状态**，这一格反而白送了一个
+  真读数（见下）。配对码一次性、约 15 分钟，每次重启 worker 都要重新配。
+- 先用 `127.0.0.1:4496` 打开时被自己的 §14 门拒了：落地页逐字「项目清单读取被拒：proxy-referer-mismatch」——
+  UI origin 钉的是 `localhost:4496`，换到那个域名才成。这条不是故障，是那道门在起作用。
+- 进入 har 项目 `66433cda…`：`data-inspect-subject="ready"`，逐字
+  「目标 612fc048-d1d0-47c1-ba93-1a729009dd70｜HAR 导入的字节｜图修订 0（这一发带着它，图动了门口回 409 而不是默默扩大范围）」；
+  勾选框两条逐字「cart 路由在 401 时不写 body（修订 1｜覆盖 unknown（coverage-unknown））」与
+  「cart 路由在 include 非空时返回 items[]（修订 1｜覆盖 unknown（coverage-unknown））」；口径三档逐字
+  「（还没有选：页面不默认任何一档）」（`selected`）、「只看已导入的字节（静态）」、「连同捕获当时的运行时观测」，
+  `select.value` 是空串。
+- **什么都没答时点发起：一次请求都没发。** 只填问题不勾口径 → 「还没有确定调查口径（只看已导入的字节 /
+  连同捕获当时的运行时观测）：两者问的不是同一件事，§10 不许页面替你默认一档。」；全空 →
+  「问题还空着：§8 要求 inspect 带非空 question，格子缺什么本身不构成一次提问。」；
+  两次 `window.fetch` 计数到的 POST 都是 **0 条**。
+- 勾 1 条主张 + 选 `static` + 提交：恰好 1 条 POST，体逐字
+  `{"targetId":"612fc048-…","expectedGraphRevision":0,"task":{"kind":"inspect","claimIds":["c94a4320-…"],"question":"这两条主张在 401 分支上还成立吗？","scope":"static"}}`，
+  带一把一次性 `Idempotency-Key`；回执「已排入定向调查：作业 df1f0f7f-e957-415a-881e-a09f231c0b71（queued）」，
+  作业面板当场长出「inspect｜queued｜清理 pending」，事件流那行变成「…（最后一条 seq 31）」。
+- 磁盘侧独立核（第二个连接 `readOnly:true`，不走页面）：那一行的 `input_json` 与浏览器发出的体**逐字相同**
+  （问题原文、claim id、scope 都在），`request_digest=bd2b7eeba6009dd7…`，`deadline_at=11:35:13.444Z`
+  = 建行时刻 11:34:43.444Z + rig profile 的 30 秒排队（不是页面写的），`idempotency_key` 就是那次点击的键；
+  `events` 表 seq 31 是 `job.updated`、`aggregate_id` 正是那个作业——页面上的 seq 与日志里的 seq 是同一个数。
+- URL 项目 `47c85a59…`：`data-inspect-subject="blocked"`，逐字「这个目标是声明的 URL，背后还没有导入的字节：
+  inspect 读的是导入内容，门口会以 inspect-needs-file-target 拒收。先上传 HAR 或 ASAR。」；把问题与口径都填好
+  再点，POST 仍是 **0 条**——这道拒绝发生在出门之前，而且说的是门会给的那个 reason。
+- 「有项目、没有目标」那一格：逐字「图读没有给出 targetId：定向调查必须有目标，而本项目当前的视图里没有这个格位。」
+  **这一轮就是在这里抓到我自己的过度声明**：主张清单那一段当时会印「本目标还没有任何主张：这一发只能是首次分析…」，
+  而这个项目根本没有目标——那句话是对"某个目标"的判断，页面没读到目标时不配说它。收窄成
+  `inspectClaimsNoteFor`（无读、无目标都返回 `null`）并补了四条用例，回到同一个页面重读：那句已经不出现了。
+- 一次真状态转移（顺手读到）：在 har 项目里用页面同源 `fetch` 声明一个 URL 目标（201）之后，下一次整页重读
+  把图读命名的目标换成了那个 URL 目标，于是 inspect 把手自己翻成上面那句 URL 拒绝，之前勾选的 claim
+  也从清单里消失（这正是"勾了清单里没有的"那条守卫防的形状）。同一次读数里
+  `graphRevision` 是 **0 → 0**：声明目标不是图写，所以它触发不了 409。
+- 并发令牌是真的，不是装饰：在 `6b2e7ad7…`（har 目标 + 1 条主张、`graph_revision=1`）用真指针点勾选框、
+  a11y `fill` 填问题与口径，然后把该项目的 `graph_revision` 由**库侧**推到 2（本 build 里页面能碰到的任何动作
+  都不写图——capture/inspect 没有执行者，那是 #75——所以要制造一个"图动了"只能出此一手），再点一次发起：
+  「定向调查请求被拒：graph-revision-changed（actual 2 · expected 1）」，`inspect` 作业行数 **0**，表单内容原样留着；
+  把计数改回 1 再点，同一张表单就拿到 202「已排入定向调查：作业 075ecc8a-…（queued）」，事件流 seq 33。
+  ⇒ 409 只关于令牌本身，别的路径没被它顺带挡住。
+- console 最后一条页面加载 **0 条消息**；本轮**没能**用截图（MCP 截图工具的路径白名单同时拒了 `/tmp` 与工作区路径），
+  所有读数都是文本回执逐字抄的。
+
+本轮**没有验到 / 不该按已交付读**的：capture 那一半仍发不出去，是面板上那句具名说明而不是一个按钮（`scenario.actions`
+需要编排控件）；`inquiryQueueLine` 的新文案这次没被点击路径覆盖——这四个项目的格子本轮都没有带 §6 缺口的行
+（列表里 `button[data-inquiry]` 计数 0），所以那句话只有 headless 渲染与用例读数，点格子入队那一路仍是第十一/十二轮的读数；
+`expectedGraphRevision` 的 409 是**库侧改计数**制造的，不是真图写；`inspect` 作业会一直停在 `queued`（没有执行者，#75）。
+
+闸门读数（改完最后一处再全量重跑）：typecheck 两份 tsconfig 全绿；lint 202 文件 0 条；`test:unit` **638 通过 / 38 文件**；
+`test:integration` **458 通过 + 6 跳过 / 25 文件**；`npm run review` 扫 195 文件 **0 命中**；`docs:check` 用例 17 / 验收 13；
+`perf:t17` rc=0 且 `gateHostSatisfied=false`（#23 的宿主条件，本轮没动）。变异 **17 支：16 支被杀，1 支按定义杀不掉**——
+`<select>` 由 `value` 受控时 React 根本不渲染 option 上的 `selected`，所以"注入一个 selected 的 option"是**空操作**而非漏洞；
+换成真会犯错的那一笔（把受控 `value={inspectScope}` 写成 `value="static"`）立刻被渲染用例杀掉。
+
 浏览器实测·第十二轮（2026-10-17 10:49 UTC，同一套三个真进程；这一轮测的是**代码 tab 上那格比较器**，
 issue #82 收口的地方——写门只收已安装的名字，而此前页面上没有任何东西能列出它们）：
 
@@ -862,13 +922,19 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   仍未裁决的两点留在 #75：提交的字节走 staging 还是 RPC body（现在按 `evaluatorCompletionSchema` 的
   `reportStagingId + reportSha256`，即前者），以及谁把 `queued` 变 `running`（本 build 的答案是"没人"，
   所以才有上面那格报警）。
-- §8 line 275 的**页面把手只做一半**：capture 那半编不出来——页面没有任何东西能生成一份
+- §8 line 275 的**页面把手现在只缺一半，缺的是 capture 那一半**：页面没有任何东西能生成一份
   `BrowserAction` 序列（`click/fill/waitFor` + `Locator`），硬塞一个输入框等于把 §8 的具名动作序列降级成
-  自由文本，正是 `tasks.ts` 那份联合要避免的形状。inspect 那半**是可以做的**，而我先前在这里写过相反的话
-  （"页面挑不出这个目标已有的主张"）——那是我没读全 `contracts/graph.ts` 就下的判断：图读的**回包自带
-  `targetId`**（§8 line 275 的读门还接受 `?targetId=`），`claims[]` 就是那一格图的主张，
-  项目视图又给 `graphRevision`，所以"选哪些主张 + 问什么 + static/captured-runtime"三样页面都拿得到。
-  纠正同时写回 #58 的评论；这一格的实现是下一个模块。
+  自由文本，正是 `tasks.ts` 那份联合要避免的形状——所以那一半在页面上是一句具名说明，不是一个只会吃 400 的按钮。
+  inspect 那一半已经做出来了（issue #58 的最后一格把手，第十三轮）：目标取图读自己给的 `targetId`，
+  类型由 `GET /projects/:p/targets/:t` 读回来（页面不再猜 `kind`），主张清单取同一张图读的 `claims[]`，
+  并发令牌取项目行的 `graphRevision`——操作者只回答两件事：问什么、勾选哪几条。
+  两件事都没答之前不发请求（口径不默认任何一档，§10）；`claimIds` 为空只在"这一格图还没有主张"时允许，
+  有主张却不勾是具名拒绝；勾了清单里没有的 id 也是具名拒绝（图读与表单不一致时不静默少发）。
+  这些句子与门的做法是两处独立的规则还是同一件事，由 `web-api.test.ts` 里那两条对账用例钉着：
+  把页面三次真读的回包喂回 `inspectDraftOf`，产出的体直接从 HTTP 门打出去拿 202；
+  反过来把页面的 URL 拒绝与门自己的 `inspect-needs-file-target` 放在同一条用例里读。
+  先前我在这里写过"页面挑不出这个目标已有的主张"——那是我没读全 `contracts/graph.ts` 就下的判断，
+  纠正同时写回 #58 的评论。
   顺手改掉的一处同类问题：`buildLeftPanel` 的参数原本**要求**调用方交出 `target.kind` 与 `snapshotDigest`，
   而图读根本不给这两样——于是组件里写着 `{ kind: "har", snapshotDigest: null }` 两个字面量在编。
   没有任何地方渲染它们，所以没有一条测试抓得到；参数收窄成 `{ id }` 之后，编译期就不允许再编（typecheck

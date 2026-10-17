@@ -13,6 +13,10 @@ import { createWorkerClient } from "../../apps/web/worker-client.ts";
 import { createApiHandler, API_PREFIX, MAX_UPLOAD_FILE_BYTES } from "../../apps/web/api.ts";
 import { runWebProcess } from "../../apps/web/main.ts";
 import { startWebServer, type WebServer } from "../../apps/web/server.ts";
+// The page's own draft builders, driven from real replies: a test of the door alone cannot show that
+// what this UI would send is something the door accepts, and a unit test of the builders alone cannot
+// show that the three reads they consume say what the page assumes they say.
+import { inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, relayData } from "../../apps/web/ui/view-model.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectPageSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
@@ -4158,6 +4162,100 @@ describe("the job request door (§8 line 275 / issue #58)", () => {
     const missingTarget = await post(fix.session, fix.path, { targetId: newId(), expectedGraphRevision: 0, task: captureTask() }, "job-key-no-target");
     expect(missingTarget.status, missingTarget.text).toBe(404);
     expect(errorOf(missingTarget.text).details["reason"]).toBe("target-unknown");
+  });
+
+  // The page and the door have to agree, and a unit test of the page's builders cannot prove it: the
+  // draft is built out of three replies, and only this socket decides what they say. So the reads the
+  // browser makes are made here for real, fed through the same owners the component calls, and what
+  // comes out is sent. A body the door refuses is a page that can only ever be refused.
+  it("accepts the body the page's own draft builders produce from the three reads it makes", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "job-door-page-draft");
+    const file = fileTarget(projectId);
+    const claimId = claimRow(projectId, file);
+
+    const projectRead = await call("GET", `${API_PREFIX}/projects/${String(projectId)}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(projectRead.status, projectRead.text).toBe(200);
+    const graphRead = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/graph`, { headers: { host: host(), cookie: session.cookie } });
+    expect(graphRead.status, graphRead.text).toBe(200);
+    const targetRead = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/targets/${String(file)}`, { headers: { host: host(), cookie: session.cookie } });
+    expect(targetRead.status, targetRead.text).toBe(200);
+
+    const graph = relayData(JSON.parse(graphRead.text) as JsonValue) as { targetId: string | null; claims: { claimId: string }[] };
+    const project = relayData(JSON.parse(projectRead.text) as JsonValue) as { graphRevision: number };
+    const facts = { targetId: graph.targetId, claimIds: graph.claims.map((claim) => claim.claimId) };
+    const target = inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, file);
+
+    const subject = inspectSubjectOf({ graph: facts, target, graphRevision: project.graphRevision });
+    expect(subject.ok).toBe(true);
+    if (!subject.ok) return;
+    // Reading the door's own inputs back: the graph named the imported target, the row said which kind,
+    // and the claim this rig wrote is one the page can actually check.
+    expect(subject.targetId).toBe(file);
+    expect(subject.claimIds).toContain(claimId);
+
+    const draft = inspectDraftOf({
+      csrf: session.csrf,
+      graph: facts,
+      target,
+      graphRevision: project.graphRevision,
+      chosen: [claimId],
+      question: "这个响应在什么条件下会缺字段",
+      scope: "captured-runtime",
+    });
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+
+    const asked = await post(session, `${API_PREFIX}/projects/${String(projectId)}/jobs`, draft.body as unknown as Record<string, JsonValue>, "job-key-page-draft");
+    expect(asked.status, asked.text).toBe(202);
+    const record = jobRecordSchema.safeParse(relayData(JSON.parse(asked.text) as JsonValue));
+    if (!record.success) throw new Error(asked.text);
+    expect(record.data.kind).toBe("inspect");
+    expect(record.data.state).toBe("queued");
+
+    // The row carries the question and the claim the operator chose, so what an executor will read is
+    // what this page asked - not a body the door reinterpreted.
+    const row = queuedJob(projectId, asId(record.data.id));
+    expect(JSON.stringify(row?.inputJson)).toContain(claimId);
+    expect(JSON.stringify(row?.inputJson)).toContain("这个响应在什么条件下会缺字段");
+  });
+
+  // The other half of the same reconciliation: a *legal-looking* page state that the door would refuse
+  // must not be reachable from the builders. This is the state a stale graph read leaves behind - the
+  // operator checked a claim the current view no longer names.
+  it("does not let the page send an inspect against the URL target the graph may name", async () => {
+    const fix = await rig("job-door-page-url-target");
+    const graphRead = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/graph`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(graphRead.status, graphRead.text).toBe(200);
+    const graph = relayData(JSON.parse(graphRead.text) as JsonValue) as { targetId: string | null; claims: { claimId: string }[] };
+    const targetRead = await call("GET", `${API_PREFIX}/projects/${String(fix.projectId)}/targets/${String(fix.targetId)}`, { headers: { host: host(), cookie: fix.session.cookie } });
+    expect(targetRead.status, targetRead.text).toBe(200);
+
+    const facts = { targetId: fix.targetId, claimIds: graph.claims.map((claim) => claim.claimId) };
+    const target = inspectTargetReadOf(JSON.parse(targetRead.text) as JsonValue, fix.targetId);
+    expect(target).toEqual({ ok: true, kind: "url" });
+    const draft = inspectDraftOf({
+      csrf: fix.session.csrf,
+      graph: facts,
+      target,
+      graphRevision: 0,
+      chosen: [],
+      question: "这个路由到底存不存在",
+      scope: "static",
+    });
+    expect(draft.ok).toBe(false);
+    if (draft.ok) return;
+    expect(draft.line).toBe(INSPECT_TARGET_URL_LINE);
+
+    // And the door agrees, with its own named reason: the page's sentence and the worker's refusal are
+    // two views of one rule, not two rules that happen to match today.
+    const asked = await post(fix.session, fix.path, {
+      targetId: fix.targetId,
+      expectedGraphRevision: 0,
+      task: { kind: "inspect", claimIds: [], question: "这个路由到底存不存在", scope: "static" },
+    }, "job-key-page-url-target");
+    expect(asked.status, asked.text).toBe(400);
+    expect(errorOf(asked.text).details["reason"]).toBe("inspect-needs-file-target");
   });
 });
 

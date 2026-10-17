@@ -11,6 +11,7 @@ import * as evidence from "../../packages/domain/evidence.ts";
 import * as exportDomain from "../../packages/domain/export.ts";
 import * as id from "../../packages/domain/id.ts";
 import * as identity from "../../packages/domain/identity.ts";
+import * as inspect from "../../packages/domain/inspect.ts";
 import * as openApi from "../../packages/domain/openapi.ts";
 import * as plan from "../../packages/domain/plan.ts";
 import * as target from "../../packages/domain/target.ts";
@@ -39,6 +40,7 @@ const MODULES: Record<string, unknown> = {
   "export.ts": exportDomain,
   "id.ts": id,
   "identity.ts": identity,
+  "inspect.ts": inspect,
   "openapi.ts": openApi,
   "plan.ts": plan,
   "target.ts": target,
@@ -54,6 +56,8 @@ const MODULES: Record<string, unknown> = {
 const SPEC_NAMED_EXPORTS: [string, string][] = [
   ["canonical-json.ts", "digestCanonicalJson"],
   ["comparators.ts", "isComparatorNormalization"],
+  ["inspect.ts", "isInspectScope"],
+  ["target.ts", "isTargetKind"],
   ["canonical-json.ts", "digestBytes"],
   ["canonical-json.ts", "canonicalJson"],
   ["canonical-json.ts", "isDigest"],
@@ -178,6 +182,35 @@ describe("domain module inventory (DESIGN §3)", () => {
     // The predicate is the owner of the closed list, so a name outside it cannot be labelled.
     expect(comparators.isComparatorNormalization("json-key-order")).toBe(true);
     expect(comparators.isComparatorNormalization("ignore-everything")).toBe(false);
+  });
+
+  // The same argument the comparator test above makes, for the two vocabularies §8 line 275 needs:
+  // the screen offers inspect scopes and has to recognise a target kind to know whether the target it
+  // was given can be inspected at all. Both lists are therefore in `domain`, and the contracts that
+  // enforce them import them. A second inline copy would let the door accept a value the page cannot
+  // name - and, for the target kinds, would let a page call an unknown kind "not a URL target" and
+  // send an inspect the worker then refuses.
+  it("keeps one owner of the inspect scope and target kind vocabularies", () => {
+    const tasks = readFileSync(path.join(ROOT, "packages/contracts/tasks.ts"), "utf8");
+    expect(tasks).toContain('export { INSPECT_SCOPES as inspectScopes, isInspectScope } from "../domain/inspect.ts";');
+    expect(tasks).toContain("scope: z.enum(INSPECT_SCOPES)");
+    expect(tasks).not.toMatch(/z\.enum\(\s*\[\s*"static"/);
+    const resources = readFileSync(path.join(ROOT, "packages/contracts/resources.ts"), "utf8");
+    expect(resources).toContain('export { TARGET_KINDS as targetKinds, isTargetKind } from "../domain/target.ts";');
+    expect(resources).toContain("kind: z.enum(TARGET_KINDS)");
+    expect(resources).not.toMatch(/z\.enum\(\s*\[\s*"url"/);
+    for (const [file, list] of [["inspect.ts", "INSPECT_SCOPES"], ["target.ts", "TARGET_KINDS"]] as const) {
+      const source = readFileSync(path.join(DOMAIN_DIR, file), "utf8");
+      expect(source).toMatch(new RegExp(`export const ${list} = \\[`));
+      // Browser-safe for the same reason `id.ts` is: no Node builtin, no zod.
+      expect(source).not.toMatch(/from\s*["'](node:|zod)/);
+    }
+    expect(inspect.INSPECT_SCOPES).toEqual(["static", "captured-runtime"]);
+    expect(inspect.isInspectScope("captured-runtime")).toBe(true);
+    expect(inspect.isInspectScope("whatever")).toBe(false);
+    expect(target.TARGET_KINDS).toEqual(["url", "har", "asar"]);
+    expect(target.isTargetKind("har")).toBe(true);
+    expect(target.isTargetKind("snapshot")).toBe(false);
   });
 
   it("keeps the id shape importable from a browser bundle", () => {

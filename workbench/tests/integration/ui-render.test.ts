@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { WorkbenchColumns } from "../../apps/web/ui/panels.tsx";
-import { buildMiddlePanel, buildRightTabs, FREEZE_EMPTY_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
+import { buildMiddlePanel, buildRightTabs, FREEZE_EMPTY_LINE, INSPECT_CAPTURE_NOTE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, listView, PROJECTS_EMPTY_LINE } from "../../apps/web/ui/view-model.ts";
 import { Workbench } from "../../apps/web/app/client/workbench.tsx";
 import { ProjectList } from "../../apps/web/app/client/project-list.tsx";
 import type { ClaimEvidenceState, Coverage } from "../../packages/domain/evidence.ts";
@@ -272,5 +272,39 @@ describe("the contract tab before its journal has been read", () => {
     expect(html).toContain(FREEZE_EMPTY_LINE["no-journal"]);
     expect(html).not.toContain("data-blueprint-freeze=");
     expect(html).not.toContain("data-candidate-generate=");
+  });
+});
+
+// The directed-inspect panel's first paint (issue #58's last control).
+//
+// This is the section that used to print `JSON.stringify` of an inquiry under a heading admitting
+// nothing had been submitted. The static render has run no effect, so what is on screen here is the
+// page's answer to "what do you know before any read has happened" - and the answer has to be a named
+// missing read, not a blank form and not the old apology.
+describe("the directed-inspect panel before any read has happened", () => {
+  it("names which of its own reads is missing instead of offering a blank form", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toContain('data-panel="directed-inspect"');
+    expect(html).toContain('data-inspect-subject="blocked"');
+    expect(html).toContain(INSPECT_GRAPH_UNREAD_LINE);
+    // The half this page cannot ask for is said on the panel, not left for the operator to discover as
+    // a 400 - and it is said before any read, because it is a fact about the build.
+    expect(html).toContain(INSPECT_CAPTURE_NOTE);
+    // The scope control exists and is unchosen: no option is marked selected, because picking one for
+    // the operator is §10's prohibition.
+    expect(html).toContain("（还没有选：页面不默认任何一档）");
+    // Read from the actual markup: the empty choice is the one marked selected, and neither of the two
+    // real scopes is. Preselecting either would be the page deciding an adjudication question (§10).
+    expect(html).toContain('<option value="" selected="">（还没有选：页面不默认任何一档）</option>');
+    expect(html).not.toContain('<option value="static" selected');
+    expect(html).not.toContain('<option value="captured-runtime" selected');
+    // A claim list is not offered, and, just as important, the page does not claim this target has no
+    // claims: with the graph unread it only knows it has not read.
+    expect(html).not.toContain(INSPECT_FIRST_ANALYSIS_NOTE);
+    expect(html).not.toContain("data-inspect-claim=");
+    // The old heading promised 本地排队，尚未提交; the receipt sentence may only appear after a 202.
+    expect(html).not.toContain("本地排队，尚未提交");
+    expect(html).not.toContain("已排入定向调查");
+    expect(html).toContain("还没有点过任何格子");
   });
 });

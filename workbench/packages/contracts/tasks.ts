@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { idSchema, nonEmptyString } from "./primitives.ts";
+import { INSPECT_SCOPES } from "../domain/inspect.ts";
 
 // Job inputs (DESIGN §8). These unions are the whole instruction surface a
 // target may receive: no JavaScript, no shell, no arbitrary Playwright
@@ -48,8 +49,11 @@ export const inspectTaskSchema = z.strictObject({
   // investigation must name existing claims (DESIGN §8).
   claimIds: z.array(idSchema),
   question: nonEmptyString,
-  scope: z.enum(["static", "captured-runtime"]),
+  scope: z.enum(INSPECT_SCOPES),
 });
+
+export { INSPECT_SCOPES as inspectScopes, isInspectScope } from "../domain/inspect.ts";
+export type { InspectScope } from "../domain/inspect.ts";
 
 export const jobTaskSchema = z.discriminatedUnion("kind", [captureTaskSchema, inspectTaskSchema]);
 
