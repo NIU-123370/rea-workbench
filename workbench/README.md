@@ -654,6 +654,44 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件�
   **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
   蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
 
+浏览器实测·第九轮（2026-10-17 08:12–08:17 UTC，三个真进程：worker（数据目录 `rea-rig-s9/data`）＋
+web(127.0.0.1:4310)＋`next dev apps/web -p 4496`（`WB_UI_ORIGIN=http://localhost:4496`）；这一轮测的是
+**契约 tab 上新增的两扇门**：冻结蓝图（§8 line 292）与发起生成（line 294）。rig 的准备脚本只写到
+`seedReviewChain` 那一层（草稿样本/草稿契约/草稿计划，用仓库自己的 support helper），三次批准是在页面里
+用同源 `fetch` 打的，冻结与生成则是**点按钮**）：
+
+- 落地页配对成功 → 两行 `browser-round-9-plain｜图 1｜库存 1`、`browser-round-9-freezable｜图 1｜库存 2`。
+- 进入项目页、批准之前：冻结栏逐字「还没有已批准的计划：批计划（§8 line 291）之后，这一栏才有点得动的东西。」，
+  生成栏逐字「还没有冻结过的蓝图：先在上面点「冻结蓝图」，§8 line 294 才有点得动的一行。」，按钮各 0 个；
+  此时 `GET /audit` 回 **0 条**——两句空态说的都是真话，不是兜底文案。
+- 三条 review 门 200 之后（`vector-approved`／`contract-approved`／`plan-approved`，日志 seq 2/3/4），
+  重载页面 → 冻结栏出现 1 个按钮，`data-blueprint-freeze="766880ca…"`。
+- **点「冻结该计划为蓝图」** → 回执逐字「已冻结蓝图 762494d4-c94b-4a5c-8456-fb3ebfb36740｜公开 1｜保留 0｜
+  契约 1｜日志 seq 5」；处理函数答完自己重读日志，所以栏位当场变成
+  「已批准的计划都已经冻结过蓝图了：再一次冻结要的是一个新计划，不是同一个的第二遍。」、按钮归 0，
+  而生成栏**无需重载**就出现了那个蓝图的按钮。
+- **点「为该蓝图发起一次生成」** → 「已排队生成：作业 ea85380c…（queued）」——回包是作业行不是候选（§10）。
+  约 1.5 秒后读 `GET /jobs`：那一行已经 `succeeded` 且 `resultRef=d6e7073c-007d-4765-9762-d78b2d3c0fdc`，
+  执行者是 worker 自己的泵循环（`RUNNER_POLL_MS=250`），页面上没有任何脚本触发过它。
+- 重载 → 代码 tab 的候选就是那个 `resultRef`：`adapter.ts（typescript，1033 字节）` 等 3 个文件，
+  点开 `adapter.ts` 读到正文首行「// Generated from a frozen REA Workbench blueprint…」与它的 `sha256`。
+  **这一条就是 #57 第四个完成条件在浏览器里的读数**：从「冻结」这一次点击起，链不再需要播种脚本。
+- 预算是真门：连点四次生成得到 4 个不同作业（每次点击一个 `Idempotency-Key`），三个 `succeeded`
+  （候选 `d6e7073c…`／`11175fa4…`／`5cf42a4b…`），第四个 `failed`，其 `error` 是完整 ApiError：
+  `{code:"RESOURCE_LIMIT", message:"generation-budget-exhausted", retryable:false,`
+  `details:{attempt:4, maxAttempts:3}, requestId:"969c67de-39b0-498f-b299-b958a30e6323"}`
+  ——`maxAttempts` 正是 rig 的 profile 里那个 3，`requestId` 是那次点击带的键。日志里成对出现
+  `candidate.request|build-job-queued`（控制面造工作）与 `builder.generate|candidate-generated`
+  （worker 的 Builder 身份做工作），最后一条是 `builder.generate|generation-budget-exhausted` 的 deny。
+- console 全程 2 条信息（React DevTools 提示、`[HMR] connected`），**0 条报错**。
+- **本轮抓到的一条真缺口**：作业面板只在「自己那扇门答完之后」重读清单，泵循环推进的行不会自己来——
+  读数里出现过 `queued` 与四个 `succeeded` 并存的一屏（那是上一次读的快照，不是服务在骗人）。
+  §13 的事件流与 SSE 门本仓已经通了，缺的是这个页面没订阅。已写进「还没有的东西」，并单开 issue。
+- 这一轮**没验到的**：截图与真指针点击（in-app 浏览器 viewport 仍是 0×0，所有动作是在真页面里派发真 DOM
+  事件、由真 React 处理）；SSE 推送路径（上面那条缺口本身就是它）；一次真模型生成（Builder 子进程产的
+  是 fixture 入口下的确定性文件）；`verify` 作业的跟进仍没有执行者（#75），这轮 4 个 build 作业里没有
+  一个是被「跑验证」的。
+
 浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
 把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：
 
@@ -690,14 +728,15 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 
 明确**未实现 / 未验证**的范围：
 
-- 页面上的写控件只覆盖了一部分门：现在**有**按钮的是样本决定、作业取消、清理重排、验证请求，落地清单
-  与配对表单也在了（§8 line 270）；**没有**控件的是 `project.create`、`vector.create`、`plan.build`、
-  `blueprint.freeze` 与 HAR 上传——那几扇门在第七轮里是靠页面里的 `fetch` 驱动的，操作员点不到。
-  路由与命令都在，缺的是页面这一头（issue #58 的账）。
-- 「造 → 批 → 冻 → **生成**」这条链在 HTTP 上通了，页面上还差最后那一下：`POST /projects/:p/candidates`
-  需要的 `blueprintId` 只能从蓝图冻结的回执里读到，而冻结在页面上仍然没有控件（#58 的待办清单里那条），
-  所以「发起生成」这个按钮现在做出来也点不亮。门与执行者的读数都在 `tests/integration/candidate-generation.test.ts`
-  （13 条）与第七/八轮浏览器实测旁边记着，别按「页面已能生成」读。
+- 页面上的写控件现在覆盖到「批计划 → 冻结蓝图 → 发起生成」这一段（第九轮有浏览器读数）：**有**按钮的是
+  落地清单、配对表单、样本决定、作业取消、清理重排、验证请求、蓝图冻结、发起生成；**没有**控件的是
+  `project.create`、`vector.create`、`contract`(草稿)、`plan.build` 与 HAR 上传——那几扇要靠页面里的
+  `fetch` 驱动，操作员点不到（issue #58 的账）。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
+  本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
+  读不到日志就说读不到（`FREEZE_EMPTY_LINE` 的三种空态各有自己的句子）。
+- 页面**没有订阅 §13 的 `job.updated`**：作业面板只在一次门答完之后重读清单，所以 worker 泵循环推进的行
+  不会自己刷新（第九轮读到过一屏 `queued` 与四个 `succeeded` 并存——那是上一次的快照，不是服务在骗人）。
+  事件流与 SSE 门本身是通的（`tests/unit/web-proxy-route.test.ts` 把「不缓冲」钉住了），缺的是这个页面用它。
 - 作业失败的原因现在**只有一个写者**：`packages/application/job-queue.ts` 的 `jobErrorFromFailure`，
   执行者与 HAR 导入两处都走它。此前导入那两处写的是 `{code, reason}`——`JobRecord.error` 按 §8 是
   `ApiError`，于是一个失败行不是「一行失败」，而是让那个项目**每一页作业都读不出来**；本轮由 V17 变异钉住

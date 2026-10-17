@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, jobActionLine, jobActions, listView, pickCandidateSource, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, verificationRequestLine } from "../../ui/view-model.ts";
+import { blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, journalEntriesOf, jobActionLine, jobActions, listView, pickCandidateSource, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, queuedJobLine } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { CandidateDiscovery, DirectedInquiry, GraphEdgeView, GraphNodeView, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -260,6 +260,12 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [jobsNotice, setJobsNotice] = useState<string | null>(null);
   const [verifyNotice, setVerifyNotice] = useState<string | null>(null);
   const [comparator, setComparator] = useState("");
+  // The journal is what tells this page which plans may be frozen and which blueprints may be
+  // generated from (§8 gives no list route for either), so it is read like any other panel: null
+  // means "not read", and the panel says so instead of offering an empty list.
+  const [journal, setJournal] = useState<JournalEntryWire[] | null>(null);
+  const [freezeNotice, setFreezeNotice] = useState<string | null>(null);
+  const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [inquiries, setInquiries] = useState<DirectedInquiry[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -304,6 +310,15 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       return;
     }
     setGraph(view.value as GraphViewPayload);
+    // A journal refusal stops nothing else on the page: the two panels that depend on it say which
+    // of their own emptinesses they are in, and everything else was already read.
+    const journalPage = await getJson(`/api/v1/projects/${props.projectId}/audit?limit=100`);
+    if (journalPage.ok) {
+      setJournal(journalEntriesOf(journalPage.value));
+    } else {
+      setJournal(null);
+      setFreezeNotice(refusalLine("决策日志读取被拒", journalPage.reason, journalPage.facts));
+    }
     // The candidate is discovered, not typed (§8 lines 277 + 294): the job page names the
     // build job whose resultRef is the candidate, and only then does the file list have an
     // address. A refusal here says which of those two steps did not happen.
@@ -414,11 +429,67 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         setVerifyNotice(refusalLine("验证请求被拒", got.reason, got.facts));
         return;
       }
-      setVerifyNotice(verificationRequestLine((relayData(got.value) as Record<string, unknown> | null) ?? {}));
+      setVerifyNotice(queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "verify", done: "已排入验证队列" }));
       const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
       if (page.ok) setJobs(page.value as JobsPagePayload);
     },
     [comparator, csrf, props.projectId],
+  );
+
+  // §8 line 292 from the browser. The body is the plan id and nothing else, so the page asks the
+  // journal which plan is freezable instead of letting an operator type one: the target, the
+  // contracts and the graph revision are functions of that plan (contract comment in
+  // `packages/contracts/blueprint.ts`), and a page that restated them would be deciding facts the
+  // freeze re-reads server-side. The key is per click (§8 line 261's creation list), and the journal
+  // is re-read after the answer so the row that was just frozen stops being offered.
+  const freezeBlueprint = useCallback(
+    async (planId: string) => {
+      if (csrf === "") {
+        setFreezeNotice("还没有可用的会话令牌，先完成配对。");
+        return;
+      }
+      const got = await postJson(
+        `/api/v1/projects/${props.projectId}/blueprints`,
+        { verificationPlanId: planId },
+        csrf,
+        crypto.randomUUID(),
+      );
+      if (!got.ok) {
+        setFreezeNotice(refusalLine("蓝图冻结被拒", got.reason, got.facts));
+        return;
+      }
+      setFreezeNotice(blueprintFreezeLine((relayData(got.value) as Record<string, unknown> | null) ?? {}));
+      const page = await getJson(`/api/v1/projects/${props.projectId}/audit?limit=100`);
+      if (page.ok) setJournal(journalEntriesOf(page.value));
+    },
+    [csrf, props.projectId],
+  );
+
+  // §8 line 294 from the browser, one turn after the freeze that made the blueprint. The answer is a
+  // queued job, so the notice says queued and the 作业 panel is re-read - the worker's own runner is
+  // what turns that row into a candidate, and a page that claimed 已生成 here would be reading a
+  // verdict out of a receipt that only promised work (§10).
+  const requestGeneration = useCallback(
+    async (blueprintId: string) => {
+      if (csrf === "") {
+        setGenerateNotice("还没有可用的会话令牌，先完成配对。");
+        return;
+      }
+      const got = await postJson(
+        `/api/v1/projects/${props.projectId}/candidates`,
+        { blueprintId },
+        csrf,
+        crypto.randomUUID(),
+      );
+      if (!got.ok) {
+        setGenerateNotice(refusalLine("生成请求被拒", got.reason, got.facts));
+        return;
+      }
+      setGenerateNotice(queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "build", done: "已排队生成" }));
+      const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+      if (page.ok) setJobs(page.value as JobsPagePayload);
+    },
+    [csrf, props.projectId],
   );
 
   const openFile = useCallback(
@@ -532,6 +603,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   }, [cells, showEvidence]);
 
   const claimRows = graph?.claims ?? [];
+  const freeze = freezePanelOf(journal);
+  const generate = generatePanelOf(journal);
   const droppedEdges = built === null ? [] : canvasEdges(built.cells, edgeViews).dropped;
 
   return (
@@ -559,13 +632,49 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       />
       <section data-tabpanel={activeTab} aria-label="右栏面板内容">
         {activeTab === "contract" ? (
-          <ul>
-            {claimRows.map((claim) => (
-              <li key={String(claim.claimId)} data-claim={String(claim.claimId)}>
-                {`${claim.assertion}（修订 ${String(claim.revision)}｜${claim.state.basis}/${claim.state.validity}）`}
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul>
+              {claimRows.map((claim) => (
+                <li key={String(claim.claimId)} data-claim={String(claim.claimId)}>
+                  {`${claim.assertion}（修订 ${String(claim.revision)}｜${claim.state.basis}/${claim.state.validity}）`}
+                </li>
+              ))}
+            </ul>
+            <section aria-label="蓝图冻结" data-panel="blueprint-freeze">
+              <h3>冻结蓝图（§8 line 292：只收已批准计划的 id）</h3>
+              {freeze.state === "ready" ? (
+                <ul>
+                  {freeze.plans.map((planId) => (
+                    <li key={planId} data-plan-freezable={planId}>
+                      <button type="button" data-blueprint-freeze={planId} onClick={() => void freezeBlueprint(planId)}>
+                        冻结该计划为蓝图
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p data-freeze-empty>{FREEZE_EMPTY_LINE[freeze.state]}</p>
+              )}
+              {freezeNotice === null ? null : <p data-freeze-notice>{freezeNotice}</p>}
+            </section>
+            <section aria-label="发起生成" data-panel="generation-request">
+              <h3>发起生成（§8 line 294：一道门只排作业，不给结论）</h3>
+              {generate.state === "ready" ? (
+                <ul>
+                  {generate.blueprints.map((blueprintId) => (
+                    <li key={blueprintId} data-blueprint-generatable={blueprintId}>
+                      <button type="button" data-candidate-generate={blueprintId} onClick={() => void requestGeneration(blueprintId)}>
+                        为该蓝图发起一次生成
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p data-generate-empty>{GENERATE_EMPTY_LINE[generate.state]}</p>
+              )}
+              {generateNotice === null ? null : <p data-generate-notice>{generateNotice}</p>}
+            </section>
+          </>
         ) : null}
         {activeTab === "report" ? (
           <ul>

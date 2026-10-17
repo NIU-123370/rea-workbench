@@ -553,13 +553,21 @@ export function jobActionLine(action: LifecycleAction, record: { state?: unknown
 // The 202 body of §8 line 297 is a JobRecord, and the one thing worth saying about it is that
 // this is work, not a verdict: naming the job and its state keeps the page from reading the
 // success as a result.
-export function verificationRequestLine(record: { id?: unknown; state?: unknown; kind?: unknown }): string {
+// One owner for what a 202 JobRecord says back. §8 lines 294 and 297 answer with the same row
+// shape, and a second copy of "read the id, check the kind, name the state" is how one of these
+// doors ends up claiming the work already happened when the answer was only that it is queued.
+export function queuedJobLine(
+  record: { id?: unknown; state?: unknown; kind?: unknown },
+  expected: { kind: string; done: string },
+): string {
   const id = typeof record.id === "string" ? record.id : null;
   const state = typeof record.state === "string" ? record.state : null;
   const kind = typeof record.kind === "string" ? record.kind : null;
   if (id === null) return "请求已被接受，但回包没带作业 id";
-  if (kind !== null && kind !== "verify") return `回包的作业类型是 ${kind}，不是 verify——这一行没按 §8 line 297 回答`;
-  return `已排入验证队列：作业 ${id}${state === null ? "" : `（${state}）`}`;
+  if (kind !== null && kind !== expected.kind) {
+    return `回包的作业类型是 ${kind}，不是 ${expected.kind}——这一行不是本页问的那扇门答的`;
+  }
+  return `${expected.done}：作业 ${id}${state === null ? "" : `（${state}）`}`;
 }
 
 export type ProjectRow = { id: string; name: string; graphRevision: number; inventoryRevision: number };
@@ -620,4 +628,125 @@ export function projectsNotice(refusal: { reason: string; facts: Record<string, 
   if (refusal === null) return rowCount === 0 ? PROJECTS_EMPTY_LINE["empty-page"] : "";
   if (isSessionReason(refusal.reason)) return PROJECTS_EMPTY_LINE["no-session"];
   return projectsRefusalLine(refusal.reason, refusal.facts);
+}
+
+// --- 蓝图冻结与发起生成的页面规则（§8 lines 292/294，issue #58 的把手清单） -------------
+//
+// §8 has no list route for plans or blueprints: only the single reads (`.../verification-plans/:v`
+// and `.../blueprints/:b`), both of which need the id the page is trying to find. The one window the
+// document does give for "what has already been decided here" is §8 line 302's project journal, and
+// its rows carry exactly the two facts needed: an allowed `plan-approved` names a plan that may be
+// frozen, and an allowed `blueprint-frozen` names both the blueprint it made and the plan it was made
+// from (`safeMetadata.planId`, `blueprint-service.ts`'s own metadata). Reading the journal is
+// therefore not a convenience here - it is the only documented way to know what is freezable, and a
+// page that let the operator type an id instead would be handing back a fact the server owns.
+export type JournalEntryWire = {
+  seq: number;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  decision: string;
+  reasonCode: string;
+  safeMetadata?: Record<string, unknown> | null;
+};
+
+// The journal page, read the way every other relay reply is read: the worker's answer arrives under
+// `data`, and an entry whose id or kind is missing is dropped rather than guessed at.
+export function journalEntriesOf(payload: unknown): JournalEntryWire[] {
+  const page = relayData(payload) as { entries?: unknown } | null;
+  return (Array.isArray(page?.entries) ? page.entries : []).flatMap((entry) => {
+    const row = entry as Partial<JournalEntryWire> | null;
+    if (row === null || typeof row !== "object") return [];
+    if (typeof row.seq !== "number" || typeof row.action !== "string" || typeof row.decision !== "string") return [];
+    return [
+      {
+        seq: row.seq,
+        action: row.action,
+        resourceType: typeof row.resourceType === "string" ? row.resourceType : "",
+        resourceId: typeof row.resourceId === "string" ? row.resourceId : null,
+        decision: row.decision,
+        reasonCode: typeof row.reasonCode === "string" ? row.reasonCode : "",
+        safeMetadata: (row.safeMetadata ?? null) as Record<string, unknown> | null,
+      },
+    ];
+  });
+}
+
+function allowedIds(entries: readonly JournalEntryWire[], action: string, reasonCode: string): string[] {
+  return entries
+    .filter((entry) => entry.action === action && entry.decision === "allow" && entry.reasonCode === reasonCode)
+    .flatMap((entry) => (entry.resourceId === null ? [] : [entry.resourceId]));
+}
+
+// Approved plans minus the ones a freeze already consumed. Both sides read the journal: a plan that
+// has been frozen is not "still freezable" just because the approval row is still in the window, and
+// §8's idempotency key only makes a repeated click safe - it does not make a second blueprint wanted.
+export function freezablePlanIds(entries: readonly JournalEntryWire[]): string[] {
+  const frozen = new Set(
+    entries
+      .filter((entry) => entry.action === "blueprint.freeze" && entry.decision === "allow")
+      .flatMap((entry) => {
+        const named = entry.safeMetadata?.["planId"];
+        return typeof named === "string" ? [named] : [];
+      }),
+  );
+  return [...new Set(allowedIds(entries, "plan.review", "plan-approved"))].filter((id) => !frozen.has(id));
+}
+
+// The blueprints a generation can be asked for, newest first: the journal's own order is the order
+// the decisions happened in, and §12.2 keeps it append-only.
+export function frozenBlueprintIds(entries: readonly JournalEntryWire[]): string[] {
+  return [...new Set(allowedIds(entries, "blueprint.freeze", "blueprint-frozen"))].reverse();
+}
+
+export const FREEZE_EMPTY_LINE: Record<"no-journal" | "no-plan" | "all-frozen", string> = {
+  "no-journal": "还没有读到本项目的决策日志：冻结需要的是「已批准的计划」，而它只在日志里点名。",
+  "no-plan": "还没有已批准的计划：批计划（§8 line 291）之后，这一栏才有点得动的东西。",
+  "all-frozen": "已批准的计划都已经冻结过蓝图了：再一次冻结要的是一个新计划，不是同一个的第二遍。",
+};
+
+export const GENERATE_EMPTY_LINE: Record<"no-journal" | "no-blueprint", string> = {
+  "no-journal": "还没有读到本项目的决策日志：生成需要蓝图 id，而它只从冻结回执与日志里来。",
+  "no-blueprint": "还没有冻结过的蓝图：先在上面点「冻结蓝图」，§8 line 294 才有点得动的一行。",
+};
+
+// What a freeze answers with. The eight fields are the receipt's own (§8 line 292's 201 body plus the
+// audit sequence §12.2 gives every decision), and the three counts are what the gate verified - the
+// page says them rather than "成功", because "冻上了" is not the fact an operator needs next.
+export function blueprintFreezeLine(record: {
+  blueprintId?: unknown;
+  publicVectorCount?: unknown;
+  holdoutVectorCount?: unknown;
+  contractCount?: unknown;
+  auditSeq?: unknown;
+}): string {
+  const blueprintId = typeof record.blueprintId === "string" ? record.blueprintId : null;
+  if (blueprintId === null) return "冻结已被接受，但回包没带蓝图 id";
+  const counts = [record.publicVectorCount, record.holdoutVectorCount, record.contractCount];
+  const numbers = counts.every((value) => typeof value === "number")
+    ? `｜公开 ${String(counts[0])}｜保留 ${String(counts[1])}｜契约 ${String(counts[2])}`
+    : "｜三个计数没带回来";
+  const audit = typeof record.auditSeq === "number" ? `｜日志 seq ${String(record.auditSeq)}` : "";
+  return `已冻结蓝图 ${blueprintId}${numbers}${audit}`;
+}
+
+// Which of its four states the freeze panel is in, decided in one place. `null` is not "empty": it
+// means the journal was never read, and the instruction an operator needs then (读日志失败了 / 还没读到)
+// is not the one for a project that has a journal but no approved plan.
+export type FreezePanel = { state: "no-journal" | "no-plan" | "all-frozen" | "ready"; plans: string[] };
+
+export function freezePanelOf(journal: JournalEntryWire[] | null): FreezePanel {
+  if (journal === null) return { state: "no-journal", plans: [] };
+  const plans = freezablePlanIds(journal);
+  if (plans.length > 0) return { state: "ready", plans };
+  const approved = journal.some((entry) => entry.action === "plan.review" && entry.decision === "allow" && entry.reasonCode === "plan-approved");
+  return { state: approved ? "all-frozen" : "no-plan", plans: [] };
+}
+
+export type GeneratePanel = { state: "no-journal" | "no-blueprint" | "ready"; blueprints: string[] };
+
+export function generatePanelOf(journal: JournalEntryWire[] | null): GeneratePanel {
+  if (journal === null) return { state: "no-journal", blueprints: [] };
+  const blueprints = frozenBlueprintIds(journal);
+  return { state: blueprints.length === 0 ? "no-blueprint" : "ready", blueprints };
 }
