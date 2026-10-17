@@ -49,8 +49,12 @@ function unameFacts(): { platform: string; arch: string } | null {
   }
 }
 
-function enginePath(name: EngineName): string | null {
-  for (const dir of ["/usr/bin", "/bin", "/usr/local/bin"]) {
+// Exported so the test can ask the same question the probe asks, instead of re-listing the
+// directories and passing while the probe looks somewhere else.
+export const ENGINE_DIRECTORIES = ["/usr/bin", "/bin", "/usr/local/bin"] as const;
+
+export function enginePath(name: EngineName): string | null {
+  for (const dir of ENGINE_DIRECTORIES) {
     const candidate = `${dir}/${name}`;
     if (existsSync(candidate)) return candidate;
   }

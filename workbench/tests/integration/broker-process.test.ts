@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import net from "node:net";
@@ -23,6 +24,7 @@ import { bootBroker, decideBoot } from "../../apps/broker/main.ts";
 import { classifyBrokerProbe } from "../../apps/worker/composition.ts";
 import type { BrokerBootResult } from "../../apps/broker/main.ts";
 import type { HostObservation, OwnedRecord, BrokerEnginePort } from "../../apps/broker/supervision.ts";
+import { KNOWN_ENGINES, UNPROBED_CAPACITY, enginePath, observeHost } from "../../apps/broker/supervision.ts";
 import { BROKER_SOCKET_ENV } from "../../apps/broker/main.ts";
 
 // The broker process (§3 line 74, issue #121) over **a real unix socket**. The whole
@@ -145,22 +147,48 @@ afterAll(async () => {
 });
 
 describe("the broker refuses before it listens (§3, §14, D18)", () => {
-  it("names the host and the engine it does not have, and creates no socket", async () => {
+  // Refusal driven from an injected report, because "does this machine have an engine" is a
+  // fact about the machine: the macOS dev box says no, a GitHub Linux runner says yes. The
+  // case has to assert the *decision*, so it supplies the observation and checks only what
+  // `decideBoot` adds on top of it.
+  it("refuses to listen on a host it cannot verify, and creates no socket", async () => {
     const socketPath = path.join(root, "refused.sock");
-    const decided = decideBoot({ env: { [BROKER_SOCKET_ENV]: socketPath } });
+    const unverified: HostObservation = {
+      facts: { platform: "darwin", arch: "arm64", enforcedConditions: [], capacity: UNPROBED_CAPACITY },
+      engine: null,
+      reasons: ["no-known-container-engine"],
+    };
+    const decided = decideBoot({ env: { [BROKER_SOCKET_ENV]: socketPath }, host: unverified });
     expect(decided.ok).toBe(false);
     if (decided.ok) return;
-    // This machine is not the one the isolation path was verified on, so the honest
-    // answer is a refusal that names both halves of why.
-    expect(decided.reasons.some((reason) => reason.startsWith("host-platform-unverified-for-sandbox"))).toBe(true);
     expect(decided.reasons).toContain("no-known-container-engine");
-    const booted = bootBroker({ env: { [BROKER_SOCKET_ENV]: socketPath } });
+    expect(decided.reasons).toContain("host-platform-unverified-for-sandbox:darwin/arm64");
+    expect(decided.reasons).toContain("required:linux/x64");
+    const booted = bootBroker({ env: { [BROKER_SOCKET_ENV]: socketPath }, host: unverified });
     expect(booted.ok).toBe(false);
     if (booted.ok) return;
     expect(booted.exitCode).toBe(78);
-    // Refusing means the file is not there either - a half-started supervisor would be
-    // the "假装起来了" this case exists to prevent.
+    // Refusing means the file is not there either - a half-started supervisor would be the
+    // "假装起来了" this case exists to prevent.
     await expect(writeFrame(socketPath, new TextEncoder().encode("{}\n"))).rejects.toThrow();
+  });
+
+  // The probe itself, asserted in the shape that holds on every host: it reports the
+  // machine `uname` names, it reports an engine exactly when one of the known paths exists,
+  // and - the part that matters for D18 - it never reports an enforced condition, because
+  // nothing in this build has proved one. `enforcedConditions: []` is what makes every
+  // start a refusal until a real capability probe exists.
+  it("reports the host it actually looked at, and nothing it has not proved", () => {
+    const [platform, arch] = execFileSync("uname", ["-s", "-m"], { encoding: "utf8" }).trim().split(/\s+/u);
+    const observed = observeHost();
+    expect(observed.facts.platform).toBe(String(platform).toLowerCase());
+    expect(observed.facts.arch).toBe(String(arch));
+    expect(observed.facts.enforcedConditions).toEqual([]);
+    // Same search the probe itself uses - a test that re-listed the directories would pass
+    // even if the probe looked in the wrong place.
+    const enginePresent = KNOWN_ENGINES.some((name) => enginePath(name) !== null);
+    expect(observed.engine !== null).toBe(enginePresent);
+    expect(observed.reasons.includes("no-known-container-engine")).toBe(!enginePresent);
   });
 
   it("refuses each wrong shape of WB_BROKER_SOCKET by name", () => {

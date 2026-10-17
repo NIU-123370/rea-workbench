@@ -1559,7 +1559,7 @@ runner 的，见下文"这轮没做浏览器"）：
   `broker-refused:no-known-container-engine` / `host-platform-unverified-for-sandbox:darwin/arm64` /
   `required:linux/x64`，exit **78**，**且不创建 socket 文件**。这一条是 #121 第 2 框的字面要求
   （「启动前具名拒绝，不许假装起来了」），也是本轮唯一能在本机拿到的真进程证据。
-- 新用例 **14** 条（`tests/integration/broker-process.test.ts`）：四条命令的真 unix socket 往返、
+- 新用例 **15** 条（`tests/integration/broker-process.test.ts`）：四条命令的真 unix socket 往返、
   凭据按 jobId 收窄（别的 job 拿同一串 → `owned:false` 且四个事实全 `unknown`）、
   cleanup 后 `revoke` 从**注册表本身**数出来、失败 cleanup 留 `failed`＋retryAt 且凭据不消失、
   引擎拒启动时不留凭据、超预算帧不读、名录外命令**不作答**（客户端读到的仍是具名传输原因），
@@ -1582,6 +1582,12 @@ runner 的，见下文"这轮没做浏览器"）：
 - 变异 **8 支全红**：B1 所有权不按 job 收窄、B2 cleanup 成功不撤销凭据、B3 失败 cleanup 不记录、
   B4 start 跳过隔离/限额检查、B5' 探针不报缺引擎、B6 doctor 只回答文件存在、B7 声称 owned 不算失败、
   B8 不合法的请求也照答。**本轮没有存活变异。**
+- **CI 抓到了一条「把本机的当作常理」的用例**：第一版那条拒绝用例直接调真 `observeHost()`，
+  断言理由里含 `no-known-container-engine`——macOS 上真，GitHub 的 Linux runner 上**假**（那里
+  `/usr/bin/docker` 在），于是本地 691/540 全绿、CI 一条红（PR #130 的第一支 `gates`）。
+  改法是把两件事分开：拒绝的**决定**由注入的 observation 驱动（每台机器都一样），探针对机器的
+  **陈述**则用 `uname` 与「同一个 `enginePath()` 找得到引擎吗」来断言——不再把「我这块板子没有 Docker」
+  写成规范。`enginePath` 因此被导出而不是在测试里重列三个目录：重列的那份会跟着错的探针一起绿。
 - #121 第 5 格那条反方向守卫也补上了：`architecture.test.ts` 现在断言
   「§3 名录里声明的模块目录必须存在」。证据是把 `apps/broker` 临时改名的那一轮——
   新用例报 `expected [ 'apps/broker' ] to deeply equal []`，其余 23 条照绿；改回来 25 条全绿。
