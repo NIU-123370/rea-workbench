@@ -50,24 +50,71 @@ export type OwnedLock = {
   release: () => Promise<void>;
 };
 
-// The lock is created with O_EXCL and records this pid. A live or stale owner
-// both block a second writer; takeover is an explicit operator action outside
-// the workbench, never an implicit retry.
+// The lock is created with O_EXCL and records this pid. A second worker may take that file over
+// only when it can *show* the recorded holder is not a running process (issue #72): a worker that
+// dies from SIGKILL never reaches `release()`, and without this the data directory would be
+// unopenable until an operator deleted a file the workbench itself wrote.
+//
+// The proof is a signal-free `kill(pid, 0)`. Two hazards are accepted and named rather than
+// papered over: a pid can be recycled by an unrelated process (the check then says "alive" and the
+// second worker refuses - the conservative direction), and a holder that never got as far as
+// writing its pid leaves a file nobody can identify (also refused - stealing a lock whose owner is
+// unknown is exactly the multi-writer risk §2 forbids).
+export function lockHolderState(text: string, probe: (pid: number) => "alive" | "dead" = pidAlive): "alive" | "dead" | "unknown" {
+  const pid = Number(text.trim());
+  if (!Number.isInteger(pid) || pid <= 0) return "unknown";
+  return probe(pid);
+}
+
+function pidAlive(pid: number): "alive" | "dead" {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    // A process we may not signal is still a process; only "no such process" means dead.
+    return (error as NodeJS.ErrnoException).code === "EPERM" ? "alive" : "dead";
+  }
+}
+
 export async function acquireWorkerLock(dataDir: string): Promise<Result<OwnedLock, StorageError>> {
   if (!existsSync(dataDir)) {
     return fail("DATA_DIR_MISSING", `data directory ${dataDir} must exist and be chosen explicitly`);
   }
   const lockPath = path.join(dataDir, LOCK_FILE);
+  // Two starters that both find the same dead holder both unlink and both retry; O_EXCL makes the
+  // retry exactly-once, so the second one is refused by the file system rather than by a guess.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const created = await tryCreateLock(lockPath, attempt === 1);
+    if (created !== null) return created;
+  }
+  // Unreachable: the loop returns on every outcome. Kept for the type checker's benefit.
+  return fail("SQLITE_FAILURE", `could not decide the lock at ${lockPath}`);
+}
+
+// A null return means "create it again": the holder is provably dead and this is the first attempt.
+async function tryCreateLock(lockPath: string, isRetry: boolean): Promise<Result<OwnedLock, StorageError> | null> {
   let handle: FileHandle;
   try {
     handle = await open(lockPath, "wx", 0o600);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EEXIST") {
-      const holder = await readFile(lockPath, "utf8").catch(() => "unknown");
+    if (code !== "EEXIST") {
+      return fail("SQLITE_FAILURE", `cannot create ${lockPath}: ${String(code ?? error)}`);
+    }
+    const holder = await readFile(lockPath, "utf8").catch(() => "");
+    const state = lockHolderState(holder);
+    if (state === "unknown") {
+      return fail("DATA_DIR_LOCKED", `${lockPath} names no readable holder pid - nothing will be taken over without a proof`);
+    }
+    if (state === "alive" || isRetry) {
       return fail("DATA_DIR_LOCKED", `another worker holds ${lockPath} (pid ${holder.trim()})`);
     }
-    return fail("SQLITE_FAILURE", `cannot create ${lockPath}: ${String(code ?? error)}`);
+    try {
+      await rm(lockPath, { force: true });
+    } catch (removal) {
+      return fail("DATA_DIR_LOCKED", `the stale holder in ${lockPath} is gone but the file could not be removed: ${String((removal as NodeJS.ErrnoException).code ?? removal)}`);
+    }
+    return null;
   }
   await handle.writeFile(`${process.pid}\n`, "utf8");
   await handle.sync();
@@ -75,7 +122,7 @@ export async function acquireWorkerLock(dataDir: string): Promise<Result<OwnedLo
   return {
     ok: true,
     value: {
-      dataDir,
+      dataDir: path.dirname(lockPath),
       lockPath,
       release: async () => {
         await rm(lockPath, { force: true });

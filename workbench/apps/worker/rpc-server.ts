@@ -73,19 +73,56 @@ export function parseFrame(text: string): Result<RpcFrame, { reason: string }> {
 
 // A socket left behind by a crashed run is not deleted on a guess: the path is
 // reported, and the operator decides (§11 — ownership before removal).
-function staleSocketGuard(target: string): Result<true, { reason: string }> {
+// The socket path exists before this server binds it in exactly two situations: another listener is
+// up, or a previous worker died without reaching `close()` (a SIGKILL never does). The guard used to
+// refuse both while naming only the first - it reported `socket-path-held-by-another-listener`
+// without ever asking a listener (issue #72). The probe is a connect: if it completes, that reason
+// is earned and the worker refuses; if nothing answers, the file is this workbench's own leftover
+// and removing it is the only way back to a startable data directory.
+export async function staleSocketGuard(target: string): Promise<Result<true, { reason: string }>> {
   if (!existsSync(target)) return { ok: true, value: true };
+  let isSocket = false;
   try {
-    if (lstatSync(target).isSocket()) return refused("socket-path-held-by-another-listener");
+    isSocket = lstatSync(target).isSocket();
   } catch {
     return refused("socket-path-unstatable");
   }
-  return refused("socket-path-exists-and-is-not-a-socket");
+  // A regular file or a directory at this path is not something this workbench wrote, so it is not
+  // something this workbench deletes.
+  if (!isSocket) return refused("socket-path-exists-and-is-not-a-socket");
+  if (await listenerAnswers(target)) return refused("socket-path-held-by-another-listener");
+  try {
+    unlinkSync(target);
+  } catch {
+    return refused("socket-stale-removal-failed");
+  }
+  return { ok: true, value: true };
+}
+
+// A unix socket whose owning process is gone answers a connect with ECONNREFUSED (or ENOENT once
+// the kernel has dropped it); a live listener completes the handshake. Only a completed handshake
+// counts as "someone is home", so a wedged listener is not treated as one - the bind below would
+// then fail with EADDRINUSE and say so by name.
+function listenerAnswers(target: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect(target);
+    let settled = false;
+    const settle = (answered: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(answered);
+    };
+    socket.setTimeout(500, () => settle(false));
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+    socket.once("close", () => settle(false));
+  });
 }
 
 export async function startWorkerRpc(worker: WorkerHandle): Promise<Result<RpcServer, RpcFailure>> {
   const socketPath = worker.rpcSocketPath;
-  const guarded = staleSocketGuard(socketPath);
+  const guarded = await staleSocketGuard(socketPath);
   if (!guarded.ok) return guarded;
 
   const listening = await new Promise<Result<net.Server, RpcFailure>>((resolve) => {
