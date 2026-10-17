@@ -30,6 +30,9 @@ import {
 } from "../../packages/application/verification-service.ts";
 import { INSTALLED_COMPARATOR_POLICIES } from "../../packages/contracts/verification.ts";
 import { readAudit } from "../../packages/application/audit.ts";
+// The projection every job reader shares (§8 lines 277-278): what the completion wrote has to show up
+// here, because this is the only shape a client is allowed to recover a verification id from.
+import { projectJobRecord } from "../../packages/application/job-queue.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
 import type {
@@ -85,7 +88,7 @@ async function failureOf<T>(result: Promise<Result<T, GateFailure>> | Result<T, 
   return settled.error;
 }
 
-function jobRow(id: Id, targetId: Id, kind: JobRow["kind"], state: JobRow["state"]): JobRow {
+function jobRow(id: Id, targetId: Id, kind: JobRow["kind"], state: JobRow["state"], input: JsonValue = {}): JobRow {
   const created = nowInstant();
   return {
     id,
@@ -94,7 +97,7 @@ function jobRow(id: Id, targetId: Id, kind: JobRow["kind"], state: JobRow["state
     kind,
     state,
     cleanupState: "pending",
-    inputJson: {},
+    inputJson: input,
     resultRef: null,
     errorJson: null,
     idempotencyKey: `verify-${id}`,
@@ -289,7 +292,10 @@ async function seedScenario(
       authority: "historical-reference",
       createdAt: created,
     });
-    tx.insertJob(jobRow(jobId, targetId, "verify", "running"));
+    // The job row carries what `verification.request` actually writes into `input_json` - the
+    // completion is bound to that request (§10), so a fixture with an empty input is not a
+    // verification job this door could have queued.
+    tx.insertJob(jobRow(jobId, targetId, "verify", "running", { candidateId, comparatorPolicyId: "exact-http-v1" }));
     return true;
   });
   if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
@@ -434,6 +440,33 @@ function journal(action: string, decision: string): string[] {
   return rows.value
     .filter((entry) => entry.action === action && entry.decision === decision)
     .map((entry) => entry.reasonCode);
+}
+
+// Lifted out of the `request` describe so the completion cases and the request cases read the same
+// rows with the same SQL: two copies of "what does a job row look like here" is two chances to
+// disagree about which column proves the write happened.
+function jobCount(): number {
+  return Number((db.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n);
+}
+
+function verificationCount(): number {
+  return Number((db.prepare("SELECT COUNT(*) AS n FROM verifications").get() as { n: number }).n);
+}
+
+function jobFields(id: string): Record<string, unknown> {
+  const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  if (row === undefined) throw new Error(`no job row ${id}`);
+  return row;
+}
+
+function eventRowsFor(id: string): { type: string; payload_json: string }[] {
+  return db
+    .prepare("SELECT type, payload_json FROM events WHERE aggregate_id = ?")
+    .all(id) as { type: string; payload_json: string }[];
+}
+
+function eventsFor(id: string): string[] {
+  return eventRowsFor(id).map((event) => event.type);
 }
 
 function recordedCount(candidateId: Id): number {
@@ -758,6 +791,149 @@ describe("recording a verification (DESIGN §10)", () => {
     expect(row.value?.currentness).toBe("current");
     expect(row.value?.vectorSetDigest).toBe(storedBefore.report.identities.vectorSetDigest);
   });
+
+  // The completion has to land on a job that exists, that asked for this work, and that may hold a
+  // result (§11: 只有 running 能到 succeeded). Before these cases `jobId` was copied into three rows
+  // while nothing looked it up, and the job an operator queued through §8 line 297 stayed `queued`
+  // even after its verification was recorded - so §8 line 277's 「含持久 resultRef，可恢复构建/验证资源
+  // ID」 was true only for builds.
+  function seedJob(scenario: Scenario, kind: JobRow["kind"], state: JobRow["state"], input: JsonValue): Id {
+    const id = newId();
+    // The scenario's own target: §5 keeps `jobs.target_id` a reference, so a job row that names a
+    // target out of thin air is refused by the store before any gate gets to speak.
+    const inserted = writer.transact((tx) => tx.insertJob(jobRow(id, scenario.targetId, kind, state, input)));
+    if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+    return id;
+  }
+
+  const verifyInputFor = (scenario: Scenario): JsonValue => ({
+    candidateId: scenario.candidateId,
+    comparatorPolicyId: "exact-http-v1",
+  });
+
+  it("records the result onto the job that asked for it, in the same write as the report", async () => {
+    const scenario = await seedScenario("job-bound");
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const row = jobFields(scenario.jobId);
+    expect(row["state"]).toBe("succeeded");
+    // Read back by value: the pointer is the verification this call just returned, which is the whole
+    // reason a client can recover a verification id from the job page at all.
+    expect(row["result_ref"]).toBe(committed.verificationId);
+    // §11 keeps cleanup a separate state: taking a result does not claim the resources were cleaned.
+    expect(row["cleanup_state"]).toBe("pending");
+    const events = eventRowsFor(scenario.jobId);
+    expect(events.length).toBe(1);
+    expect(events[0]?.type).toBe("job.updated");
+    expect(JSON.parse(String(events[0]?.payload_json))).toEqual({
+      resourceIds: [scenario.jobId, committed.verificationId],
+      state: "succeeded",
+    });
+    // The report's own event stays on the verification aggregate - one event per thing that changed.
+    expect(eventsFor(committed.verificationId)).toEqual(["verification.completed"]);
+  });
+
+  it("refuses a completion whose job id is not a job in this project, and writes nothing", async () => {
+    const scenario = await seedScenario("job-unknown");
+    const reports = verificationCount();
+    const jobs = jobCount();
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: newId() })));
+    expect(failure.code).toBe("NOT_FOUND");
+    expect(failure.reason).toBe("verification-job-unknown");
+    expect(verificationCount()).toBe(reports);
+    expect(jobCount()).toBe(jobs);
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+  });
+
+  it("refuses to hang a verification on another kind of work, naming the kind", async () => {
+    const scenario = await seedScenario("job-kind");
+    const captureJob = seedJob(scenario, "capture", "running", {});
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: captureJob })));
+    expect(failure.code).toBe("INVALID_INPUT");
+    expect(failure.reason).toBe("verification-job-kind-mismatch");
+    expect(failure.details["jobKind"]).toBe("capture");
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+    expect(jobFields(captureJob)["state"]).toBe("running");
+  });
+
+  it("names the field that differs when the completion answers a different request", async () => {
+    const asked = await seedScenario("job-request-a");
+    const other = await seedScenario("job-request-b");
+    // A real verify job in the same project - but it was queued for another candidate. §10 has the
+    // worker derive the bound identities from rows it owns, so this is not a free choice of pointer.
+    const crossed = await failureOf(verifications.complete(projectId, evaluator, completionFor(asked, { jobId: other.jobId })));
+    expect(crossed.reason).toBe("verification-job-request-mismatch");
+    expect(crossed.details["fields"]).toEqual(["candidateId"]);
+
+    // The comparator is the other half of the same request. An *installed* name still has to be the one
+    // that was asked for, or the looser policy would be adjudicating a request made under the strict one.
+    const looser = await failureOf(
+      verifications.complete(projectId, evaluator, completionFor(asked, { comparatorPolicyId: "exact-http-normalized-v1" })),
+    );
+    expect(looser.reason).toBe("verification-job-request-mismatch");
+    expect(looser.details["fields"]).toEqual(["comparatorPolicyId"]);
+    expect(recordedCount(asked.candidateId)).toBe(0);
+    expect(recordedCount(other.candidateId)).toBe(0);
+  });
+
+  it("refuses a verify job whose input this door never wrote, rather than reading it as no constraint", async () => {
+    const scenario = await seedScenario("job-blank-input");
+    const handWritten = seedJob(scenario, "verify", "running", {});
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: handWritten })));
+    expect(failure.reason).toBe("verification-job-request-mismatch");
+    expect((failure.details["fields"] as string[]).slice().sort()).toEqual(["candidateId", "comparatorPolicyId"]);
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+  });
+
+  it("will not resurrect a terminal job, and says which state it found (§11)", async () => {
+    const scenario = await seedScenario("job-terminal");
+    const cancelled = seedJob(scenario, "verify", "cancelled", verifyInputFor(scenario));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: cancelled })));
+    expect(failure.code).toBe("REVISION_CONFLICT");
+    expect(failure.reason).toBe("verification-job-terminal");
+    expect(failure.details["jobState"]).toBe("cancelled");
+    expect(recordedCount(scenario.candidateId)).toBe(0);
+    // The refusal did not write over the row it was refusing.
+    expect(jobFields(cancelled)["state"]).toBe("cancelled");
+    expect(jobFields(cancelled)["result_ref"]).toBeNull();
+  });
+
+  it("takes a queued job through running to succeeded in one write (the build door's precedent)", async () => {
+    const scenario = await seedScenario("job-queued");
+    const queued = seedJob(scenario, "verify", "queued", verifyInputFor(scenario));
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario, { jobId: queued })));
+    // §11's diagram has no queued→succeeded edge, so the row is moved through running first by the same
+    // owner (`transition`) the build door uses - `queued` is not a state that holds a result.
+    expect(jobFields(queued)["state"]).toBe("succeeded");
+    expect(jobFields(queued)["result_ref"]).toBe(committed.verificationId);
+  });
+
+  it("refuses a second result on a job that already carries one", async () => {
+    const scenario = await seedScenario("job-twice");
+    const first = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const failure = await failureOf(verifications.complete(projectId, evaluator, completionFor(scenario)));
+    expect(failure.code).toBe("REVISION_CONFLICT");
+    expect(failure.reason).toBe("verification-job-already-completed");
+    expect(recordedCount(scenario.candidateId)).toBe(1);
+    expect(jobFields(scenario.jobId)["result_ref"]).toBe(first.verificationId);
+    expect(eventRowsFor(scenario.jobId).filter((event) => event.type === "job.updated").length).toBe(1);
+  });
+
+  it("reaches the client through the projection the job page reads (§8 line 277)", async () => {
+    const scenario = await seedScenario("job-projection");
+    const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
+    const looked = writer.transact((tx) => {
+      const job = tx.getJob(projectId, scenario.jobId);
+      return job === null ? null : projectJobRecord(job, tx.listLeasesForJobs(projectId, [scenario.jobId]));
+    });
+    if (!looked.ok) throw new Error(JSON.stringify(looked.error));
+    const record = looked.value;
+    if (record === null) throw new Error("the job row vanished");
+    // Not the raw column: the same object `GET /projects/:p/jobs`, `GET .../jobs/:j` and the
+    // `job.updated` frame are all built from, so 「含持久 resultRef，可恢复…验证资源 ID」 is read here
+    // in the shape a browser would actually get.
+    expect(record).toMatchObject({ kind: "verify", state: "succeeded", resultRef: committed.verificationId });
+    expect(record.error).toBeNull();
+  });
 });
 
 describe("the outcome derivation itself (DESIGN §10)", () => {
@@ -848,26 +1024,6 @@ describe("asking for a verification (DESIGN §8 line 297)", async () => {
     comparatorPolicyId: "exact-http-v1",
     ...overrides,
   });
-
-  function jobCount(): number {
-    return Number((db.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n);
-  }
-
-  function verificationCount(): number {
-    return Number((db.prepare("SELECT COUNT(*) AS n FROM verifications").get() as { n: number }).n);
-  }
-
-  function jobFields(id: string): Record<string, unknown> {
-    const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
-    if (row === undefined) throw new Error(`no job row ${id}`);
-    return row;
-  }
-
-  function eventsFor(id: string): string[] {
-    return (db.prepare("SELECT type FROM events WHERE aggregate_id = ?").all(id) as { type: string }[]).map(
-      (event) => event.type,
-    );
-  }
 
   it("queues the work and writes no verdict", async () => {
     const scenario = await seedScenario("request-queued");

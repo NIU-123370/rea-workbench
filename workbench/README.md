@@ -919,9 +919,26 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   `verification-executor-not-installed`——一条已排入 `build` 作业不会让它报警，两件事是不同的缺席。
   completion 体的 schema 是硬门：少字段按缺的名字拒，多带一个 §10 没点名的键（试的是自报结论）按那个
   键名拒；角色门在 schema **之前**，builder 与 inspector 拿到的是自己的理由而不是"体不对"。
-  仍未裁决的两点留在 #75：提交的字节走 staging 还是 RPC body（现在按 `evaluatorCompletionSchema` 的
-  `reportStagingId + reportSha256`，即前者），以及谁把 `queued` 变 `running`（本 build 的答案是"没人"，
-  所以才有上面那格报警）。
+  **这一笔补上的是完成回执与工作行之间的绑定**（issue #75 里"#56 型空缺"那一类：规矩写在唯一持有者里，
+  但非测试的调用方从来没有走过它）。此前 `completion.jobId` 被抄进两条 artifact 与 verification 行，
+  而**没有任何一处去读那行 job**：报告可以把整条来源指向一个从来不是作业的 id，而真正被 §8 line 297 排出来的
+  那一行在完成之后仍是 `queued`、`result_ref` 空着——也就是说 §8 line 277 的「含持久 resultRef，可恢复构建/验证
+  资源 ID」只对 build 成立。现在同一笔事务里按 §11 走：job 不存在 → `verification-job-unknown`；kind 不是
+  verify → `verification-job-kind-mismatch`（带 `jobKind` 这个名字）；那一行自己请求的 candidate 或比较器与回执
+  不一致 → `verification-job-request-mismatch`，**只发字段名不发两边的值**（§12.1），而且
+  `input_json` 读不出这两个名字时算**不匹配**而不是"没有约束"（否则一只手写空行就接受了任何回执）；
+  已经是 `succeeded` → `verification-job-already-completed`（验证行是不可改证据，再跑一次是新请求，不像 build
+  那样允许修复尝试把指针改指下一个 candidate —— **这一条是我按 §11/§5 的语义做的判断，文档没有逐字这么写**）；
+  `cancelled/failed/interrupted/cancelling` → `verification-job-terminal` 带它读到的状态（终态不复活）。
+  放行时 queued 先被同一个 `transition` owner 推到 running 再到 succeeded——**照 `builder-service.ts` 已有的做法**，
+  §11 的图里没有 queued→succeeded 这条边——然后 `result_ref` 写成这次 verification 的 id、`cleanup_state` 原样
+  留着 `pending`（§11 清理是独立状态），并补一条 `job.updated` 事件，`resourceIds` 是 `[作业, 验证]` 两个 id。
+  仍然**没有**的东西不变：没有 evaluator 进程，runner 依旧只认 `build`，所以 `verify` 作业不会自己被人认领；
+  上面那格 doctor 报警照旧。字节走 staging 还是 RPC body 这一条也仍是文档侧的开放问题（本仓按
+  `evaluatorCompletionSchema` 的 `reportStagingId + reportSha256`，即前者）。
+  一处既有的顺序值得知道：报告的 artifact 正文是在事务**之前**发布的（publish-then-commit），所以
+  "回执被门拒了"会留下一份没被任何行引用的正文——这不是这一笔引入的（drift 那条拒绝早就是同一个形状），
+  记在这里是因为我新加的拒绝让这条路更容易被读到。
 - §8 line 275 的**页面把手现在只缺一半，缺的是 capture 那一半**：页面没有任何东西能生成一份
   `BrowserAction` 序列（`click/fill/waitFor` + `Locator`），硬塞一个输入框等于把 §8 的具名动作序列降级成
   自由文本，正是 `tasks.ts` 那份联合要避免的形状——所以那一半在页面上是一句具名说明，不是一个只会吃 400 的按钮。
