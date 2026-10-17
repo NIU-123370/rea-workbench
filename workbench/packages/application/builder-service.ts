@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
-import { digestBytes } from "../domain/canonical-json.ts";
+import { canonicalJson, digestBytes } from "../domain/canonical-json.ts";
 import type { CanonicalLimits, Digest } from "../domain/canonical-json.ts";
 import { asDigest } from "../domain/canonical-json.ts";
-import { newId, nowInstant } from "../domain/identity.ts";
+import { asId, newId, nowInstant } from "../domain/identity.ts";
 import type { Id, Instant } from "../domain/identity.ts";
 import type { JsonObject, JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
 import { builderBlueprintSchema } from "../contracts/blueprint.ts";
+import { candidateRequestSchema } from "../contracts/candidate.ts";
+import type { JobRecord } from "../contracts/jobs.ts";
 import type { BlueprintPayload } from "../domain/blueprint.ts";
 import {
   OPENAPI_VERSION,
@@ -18,11 +20,11 @@ import {
 } from "../domain/openapi.ts";
 import type { CandidateFile, ReviewedOperation } from "../domain/openapi.ts";
 import type { Actor } from "./actor.ts";
-import { isBuilder } from "./actor.ts";
+import { isBuilder, isControlPlane } from "./actor.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, issueNames, type GateFailure } from "./gate-failure.ts";
-import { transition } from "./job-queue.ts";
-import type { ArtifactPort, CandidateRow, JobRow, StorageWriterPort } from "./ports.ts";
+import { computeDeadlineAt, projectJobRecord, transition } from "./job-queue.ts";
+import type { EventDraft, ArtifactPort, CandidateRow, JobRow, StorageWriterPort } from "./ports.ts";
 import type { Err } from "./gate-failure.ts";
 
 // The Builder generation seam (DESIGN §7.3, §10 / PRD F08 A07, issue #19).
@@ -127,6 +129,114 @@ export class BuilderService {
     this.artifacts = deps.artifacts;
     this.limits = deps.limits;
     this.produce = deps.produce ?? (async (handoff, limits) => produceCandidateFiles(handoff, limits));
+  }
+
+  // §8 line 294 from the control plane's side: ask for a generation and get a job. This is the
+  // half that used to be missing (`issue #57`) — the row this writes is the only candidate request
+  // the build knows about, and `generate` below is what runs it.
+  //
+  // Three things are deliberately not parameters:
+  //   - the job id, which `newId()` mints here, because §11's recovery, §12.2's journal and §8's
+  //     idempotency key all assume the worker owns the job it is executing;
+  //   - the attempt budget, which comes from the profile at run time (the caller cannot see it and
+  //     two numbers could then disagree about what "spent" meant);
+  //   - the generator identity, which describes who produced the bytes and is therefore the
+  //     runner's fact, not the requester's.
+  // What the caller *may* name is a deadline, and even that is bounded: an absent one becomes
+  // `queueWaitMs` from the enqueue moment, never later (§11, and `computeDeadlineAt` is its only
+  // owner).
+  request(
+    projectId: Id,
+    actor: Actor,
+    input: unknown,
+    idempotencyKey: string,
+    queue: { queueWaitMs: number },
+  ): Result<JobRecord, GateFailure> {
+    if (!isControlPlane(actor)) {
+      recordDeny(this.storage, {
+        projectId,
+        actor,
+        resourceType: "candidate",
+        action: "candidate.request",
+        resourceId: null,
+        decision: "deny",
+        reasonCode: "role-may-not-request-generation",
+        metadata: {},
+      });
+      return gateFail(
+        "ACCESS_DENIED",
+        "role-may-not-request-generation",
+        "the Builder generates; the control plane asks for work (§7.3)",
+        { actorKind: actor.actorKind },
+      );
+    }
+    const parsed = candidateRequestSchema.safeParse(input);
+    if (!parsed.success) {
+      return gateFail("INVALID_INPUT", "candidate-request", "the generation request was rejected", {
+        fields: parsed.error.issues.map((issue) => issue.path.join(".")),
+        rejectedKeys: parsed.error.issues.flatMap((issue) => (issue as { keys?: string[] }).keys ?? []),
+      });
+    }
+    const requested = parsed.data.deadlineAt ?? null;
+    const committed = commitDecision(this.storage, {
+      projectId,
+      actor,
+      resourceType: "candidate",
+      action: "candidate.request",
+      resourceId: null,
+      allowReason: "build-job-queued",
+      metadata: { blueprintId: parsed.data.blueprintId },
+      work: (tx): Step<JobRecord> => {
+        const blueprint = tx.getBlueprint(projectId, asId(parsed.data.blueprintId));
+        if (blueprint === null) {
+          return { kind: "failure", failure: gateFail("NOT_FOUND", "blueprint-unknown", "no such blueprint in this project") };
+        }
+        const at = nowInstant();
+        const job: JobRow = {
+          id: newId(),
+          projectId,
+          targetId: null,
+          kind: "build",
+          state: "queued",
+          cleanupState: "pending",
+          // The handoff is the whole input (§7.3), so the row that carries the request carries
+          // nothing else about it — no budget, no generator, no job id of the caller's choosing.
+          inputJson: { blueprintId: blueprint.id },
+          resultRef: null,
+          errorJson: null,
+          idempotencyKey,
+          requestDigest: asDigest(
+            digestBytes(new TextEncoder().encode(canonicalJson({ blueprintId: blueprint.id, deadlineAt: requested }, this.limits))),
+          ),
+          deadlineAt: computeDeadlineAt(requested, at, { queueWaitMs: queue.queueWaitMs, retryDelayMs: 0 }),
+          retryAt: null,
+          createdAt: at,
+          updatedAt: at,
+        };
+        const outcome = tx.insertJob(job);
+        if (outcome.outcome === "divergent") {
+          return {
+            kind: "failure",
+            failure: gateFail("IDEMPOTENCY_CONFLICT", "idempotency-key-reused", "that key already carries a different generation request"),
+          };
+        }
+        const row = outcome.outcome === "existing" ? outcome.job : job;
+        // A replay is not a state change: the stream already carried the event the first request
+        // made (§13).
+        if (outcome.outcome !== "existing") {
+          tx.appendEvent({
+            projectId,
+            type: "job.updated",
+            aggregateId: row.id,
+            payloadJson: { resourceIds: [row.id], state: "queued" },
+            createdAt: at,
+          } satisfies EventDraft);
+        }
+        return { kind: "committed", value: projectJobRecord(row, tx.listLeasesForJobs(projectId, [row.id])) };
+      },
+    });
+    if (!committed.ok) return committed;
+    return { ok: true, value: committed.value.value };
   }
 
   async generate(

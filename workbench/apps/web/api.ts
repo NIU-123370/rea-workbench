@@ -19,7 +19,7 @@ import { auditPageSchema } from "../../packages/contracts/audit.ts";
 import { isRelativeDownloadUrl } from "../../packages/domain/export.ts";
 import { healthResponseSchema } from "../../packages/contracts/health.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
-import { candidateFileContentSchema, candidateViewSchema } from "../../packages/contracts/candidate.ts";
+import { candidateFileContentSchema, candidateRequestSchema, candidateViewSchema } from "../../packages/contracts/candidate.ts";
 import { parseStrict } from "../../packages/contracts/parse.ts";
 import type { JsonSchema } from "../../packages/contracts/parse.ts";
 import type { NamedErrorCode } from "../../packages/contracts/errors.ts";
@@ -189,6 +189,10 @@ const ROUTES: readonly RouteSpec[] = [
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/jobs/:jobId/cleanup-retry`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   // The candidate file read (§8 lines 295-296 / issue #19). Two GETs, both session-bound:  // the first lists the files a candidate published, the second returns one file's content
   // selected by manifest file id. Neither takes a path.
+  // §8 line 294: asking for a generation. It is a creation, so it carries the key, and its body is
+  // the whole of what a caller may name - a blueprint and at most a deadline. The job id, the
+  // attempt budget and the generator identity are the worker's (§11, §7.3, issue #57).
+  { method: "POST", template: `${API_PREFIX}/projects/:projectId/candidates`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/projects/:projectId/candidates/:candidateId/files/:fileId`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
   // Delivery (§8 lines 299-300 / issue #22). The POST creates a *new* package rather than
@@ -786,6 +790,15 @@ const COMMIT_PROJECTIONS = {
     reason: "verification-request-shape",
     message: "the worker did not answer with a queued verification job",
   },
+  // §8 line 294's 202 body is the same JobRecord shape, and it is the same row: the build job this
+  // request writes is what the runner later settles, so the answer and the read-back are one
+  // projection with two readers.
+  candidate: {
+    fields: ["id", "kind", "state", "cleanupState", "deadlineAt", "retryAt", "cleanupRetryAt", "resultRef", "error"],
+    schema: jobRecordSchema,
+    reason: "candidate-request-shape",
+    message: "the worker did not answer with a queued build job",
+  },
   // §8 line 272's 202 body is `{targetId,job}` and nothing else. The worker's receipt also names
   // the lease and the source artifact it minted; those are real, but this route's third column
   // does not list them, so they stay on the service side instead of becoming an undocumented answer.
@@ -956,6 +969,32 @@ async function requestVerification(ctx: Context, deps: ApiDependencies, key: str
     payload: { projectId, idempotencyKey: key, request },
     body: request,
     projection: COMMIT_PROJECTIONS.verification,
+    status: 202,
+  });
+}
+
+// §8 line 294 from the browser's side. The body is `candidateRequestSchema` - a blueprint id and at
+// most a deadline - and everything the old `candidate.generate` command used to take from the
+// caller is gone with it: the job id, the attempt budget and the generator identity are facts the
+// worker owns (issue #57), so this door has no field for them and a request that brings one is
+// refused by name rather than honoured.
+async function requestCandidate(ctx: Context, deps: ApiDependencies, key: string): Promise<ApiResponse> {
+  const projectId = projectFromPath(ctx);
+  if (projectId === null) return unknownProject(ctx);
+  const body = readJsonBody(ctx);
+  if (!body.ok) return body.response;
+  const parsed = parseStrict(candidateRequestSchema, body.value);
+  if (!parsed.ok) return invalidBody(ctx, "the generation request does not match the named schema", parsed.error);
+  const request: Record<string, JsonValue> = { blueprintId: parsed.value.blueprintId };
+  if (parsed.value.deadlineAt !== undefined) request.deadlineAt = parsed.value.deadlineAt;
+  return commitCreation(ctx, deps, {
+    key,
+    scope: `${API_PREFIX}/projects/${String(projectId)}/candidates`,
+    template: `${API_PREFIX}/projects/:projectId/candidates`,
+    command: "candidate.request",
+    payload: { projectId, idempotencyKey: key, request },
+    body: request,
+    projection: COMMIT_PROJECTIONS.candidate,
     status: 202,
   });
 }
@@ -1596,6 +1635,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       response = await createPlan(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/verifications`) {
       response = await requestVerification(ctx, deps, request.headers["idempotency-key"] as string);
+    } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/candidates`) {
+      response = await requestCandidate(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template === `${API_PREFIX}/projects/:projectId/imports`) {
       response = await importCapture(ctx, deps, request.headers["idempotency-key"] as string);
     } else if (route.method === "POST" && route.template.endsWith("/cancel")) {

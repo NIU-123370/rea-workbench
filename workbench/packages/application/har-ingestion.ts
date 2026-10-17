@@ -5,7 +5,7 @@ import { asId, isReaEvidenceId, newId, nowInstant } from "../domain/identity.ts"
 import type { Id } from "../domain/identity.ts";
 import type { JsonValue } from "../domain/json-value.ts";
 import type { Result } from "../domain/result.ts";
-import { projectJobRecord, transition } from "./job-queue.ts";
+import { jobErrorFromFailure, projectJobRecord, transition } from "./job-queue.ts";
 import { harImportCommandSchema, inspectionCommandSchema } from "../contracts/imports.ts";
 import type { HarImportReceipt, InspectionReceipt } from "../contracts/imports.ts";
 import { reaEvidenceSchema } from "../contracts/rea-evidence.ts";
@@ -446,7 +446,10 @@ export class HarIngestionService {
         const updated: JobRow = {
           ...job,
           state: "failed",
-          errorJson: { code: "RESOURCE_CONSTRAINT_REFERENCE", reason: outcome.reason },
+          // §9 item 7's stop is a resource constraint, so it reports under §8's own code for one and
+          // keeps the service's reason in `message`; the column is read back as a JobRecord, and a
+          // shape only this file knows would make the whole job page refuse to parse.
+          errorJson: jobErrorFromFailure(job, { code: "RESOURCE_LIMIT", reason: "resource-constraint-reference-retained" }),
           updatedAt: nowInstant(),
         };
         tx.updateJob(updated);
@@ -501,7 +504,7 @@ export class HarIngestionService {
         tx.updateJob({
           ...job,
           state: "failed",
-          errorJson: { code: outcome.code, reason: outcome.reason },
+          errorJson: jobErrorFromFailure(job, outcome),
           updatedAt: nowInstant(),
         });
         const lease = tx.getLeaseByJob(projectId, job.id);

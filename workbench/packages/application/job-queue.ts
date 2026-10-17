@@ -1,7 +1,10 @@
+import { httpStatusFor, isNamedErrorCode, makeApiError, safeFailureDetails } from "../contracts/errors.ts";
+import type { NamedErrorCode } from "../contracts/errors.ts";
 import { canTransitionJob, isTerminalJobState } from "../contracts/jobs.ts";
 import type { JobRecord, JobState } from "../contracts/jobs.ts";
 import { instantToEpochMs } from "../domain/identity.ts";
 import type { Instant } from "../domain/identity.ts";
+import type { JsonValue, JsonObject } from "../domain/json-value.ts";
 import type { LeaseRow, JobRow } from "./ports.ts";
 
 // DESIGN §11 / D20: job lifecycle and resource cleanup are separate facts. The
@@ -112,4 +115,29 @@ export function projectJobRecord(job: JobRow, leases: readonly LeaseRow[]): JobR
     resultRef: job.resultRef,
     error: job.errorJson === null ? null : (job.errorJson as JobRecord["error"]),
   };
+}
+
+// What a stored job failure looks like when it is read back (§8's JobRecord.error). Whoever settles
+// a job - the runner, or the ingestion service that stops on a retained reference - writes through
+// this one function, because the column is read by `projectJobRecord` and validated by
+// `jobRecordSchema`: a row whose error is `{code, reason}` instead of an ApiError does not read as a
+// failed job, it makes every page of that project's jobs refuse to parse.
+//
+// The message is the service's own sentence, never caller text, and the details go through the
+// declared name list (§12.1). `requestId` is the idempotency key - the name the request that made
+// this job already carries. A code that is not in §8's table stays reportable as the one name that
+// means "an upstream answer did not fit the contract", rather than inventing a status.
+export function jobErrorFromFailure(
+  job: JobRow,
+  failure: { code: string; reason: string; details?: JsonObject },
+): JsonValue {
+  const code: NamedErrorCode = isNamedErrorCode(failure.code) ? failure.code : "REA_CONTRACT_MISMATCH";
+  return makeApiError(code, {
+    message: failure.reason,
+    // The status table is the only owner of "is this worth asking again": a 5xx class is an
+    // infrastructure answer that may change, a 4xx will refuse the same way next time.
+    retryable: httpStatusFor(code) >= 500,
+    details: safeFailureDetails(failure.details ?? {}),
+    requestId: job.idempotencyKey,
+  }) as unknown as JsonValue;
 }

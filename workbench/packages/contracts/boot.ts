@@ -52,6 +52,12 @@ export const profileLimitsSchema = z.strictObject({
   maxExpandedBytes: z.int().positive(),
   queueWaitMs: z.int().positive(),
   timeoutMs: z.int().positive(),
+  // §7.3 says the Builder's repair loop has an explicit count budget and stops when it is spent;
+  // §14 says the number comes from a measured profile and §10 forbids "keep repairing until
+  // green". So it is a profile field with no in-code default: a profile that does not state it is
+  // unavailable, and generation is refused by name rather than run on a number someone found
+  // plausible (`issue #57`).
+  maxGenerationAttempts: z.int().min(1),
 });
 
 // An explicit profile is the only source of resource numbers: the runtime never

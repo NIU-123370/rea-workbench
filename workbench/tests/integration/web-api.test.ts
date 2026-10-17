@@ -3573,3 +3573,114 @@ describe("the import door (§8 line 272 / issue #58)", () => {
     expect(unknownProject.status, unknownProject.text).toBe(404);
   });
 });
+
+// §8 line 294 over HTTP (issue #57). This rig declares no model endpoint, so the happy path is the
+// worker's own integration file and what is proved here is the door: §14's gate order in front of it,
+// a body that cannot carry the worker's facts, and the capability refusal arriving as the named 503
+// rather than as a 202 with an invented job or a 404 with a swallowed reason.
+describe("the generation door (§8 line 294 / issue #57)", () => {
+  const host = () => `127.0.0.1:${String(address.port)}`;
+  type Session = { cookie: string; csrf: string };
+
+  async function pairSession(): Promise<Session> {
+    const code = worker.mintPairingCode();
+    const paired = await call("POST", `${API_PREFIX}/session`, {
+      body: JSON.stringify({ bootstrapToken: code.token }),
+      headers: { host: host(), origin: `http://${host()}` },
+    });
+    expect(paired.status, paired.text).toBe(201);
+    const issued = JSON.parse(paired.text) as { csrfToken?: string; data?: { csrfToken?: string } };
+    const cookie = (paired.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+    return { cookie, csrf: issued.data?.csrfToken ?? issued.csrfToken ?? "" };
+  }
+
+  async function freshProject(session: Session, name: string): Promise<Id> {
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        host: host(),
+        origin: `http://${host()}`,
+        cookie: session.cookie,
+        "x-csrf-token": session.csrf,
+        "idempotency-key": `create-project-${name}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(created.status, created.text).toBe(201);
+    const body = JSON.parse(created.text) as { id?: string; data?: { id: string } };
+    return asId((body.data?.id ?? body.id) as string);
+  }
+
+  function door(projectId: Id): string {
+    return `${API_PREFIX}/projects/${String(projectId)}/candidates`;
+  }
+
+  function ask(session: Session, projectId: Id, payload: JsonValue, key: string | null) {
+    const headers: Record<string, string> = {
+      host: host(),
+      origin: `http://${host()}`,
+      cookie: session.cookie,
+      "content-type": "application/json",
+      "x-csrf-token": session.csrf,
+    };
+    if (key !== null) headers["idempotency-key"] = key;
+    return call("POST", door(projectId), { body: JSON.stringify(payload), headers });
+  }
+
+  function refusal(text: string): { code: string; message: string; details: Record<string, unknown> } {
+    return (JSON.parse(text) as { error: { code: string; message: string; details: Record<string, unknown> } }).error;
+  }
+
+  it("answers the anonymous, the wrong-origin and the unkeyed before anything is read", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "generate-gates");
+
+    const anonymous = await call("POST", door(projectId), {
+      body: JSON.stringify({ blueprintId: newId() }),
+      headers: { host: host(), origin: `http://${host()}`, "content-type": "application/json", "idempotency-key": "generate-key-1" },
+    });
+    expect(anonymous.status, anonymous.text).toBe(401);
+
+    const noCsrf = await call("POST", door(projectId), {
+      body: JSON.stringify({ blueprintId: newId() }),
+      headers: { host: host(), origin: `http://${host()}`, cookie: session.cookie, "content-type": "application/json", "idempotency-key": "generate-key-2" },
+    });
+    expect(noCsrf.status, noCsrf.text).toBe(403);
+
+    const noKey = await ask(session, projectId, { blueprintId: newId() }, null);
+    expect(noKey.status, noKey.text).toBe(400);
+    expect(refusal(noKey.text).details["reason"]).toBe("idempotency-key-required");
+  });
+
+  it("refuses a body that names the facts the worker owns, and names what it rejected", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "generate-shape");
+    const forged = await ask(session, projectId, { blueprintId: newId(), jobId: newId(), budget: { maxAttemptsPerBlueprint: 4 } }, "generate-key-3");
+    expect(forged.status, forged.text).toBe(400);
+    const details = JSON.stringify(refusal(forged.text).details);
+    expect(details).toContain("jobId");
+    expect(details).toContain("budget");
+  });
+
+  it("keeps a malformed deadline out of the worker and reports the field", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "generate-deadline");
+    const malformed = await ask(session, projectId, { blueprintId: newId(), deadlineAt: "tomorrow-ish" }, "generate-key-4");
+    expect(malformed.status, malformed.text).toBe(400);
+    expect(JSON.stringify(refusal(malformed.text).details)).toContain("deadlineAt");
+  });
+
+  it("relays the deployment's own capability refusal instead of inventing a job", async () => {
+    const session = await pairSession();
+    const projectId = await freshProject(session, "generate-off");
+    const asked = await ask(session, projectId, { blueprintId: newId() }, "generate-key-5");
+    expect(asked.status, asked.text).toBe(503);
+    expect(refusal(asked.text).details["reason"]).toBe("generation-endpoint-not-configured");
+    // Nothing was created: the project's job page is still empty, so a refusal cannot leave a
+    // half-made row behind (§10: 一次请求不产出结论，被拒的请求连作业都不排).
+    const page = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/jobs`, { headers: { host: host(), cookie: session.cookie } });
+    expect(page.status, page.text).toBe(200);
+    const listed = (JSON.parse(page.text) as { data?: { items?: unknown[] } }).data ?? (JSON.parse(page.text) as { items?: unknown[] });
+    expect(listed.items ?? []).toEqual([]);
+  });
+});
