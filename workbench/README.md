@@ -933,9 +933,22 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   放行时 queued 先被同一个 `transition` owner 推到 running 再到 succeeded——**照 `builder-service.ts` 已有的做法**，
   §11 的图里没有 queued→succeeded 这条边——然后 `result_ref` 写成这次 verification 的 id、`cleanup_state` 原样
   留着 `pending`（§11 清理是独立状态），并补一条 `job.updated` 事件，`resourceIds` 是 `[作业, 验证]` 两个 id。
-  仍然**没有**的东西不变：没有 evaluator 进程，runner 依旧只认 `build`，所以 `verify` 作业不会自己被人认领；
-  上面那格 doctor 报警照旧。字节走 staging 还是 RPC body 这一条也仍是文档侧的开放问题（本仓按
-  `evaluatorCompletionSchema` 的 `reportStagingId + reportSha256`，即前者）。
+  **`verification.claim` 是 #75 的认领那半**（PR 见下）：§11 说 `queued` 只能去 failed/cancelled，
+  结果只有 `running` 能拿——所以在没有容器、也没有 evaluator 进程的 build 里，这条具名命令就是
+  `verify` 行离开 `queued` 的唯一去路，而它的角色门只认 evaluator（§7.3：控制面**请求**作业，evaluator
+  **做**作业；所以 inspector 拿到的是"你不是那个角色"，不是"队列空"）。
+  三种答案，不是两种形状：`claimed`（作业 + 它绑定的 candidate/blueprint/plan/target/snapshot/比较器，
+  全是 id 与摘要，**没有任何字段能承载结论**）、`idle`（本项目没有排队的工作——这是一个答案，不是错误，
+  而且**不写日志**：evaluator 是轮询的，一次没活可干不构成一次权限裁决，§12.2 记的是 allow/deny），
+  以及 `failed`（那一行自己的 `deadlineAt` 已经过了：§11 要求它落到 failed 并保存明确错误，
+  所以这一笔是**提交**后再回答，而不是把拒绝抛出去让事务回滚——后者会让一个过期作业永远 `queued` 地被拒下去）。
+  扫描沿 `decideStart` 与 `transition` 这两个既有 owner（不在这里再造一个时钟或一条状态表），
+  并且限定项目 + kind；bind 不回来的行（candidate/blueprint 已经不在了）**留在 queued** 并被具名拒绝，
+  因为一个 evaluator 拿到却无法执行的 running 行就是"看起来开始跑了"的假象。
+  仍然**没有**的东西不变：没有 evaluator 进程来调用这扇门，runner 依旧只认 `build`，所以今天
+  没有任何非测试的发起方会把 `verify` 作业认领走；上面那格 doctor 报警照旧，它说的正是"进程不在"。
+  字节走 staging 还是 RPC body 这一条也仍是文档侧的开放问题（本仓按 `evaluatorCompletionSchema` 的
+  `reportStagingId + reportSha256`，即前者）。
   一处既有的顺序值得知道：报告的 artifact 正文是在事务**之前**发布的（publish-then-commit），所以
   "回执被门拒了"会留下一份没被任何行引用的正文——这不是这一笔引入的（drift 那条拒绝早就是同一个形状），
   记在这里是因为我新加的拒绝让这条路更容易被读到。

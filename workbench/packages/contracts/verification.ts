@@ -9,6 +9,7 @@ import { z } from "zod";
 // into (§10: 候选 stdout 中的 PASS、伪造报告与自报请求均无权成为验证依据).
 
 import { digestSchema, idSchema, instantSchema, nonEmptyString } from "./primitives.ts";
+import { jobRecordSchema } from "./jobs.ts";
 import { CASE_STATES } from "../domain/report.ts";
 
 // §10: method, encoded path, repeated query and body bytes are exact by default.
@@ -187,6 +188,55 @@ export const verificationRowSchema = z.strictObject({
 });
 
 export type VerificationRow = z.infer<typeof verificationRowSchema>;
+
+// §10's other named RPC on the worker's private socket: the evaluator asks which verify job it is to
+// run, and the worker moves that row `queued → running` under §11's owner. There is deliberately no
+// §8 route for either half of this exchange — an evaluator is not a browser (§14: a peer-identity
+// checked socket submits named commands, never SQL).
+//
+// The answer carries the rows the job is bound to, because "the next verification" is not actionable
+// without them: whose candidate bytes, against which frozen blueprint and plan, on which target and
+// snapshot, under which named comparator the control plane chose. Identifiers and digests only — no
+// source, no holdout value, no host path (§12.1) — and **no verdict field anywhere in this shape**,
+// which is §10's rule that the door cannot state an outcome.
+export const verificationClaimRequestSchema = z.strictObject({
+  // Optional: an evaluator launched for one candidate may ask only for that one.
+  candidateId: idSchema.optional(),
+});
+
+export const verificationWorkSchema = z.strictObject({
+  candidateId: idSchema,
+  candidateDigest: digestSchema,
+  blueprintId: idSchema,
+  planId: idSchema,
+  targetId: idSchema,
+  snapshotDigest: digestSchema,
+  comparatorPolicyId: nonEmptyString,
+});
+
+// Three outcomes, not two shapes of the same object, because the claim has a third honest answer: it
+// started something, there was nothing to start, or the row it found could not be started and is now
+// `failed` (§11: 达到 deadlineAt 仍未启动，则 queued→failed，保存明确错误). Collapsing that last one into an
+// error would roll the row back and leave it `queued` to be refused again forever; collapsing it into
+// `idle` would hide that a job died. Same reasoning as the runner's `RunnerOutcome`: a turn that
+// finished is an outcome, and only a port failure is an `err`.
+export const verificationClaimSchema = z.discriminatedUnion("state", [
+  z.strictObject({
+    state: z.literal("claimed"),
+    job: jobRecordSchema,
+    work: verificationWorkSchema,
+  }),
+  z.strictObject({ state: z.literal("idle") }),
+  z.strictObject({
+    state: z.literal("failed"),
+    job: jobRecordSchema,
+    // A reason *code*, §8.1's vocabulary: what stopped the start, not a body of text about it.
+    reasonCode: nonEmptyString,
+  }),
+]);
+
+export type VerificationClaimWire = z.infer<typeof verificationClaimSchema>;
+export type VerificationWorkWire = z.infer<typeof verificationWorkSchema>;
 
 // The Builder-facing projection (§10: 只给契约级类别和安全 diff). Case ids and
 // their states stay; holdout entries and the policy internals do not, and there

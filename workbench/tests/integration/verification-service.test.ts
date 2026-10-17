@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { asDigest, canonicalJson } from "../../packages/domain/canonical-json.ts";
 import type { Digest } from "../../packages/domain/canonical-json.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
+import type { Instant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { vectorDigest, vectorDigestInput } from "../../packages/domain/vector.ts";
@@ -445,6 +446,21 @@ function journal(action: string, decision: string): string[] {
 // Lifted out of the `request` describe so the completion cases and the request cases read the same
 // rows with the same SQL: two copies of "what does a job row look like here" is two chances to
 // disagree about which column proves the write happened.
+// Shared by the completion cases and the claim cases: a job row that names a target out of thin air is
+// refused by §5's foreign key before any gate gets to speak, so both need the scenario's own target.
+function seedJob(scenario: Scenario, kind: JobRow["kind"], state: JobRow["state"], input: JsonValue): Id {
+  const id = newId();
+  const inserted = writer.transact((tx) => tx.insertJob(jobRow(id, scenario.targetId, kind, state, input)));
+  if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+  return id;
+}
+
+// What `verification.request` really writes into `input_json` - the two fields the completion and the
+// claim are bound to.
+function verifyInputFor(scenario: Scenario): JsonValue {
+  return { candidateId: scenario.candidateId, comparatorPolicyId: "exact-http-v1" };
+}
+
 function jobCount(): number {
   return Number((db.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n);
 }
@@ -463,6 +479,10 @@ function eventRowsFor(id: string): { type: string; payload_json: string }[] {
   return db
     .prepare("SELECT type, payload_json FROM events WHERE aggregate_id = ?")
     .all(id) as { type: string; payload_json: string }[];
+}
+
+function projectEventCount(): number {
+  return Number((db.prepare("SELECT COUNT(*) AS n FROM events WHERE project_id = ?").get(projectId) as { n: number }).n);
 }
 
 function eventsFor(id: string): string[] {
@@ -797,20 +817,6 @@ describe("recording a verification (DESIGN §10)", () => {
   // while nothing looked it up, and the job an operator queued through §8 line 297 stayed `queued`
   // even after its verification was recorded - so §8 line 277's 「含持久 resultRef，可恢复构建/验证资源
   // ID」 was true only for builds.
-  function seedJob(scenario: Scenario, kind: JobRow["kind"], state: JobRow["state"], input: JsonValue): Id {
-    const id = newId();
-    // The scenario's own target: §5 keeps `jobs.target_id` a reference, so a job row that names a
-    // target out of thin air is refused by the store before any gate gets to speak.
-    const inserted = writer.transact((tx) => tx.insertJob(jobRow(id, scenario.targetId, kind, state, input)));
-    if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
-    return id;
-  }
-
-  const verifyInputFor = (scenario: Scenario): JsonValue => ({
-    candidateId: scenario.candidateId,
-    comparatorPolicyId: "exact-http-v1",
-  });
-
   it("records the result onto the job that asked for it, in the same write as the report", async () => {
     const scenario = await seedScenario("job-bound");
     const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
@@ -1132,5 +1138,185 @@ describe("asking for a verification (DESIGN §8 line 297)", async () => {
     expect(failure.reason).toBe("verification-request");
     expect(JSON.stringify(failure.details)).toContain("comparatorCode");
     expect(jobCount()).toBe(jobs);
+  });
+});
+
+// §10's claim door: who may start a verify job, and what a start is allowed to say. The completion
+// (#95) made a result bind to its job; this is the other end of §11's path - `queued → running` - and
+// in a build that ships neither a container runner nor an evaluator process, it is the only way a
+// `verify` row ever leaves `queued`.
+describe("claiming a verification job (DESIGN §10, §11, issue #75)", () => {
+  function queuedVerifyJob(scenario: Scenario, deadline: Instant | null = null): Id {
+    const id = newId();
+    const row = { ...jobRow(id, scenario.targetId, "verify", "queued", verifyInputFor(scenario)) };
+    if (deadline !== null) row.deadlineAt = deadline;
+    const created = writer.transact((tx) => tx.insertJob(row));
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    return id;
+  }
+
+  it("starts the next queued job and names the rows it is bound to - without stating a result", async () => {
+    const scenario = await seedScenario("claim-start");
+    const jobId = queuedVerifyJob(scenario);
+    const records = verificationCount();
+
+    const claimed = unwrap(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId }));
+    expect(claimed.state).toBe("claimed");
+    if (claimed.state !== "claimed") return;
+    expect(claimed.job.id).toBe(jobId);
+    // The row is what a start looks like: running, no result, cleanup untouched (§11 keeps them apart).
+    expect(claimed.job.state).toBe("running");
+    expect(claimed.job.resultRef).toBeNull();
+    expect(jobFields(jobId)["state"]).toBe("running");
+    expect(jobFields(jobId)["result_ref"]).toBeNull();
+    expect(jobFields(jobId)["cleanup_state"]).toBe("pending");
+
+    // Every field read back by value from the rows the worker owns, so "here is your work" means this
+    // candidate, this frozen blueprint, this plan, this snapshot - not a shape that merely fits.
+    expect(claimed.work).toEqual({
+      candidateId: scenario.candidateId,
+      candidateDigest: scenario.candidateDigest,
+      blueprintId: scenario.blueprintId,
+      planId: scenario.planId,
+      targetId: scenario.targetId,
+      snapshotDigest: scenario.snapshotDigest,
+      comparatorPolicyId: "exact-http-v1",
+    });
+
+    const events = eventRowsFor(jobId);
+    expect(events.map((event) => event.type)).toEqual(["job.updated"]);
+    expect(JSON.parse(String(events[0]?.payload_json))).toEqual({ resourceIds: [jobId], state: "running" });
+    // Newest-entry and delta, not emptiness: every test in this file shares one project, and the audit
+    // trail is per project, so "no deny wrote anything" is what is provable here - not "none ever did".
+    expect(journal("verification.claim", "allow").at(-1)).toBe("verify-job-running");
+    expect(journal("verification.claim", "deny")).toEqual([]);
+    // And the answer crosses the socket as the contract says it may: no field in this shape can carry
+    // an outcome, so a claim cannot report a PASS even by accident.
+    expect(JSON.stringify(claimed)).not.toContain("PASS");
+    expect(verificationCount()).toBe(records);
+  });
+
+  it("an empty queue is an answer that writes nothing", async () => {
+    const scenario = await seedScenario("claim-idle");
+    const jobs = jobCount();
+    const events = projectEventCount();
+    // The journal is per project and other claims in this file have already written to it, so what an
+    // idle answer must not do is add to it - measured as a delta, not as emptiness.
+    const allowed = journal("verification.claim", "allow").length;
+    const denied = journal("verification.claim", "deny").length;
+
+    const idle = unwrap(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId }));
+    expect(idle).toEqual({ state: "idle" });
+    expect(jobCount()).toBe(jobs);
+    // The whole project's outbox, not one aggregate's: an empty answer must not write a frame about
+    // somebody else's job either, and a per-row count could not see that.
+    expect(projectEventCount()).toBe(events);
+    // A poll that found nothing decides nothing about anyone's permission, so §12.2's allow/deny journal
+    // does not move: an evaluator polling every second must not be able to fill the audit trail.
+    expect(journal("verification.claim", "allow").length).toBe(allowed);
+    expect(journal("verification.claim", "deny").length).toBe(denied);
+  });
+
+  it("keeps every other role out of the queue, before looking at it", async () => {
+    const scenario = await seedScenario("claim-roles");
+    const jobId = queuedVerifyJob(scenario);
+
+    const asBuilder = await failureOf(verifications.claim(projectId, builder, {}));
+    expect(asBuilder.code).toBe("ACCESS_DENIED");
+    expect(asBuilder.reason).toBe("builder-may-not-claim-a-verification");
+
+    // The control plane asked for this work; it does not run it (§7.3's split between requesting and
+    // comparing), so an inspector reaching the name is refused for the role, not for the body.
+    const asInspector = await failureOf(verifications.claim(projectId, inspector, { candidateId: scenario.candidateId }));
+    expect(asInspector.reason).toBe("only-the-evaluator-claims-a-verification");
+    expect(jobFields(jobId)["state"]).toBe("queued");
+  });
+
+  it("refuses a body that names anything §10 does not, by name", async () => {
+    const scenario = await seedScenario("claim-shape");
+    queuedVerifyJob(scenario);
+    const failure = await failureOf(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId, maxAttempts: 3 }));
+    expect(failure.code).toBe("INVALID_INPUT");
+    expect(failure.reason).toBe("verification-claim");
+    expect(JSON.stringify(failure.details)).toContain("maxAttempts");
+    // The extra key is refused *and* nothing started: the queue is unchanged.
+    expect(jobFields(scenario.jobId)["state"]).toBe("running");
+    expect(jobCount()).toBe(jobCount());
+  });
+
+  it("does not hand the same running job out twice", async () => {
+    const scenario = await seedScenario("claim-once");
+    const jobId = queuedVerifyJob(scenario);
+    const first = unwrap(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId }));
+    expect(first.state).toBe("claimed");
+
+    const second = unwrap(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId }));
+    // `running` is not claimable, and the scan asks only for `queued` - so the second evaluator gets
+    // "nothing for you" rather than a job that is already being worked.
+    expect(second).toEqual({ state: "idle" });
+    expect(jobFields(jobId)["state"]).toBe("running");
+    expect(eventRowsFor(jobId).filter((event) => event.type === "job.updated").length).toBe(1);
+  });
+
+  it("narrows the queue to one candidate when the evaluator asks that way", async () => {
+    const wanted = await seedScenario("claim-narrow-a");
+    const other = await seedScenario("claim-narrow-b");
+    const wantedJob = queuedVerifyJob(wanted);
+    const otherJob = queuedVerifyJob(other);
+
+    const claimed = unwrap(await verifications.claim(projectId, evaluator, { candidateId: wanted.candidateId }));
+    expect(claimed.state).toBe("claimed");
+    if (claimed.state !== "claimed") return;
+    expect(claimed.job.id).toBe(wantedJob);
+    expect(jobFields(otherJob)["state"]).toBe("queued");
+
+    // And the row it picked is the one whose own request named that candidate, not a row that happens
+    // to be first in the scan.
+    const next = unwrap(await verifications.claim(projectId, evaluator, { candidateId: other.candidateId }));
+    expect(next.state).toBe("claimed");
+    if (next.state !== "claimed") return;
+    expect(next.job.id).toBe(otherJob);
+  });
+
+  it("fails a job whose deadline has passed instead of starting it, and keeps that failure", async () => {
+    const scenario = await seedScenario("claim-deadline");
+    const jobId = queuedVerifyJob(scenario, "2020-01-01T00:00:00.000Z" as Instant);
+
+    const answer = unwrap(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId }));
+    expect(answer.state).toBe("failed");
+    if (answer.state !== "failed") return;
+    expect(answer.reasonCode).toBe("deadline-expired");
+    expect(answer.job.state).toBe("failed");
+    // §11's 保存明确错误: the row says what stopped it, and no result pointer rode along.
+    expect(String(jobFields(jobId)["error_json"])).toContain("deadline-expired");
+    expect(jobFields(jobId)["result_ref"]).toBeNull();
+    const events = eventRowsFor(jobId);
+    expect(events.map((event) => event.type)).toEqual(["job.updated"]);
+    expect(JSON.parse(String(events[0]?.payload_json))).toEqual({ resourceIds: [jobId], state: "failed", reasonCode: "deadline-expired" });
+    expect(journal("verification.claim", "allow")).toContain("verify-job-not-started");
+
+    // It is not offered again either: a terminal row is not work.
+    const after = unwrap(verifications.claim(projectId, evaluator, { candidateId: scenario.candidateId }));
+    expect(after).toEqual({ state: "idle" });
+  });
+
+  it("refuses to start a job whose binding no longer resolves, and leaves the row queued", async () => {
+    const scenario = await seedScenario("claim-binding-gone");
+    // A valid id of a candidate this project does not have: the row names work that cannot be run.
+    const bogus = newId();
+    const jobId = queuedVerifyJob({ ...scenario, candidateId: bogus } as Scenario);
+    const allowed = journal("verification.claim", "allow").length;
+
+    const failure = await failureOf(verifications.claim(projectId, evaluator, { candidateId: bogus }));
+    expect(failure.code).toBe("NOT_FOUND");
+    expect(failure.reason).toBe("verification-claim-candidate-unknown");
+    // The transition is rolled back with the refusal - a `running` job the evaluator cannot act on would
+    // be a claim that lied about having started work.
+    expect(jobFields(jobId)["state"]).toBe("queued");
+    expect(eventRowsFor(jobId)).toEqual([]);
+    // Nothing was started, so no allow was written - measured as a delta because the project's trail
+    // already holds allows from the cases above.
+    expect(journal("verification.claim", "allow").length).toBe(allowed);
+    expect(journal("verification.claim", "deny")).toContain("verification-claim-candidate-unknown");
   });
 });
