@@ -105,6 +105,34 @@ type RouteSpec = {
   requiresIdempotencyKey: boolean;
 };
 
+// Which query names a route may carry, and what to say about the ones it may not (§8's rows, issue #63).
+//
+// Before this map existed, a query parameter this API does not implement was **dropped in silence**:
+// `GET /projects/:p/vectors?visibility=public` answered with the whole unfiltered page, which is the
+// same failure §14 already forbids for `limit=1.5` (a request that reads as satisfied when it was
+// never looked at). The four filter fields that used to sit unused in `contracts/vectors.ts` were the
+// contract-side half of the same mistake, and they are gone now: §8's row for that route names three
+// slots, so three is what it takes.
+//
+// Two entries carry a deviation, each said out loud rather than smoothed over:
+//   * the graph read also takes `targetId`, which §8 line 280 does not list but the worker's
+//     `graphReadRequestSchema` implements (and the reply names which target it chose);
+//   * `afterRevision` is §8 line 280's own slot with **no implementation behind it** in this build, so
+//     asking for it is refused by name instead of being answered with an unfiltered graph.
+const ROUTE_QUERY: Readonly<Record<string, { names: readonly string[]; refusal: string }>> = {
+  "GET /projects": { names: ["cursor", "limit"], refusal: "projects-query-unknown" },
+  "GET /projects/:projectId/jobs": { names: ["cursor", "limit"], refusal: "jobs-query-unknown" },
+  "GET /projects/:projectId/vectors": { names: ["targetId", "cursor", "limit"], refusal: "vectors-query-unknown" },
+  "GET /projects/:projectId/graph": { names: ["targetId"], refusal: "graph-query-unknown" },
+  "GET /projects/:projectId/audit": { names: ["after", "limit"], refusal: "audit-query-unknown" },
+  "GET /audit": { names: ["after", "limit"], refusal: "audit-query-unknown" },
+  "GET /projects/:projectId/events": { names: ["after"], refusal: "events-query-unknown" },
+};
+
+// Every other route - including all the POSTs, whose bodies are strict-parsed field by field - accepts
+// no query parameter at all, so an empty list is the rule and not an oversight.
+const NO_QUERY: { names: readonly string[]; refusal: string } = { names: [], refusal: "query-not-accepted" };
+
 const ROUTES: readonly RouteSpec[] = [
   { method: "POST", template: `${API_PREFIX}/session`, mutating: false, requiresSession: false, requiresIdempotencyKey: false },
   { method: "GET", template: `${API_PREFIX}/session`, mutating: false, requiresSession: true, requiresIdempotencyKey: false },
@@ -1699,6 +1727,25 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     //    presence). One owner now, validating the shape §8 line 261 assumes.
     if (route.requiresIdempotencyKey && !isIdempotencyKey(request.headers["idempotency-key"])) {
       const response = refused(requestId, "INVALID_INPUT", "idempotency-key-required", "this creation needs an Idempotency-Key header", declaration);
+      record(routeName, response.status, session === null ? "anonymous" : "paired");
+      return response;
+    }
+
+    // 5. The query surface, before anything is read. §14's 严格校验 covers the query as much as the
+    //    body: a name this route does not implement is refused with its own name, never dropped on the
+    //    way to a full answer. This runs after the session, CSRF and key gates so a caller that is not
+    //    allowed here learns that first - the same order the bodies are refused in.
+    const queryRule = ROUTE_QUERY[`${route.method} ${route.template.slice(API_PREFIX.length)}`] ?? NO_QUERY;
+    const unasked = Object.keys(request.query).filter((name) => !queryRule.names.includes(name));
+    if (unasked.length > 0) {
+      const response = refused(
+        requestId,
+        "INVALID_INPUT",
+        queryRule.refusal,
+        "this route takes no such query parameter, and an unanswered filter must not read as an answered one",
+        declaration,
+        { unknownQuery: unasked, unknownCount: unasked.length },
+      );
       record(routeName, response.status, session === null ? "anonymous" : "paired");
       return response;
     }

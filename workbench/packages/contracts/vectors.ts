@@ -6,7 +6,6 @@ import {
   idSchema,
   instantSchema,
   jsonValueSchema,
-  limitSchema,
   nonEmptyString,
   reaEvidenceIdSchema,
 } from "./primitives.ts";
@@ -212,18 +211,8 @@ export const vectorPageQuerySchema = z.strictObject({
 export const VECTOR_PAGE_DEFAULT_LIMIT = 50;
 export const VECTOR_PAGE_MAX_LIMIT = 200;
 
-export const vectorListQuerySchema = z.strictObject({
-  targetId: idSchema.optional(),
-  snapshotDigest: digestSchema.optional(),
-  visibility: z.enum(["public", "holdout"]).optional(),
-  eligibility: z.enum(["usable", "blocked"]).optional(),
-  reviewStatus: z.enum(["draft", "approved", "rejected"]).optional(),
-  limit: limitSchema.optional(),
-});
-
 export type VectorCreateRequest = z.infer<typeof vectorCreateRequestSchema>;
 export type VectorReviewRequest = z.infer<typeof vectorReviewRequestSchema>;
-export type VectorListQuery = z.infer<typeof vectorListQuerySchema>;
 export type VectorSummary = z.infer<typeof vectorSummarySchema>;
 export type VectorPage = z.infer<typeof vectorPageSchema>;
 export type VectorPageQuery = z.infer<typeof vectorPageQuerySchema>;
