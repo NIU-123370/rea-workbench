@@ -7,10 +7,10 @@ import {
 } from "../../packages/contracts/session.ts";
 import type { CurrentSession } from "../../packages/contracts/session.ts";
 import { createProjectRequestSchema, createUrlTargetRequestSchema, createdProjectSchema, evidenceViewSchema, projectPageSchema, projectViewSchema, targetCreatedSchema, targetViewSchema } from "../../packages/contracts/resources.ts";
-import { contractCommitReceiptSchema, contractDraftRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
+import { contractCommitReceiptSchema, contractDraftHttpRequestSchema, contractRevisionSchema, contractReviewHttpRequestSchema, planBuildHttpRequestSchema, planCommitReceiptSchema, planReviewHttpRequestSchema, verificationPlanSchema } from "../../packages/contracts/behaviors.ts";
 import { comparatorPolicyReadSchema, verificationReportSchema, verificationRequestSchema } from "../../packages/contracts/verification.ts";
 import { blueprintFreezeHttpRequestSchema, blueprintFreezeReceiptSchema, blueprintReadSchema } from "../../packages/contracts/blueprint.ts";
-import { testVectorSchema, vectorCreateRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
+import { testVectorSchema, vectorCreateHttpRequestSchema, vectorPageSchema, vectorCommitReceiptSchema, vectorReviewHttpRequestSchema } from "../../packages/contracts/vectors.ts";
 import { exportArchiveSchema, exportCreateRequestSchema, exportListSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
 import { cancelRequestSchema, cleanupRetryReceiptSchema, jobPageSchema, jobRecordSchema, jobRequestSchema } from "../../packages/contracts/jobs.ts";
 import type { JobRecord } from "../../packages/contracts/jobs.ts";
@@ -204,8 +204,10 @@ const ROUTES: readonly RouteSpec[] = [
   // §8 line 261 names, so they carry an Idempotency-Key; contracts are not on that list, and the
   // door honours the document literally rather than inventing a key for a row the service already
   // versions. Bodies are the service's own schemas, so a field §8 names that nothing stores
-  // (`sensitiveValues` at a vector create, `expectedGraphRevision` at a plan or contract create) is
-  // a named refusal, not a silent drop - recorded as deviations on issue #58.
+  // (`expectedGraphRevision` at a plan or contract create) is a named refusal, not a silent drop -
+  // recorded as deviations on issue #58. `sensitiveValues` is not on that list any more: §12.1 line
+  // 441 types it as the operation's exclusion context, the three create services all gate on it, and
+  // each of these doors therefore forwards it over the frame beside the request.
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/vectors`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/contracts`, mutating: true, requiresSession: true, requiresIdempotencyKey: false },
   { method: "POST", template: `${API_PREFIX}/projects/:projectId/verification-plans`, mutating: true, requiresSession: true, requiresIdempotencyKey: true },
@@ -730,15 +732,20 @@ async function createVector(ctx: Context, deps: ApiDependencies, key: string): P
   if (projectId === null) return unknownProject(ctx);
   const body = readJsonBody(ctx);
   if (!body.ok) return body.response;
-  const parsed = parseStrict(vectorCreateRequestSchema, body.value);
+  const parsed = parseStrict(vectorCreateHttpRequestSchema, body.value);
   if (!parsed.ok) return invalidBody(ctx, "the vector request does not match the named schema", parsed.error);
+  // §12.1 line 441: the declared exclusion list is this operation's context, not a field of the
+  // sample, so it leaves the body here and crosses the socket beside it. `body` below is the half the
+  // idempotency journal digests, and it is built without the list - two requests that differ only in
+  // what they declare are the same safe request (§8 line 261).
+  const { sensitiveValues, ...request } = parsed.value;
   return commitCreation(ctx, deps, {
     key,
     scope: `${API_PREFIX}/projects/${String(projectId)}/vectors`,
     template: `${API_PREFIX}/projects/:projectId/vectors`,
     command: "vector.create",
-    payload: { projectId, request: parsed.value },
-    body: parsed.value,
+    payload: { projectId, request, ...(sensitiveValues === undefined ? {} : { sensitiveValues }) },
+    body: request,
     projection: COMMIT_PROJECTIONS.vector,
   });
 }
@@ -748,11 +755,19 @@ async function createContract(ctx: Context, deps: ApiDependencies): Promise<ApiR
   if (projectId === null) return unknownProject(ctx);
   const body = readJsonBody(ctx);
   if (!body.ok) return body.response;
-  const parsed = parseStrict(contractDraftRequestSchema, body.value);
+  const parsed = parseStrict(contractDraftHttpRequestSchema, body.value);
   if (!parsed.ok) return invalidBody(ctx, "the contract request does not match the named schema", parsed.error);
   // No journal: §8 line 261 does not list contract among the keyed creations, so a retried body
   // here is the service's own question (it versions by content), not one this process answers.
-  const outcome = await deps.worker.call("contract.create", { projectId, request: parsed.value }, ctx.actor);
+  // The exclusion context leaves the body at this line (§12.1 line 441): what crosses the socket is
+  // the contract request without it plus the list beside it, so neither a stored contract row nor a
+  // contractDigest can be built out of what the caller asked to be hidden.
+  const { sensitiveValues, ...request } = parsed.value;
+  const outcome = await deps.worker.call(
+    "contract.create",
+    { projectId, request, ...(sensitiveValues === undefined ? {} : { sensitiveValues }) },
+    ctx.actor,
+  );
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
   const projected = projectCommit(ctx, outcome.value, COMMIT_PROJECTIONS.contract);
   if (!projected.ok) return projected.response;
@@ -1030,8 +1045,17 @@ async function freezeBlueprint(ctx: Context, deps: ApiDependencies, key: string)
     scope: `${API_PREFIX}/projects/${String(projectId)}/blueprints`,
     template: `${API_PREFIX}/projects/:projectId/blueprints`,
     command: "blueprint.freeze",
-    payload: { projectId, request: { planId: parsed.value.verificationPlanId } },
-    body: parsed.value,
+    // §12.1 line 441 types `sensitiveValues` as this operation's exclusion context, not a field of
+    // the freeze, so it crosses the socket beside `request`. `body` below is the half the idempotency
+    // journal digests, and it is built without the list: a replay is matched on what the plan froze,
+    // never on what the caller asked to be hidden (§8 line 261 keeps sensitive originals out of the
+    // persisted request digest).
+    payload: {
+      projectId,
+      request: { planId: parsed.value.verificationPlanId },
+      ...(parsed.value.sensitiveValues === undefined ? {} : { sensitiveValues: parsed.value.sensitiveValues }),
+    },
+    body: { verificationPlanId: parsed.value.verificationPlanId },
     projection: COMMIT_PROJECTIONS.blueprint,
   });
 }

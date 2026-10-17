@@ -26,6 +26,11 @@ import type { ClaimRow, EvidenceRow, JobRow, VectorRow } from "../../packages/ap
 import type { Id } from "../../packages/domain/identity.ts";
 import type { Result } from "../../packages/domain/result.ts";
 
+// §12.1 line 441: the filter's exclusion list is this operation's context. These cases declare
+// nothing - the value an operator has nothing to hide is an empty list - except the refusal
+// cases, which name a value and expect the write to be stopped.
+const undisclosedDeclaration = { sensitive: { declaredValues: [] as string[] } };
+
 // BlueprintService against real storage (DESIGN §6, §7.3, D10/D12/D13, issue #13).
 // The cases a reviewer needs are the two directions of the promise: what the
 // Builder is handed must contain nothing outside the allowlist, and a required
@@ -432,7 +437,7 @@ describe("blueprint handoff carries the allowlist and nothing else (DESIGN §7.3
             { caseKey: "cart-ok", claimId: observedClaimId, kind: "success", vectorIds: [mainVectorId] },
             { caseKey: "cart-holdout", claimId: observedClaimId, kind: "edge", vectorIds: [holdoutVectorId] },
           ],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -444,7 +449,7 @@ describe("blueprint handoff carries the allowlist and nothing else (DESIGN §7.3
       ),
     );
     const plan = await approvedPlanFor(contract.contractId, [mainVectorId, holdoutVectorId]);
-    const frozen = unwrap(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }));
+    const frozen = unwrap(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration));
     blueprintId = frozen.blueprintId;
     digest = frozen.digest;
   });
@@ -452,6 +457,61 @@ describe("blueprint handoff carries the allowlist and nothing else (DESIGN §7.3
   it("freezes a blueprint that names one public and one holdout sample", () => {
     expect(blueprintId).not.toBeNull();
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("refuses a freeze whose payload carries a value the operation declared sensitive (DESIGN §12.1)", async () => {
+    const SECRET = "hunter2-session-token";
+    const blueprintsCount = () =>
+      (db.prepare("SELECT count(*) AS n FROM blueprints WHERE project_id = ?").get(String(projectId)) as { n: number }).n;
+    const before = blueprintsCount();
+
+    // The contract was drafted with nothing declared, so the body passed the contract door (§12.1
+    // gives each operation its own context). The freeze is the second door: it reads the same body
+    // back out of the store into the allowlisted payload, and the value the operator now names is
+    // in it.
+    const contract = unwrap(
+      contracts.createDraft(
+        projectId,
+        inspector,
+        contractRequest({
+          limitations: [`the cart replays with ${SECRET}`],
+          requiredCases: [
+            { caseKey: "cart-ok", claimId: observedClaimId, kind: "success", vectorIds: [mainVectorId] },
+          ],
+        }),
+        undisclosedDeclaration,
+      ),
+    );
+    unwrap(
+      await contracts.review(projectId, reviewer, contract.contractId, {
+        decision: "approved",
+        reviewerId: "reviewer-one",
+        digest: contract.digest,
+      }),
+    );
+    const plan = await approvedPlanFor(contract.contractId, [mainVectorId]);
+
+    const refusal = errorOf(
+      await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, { sensitive: { declaredValues: [SECRET] } }),
+    );
+    expect(refusal.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refusal.reason).toBe("declared-value-present");
+    expect(refusal.message).not.toContain(SECRET);
+    expect(refusal.message).not.toContain(plan.planId);
+
+    // No digest was computed and no row exists: the freeze refused before `blueprintDigestOf`, so
+    // there is nothing for the handoff to recompute against and nothing for a Builder to be handed.
+    expect(blueprintsCount()).toBe(before);
+    const journal = db.prepare(
+      "SELECT reason_code FROM audit_entries WHERE action = 'blueprint.freeze' AND decision = 'deny' AND reason_code = 'declared-value-present'",
+    ).all();
+    expect(journal).toHaveLength(1);
+
+    // The same freeze with nothing declared still freezes: the door is the declaration's, not a
+    // standing ban on the body.
+    const frozen = unwrap(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration));
+    expect(frozen.blueprintId).not.toBeNull();
+    expect(blueprintsCount()).toBe(before + 1);
   });
 
   it("hands over exactly the §7.3 fields", async () => {
@@ -586,7 +646,7 @@ describe("blueprint handoff carries the allowlist and nothing else (DESIGN §7.3
   it("treats two freezes as two handoffs instead of overwriting one", async () => {
     const looked = writer.transact((tx) => tx.getBlueprint(projectId, blueprintId)?.verificationPlanId ?? null);
     if (!looked.ok || looked.value === null) throw new Error("blueprint missing");
-    const second = unwrap(await blueprints.freeze(projectId, reviewer, { planId: looked.value }));
+    const second = unwrap(await blueprints.freeze(projectId, reviewer, { planId: looked.value }, undisclosedDeclaration));
     expect(second.blueprintId).not.toBe(blueprintId);
     expect(second.digest).not.toBe(digest);
     const first = unwrap(await blueprints.handoff(projectId, blueprintId));
@@ -604,9 +664,9 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
   let yellowContract: Id;
 
   it("refuses a freeze requested by Builder or the generation path", async () => {
-    const failure = errorOf(await blueprints.freeze(projectId, builder, { planId: newId() }));
+    const failure = errorOf(await blueprints.freeze(projectId, builder, { planId: newId() }, undisclosedDeclaration));
     expect(failure.reason).toBe("actor-may-not-freeze");
-    expect(errorOf(await blueprints.freeze(projectId, generator, { planId: newId() })).code).toBe("ACCESS_DENIED");
+    expect(errorOf(await blueprints.freeze(projectId, generator, { planId: newId() }, undisclosedDeclaration)).code).toBe("ACCESS_DENIED");
     expect(journal("blueprint.freeze", "deny")).toContain("actor-may-not-freeze");
   });
 
@@ -619,7 +679,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
         contractRequest({
           contractKey: "draft-plan-api",
           requiredCases: [{ caseKey: "draft-plan-case", claimId: observedClaimId, kind: "success", vectorIds: [vector.id] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -631,7 +691,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
       ),
     );
     const built = await approvedPlanDraftOnly(contract.contractId, [vector.id]);
-    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: built.planId }));
+    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: built.planId }, undisclosedDeclaration));
     expect(failure.code).toBe("BLUEPRINT_BLOCKED");
     expect(reasonText(failure)).toContain("plan-not-approved");
   });
@@ -646,7 +706,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
           contractKey: "yellow-api",
           sourceClaimIds: [yellowClaimId],
           requiredCases: [{ caseKey: "yellow-case", claimId: yellowClaimId, kind: "success", vectorIds: [vector.id] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -659,7 +719,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
     );
     yellowContract = contract.contractId;
     const plan = await approvedPlanFor(yellowContract, [vector.id]);
-    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }));
+    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration));
     expect(failure.code).toBe("BLUEPRINT_BLOCKED");
     expect(reasonText(failure)).toContain(`claim-not-seen:${yellowClaimId}:INFERRED:basis-derived`);
     expect(journal("blueprint.freeze", "deny").length).toBeGreaterThan(0);
@@ -677,7 +737,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
           contractKey: "edge-api",
           sourceClaimIds: [observedClaimId, yellowClaimId],
           requiredCases: [{ caseKey: "edge-case", claimId: observedClaimId, kind: "success", vectorIds: [vector.id] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -704,14 +764,14 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
     if (!linked.ok) throw new Error(JSON.stringify(linked.error));
 
     const plan = await approvedPlanFor(contract.contractId, [vector.id]);
-    const both = reasonText(errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId })));
+    const both = reasonText(errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration)));
     expect(both).toContain(`edge-not-seen:${edgeId}:depends-on:INFERRED`);
     expect(both).toContain(`claim-not-seen:${yellowClaimId}:INFERRED:basis-derived`);
 
     // Remove the yellow edge but keep the yellow source claim: still blocked, and
     // now only for the claim. That is the proof the two are evaluated separately.
     db.prepare("DELETE FROM graph_edges WHERE id = ?").run(edgeId);
-    const claimOnly = reasonText(errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId })));
+    const claimOnly = reasonText(errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration)));
     expect(claimOnly).toContain(`claim-not-seen:${yellowClaimId}`);
     expect(claimOnly).not.toContain("edge-not-seen");
 
@@ -723,7 +783,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
         contractRequest({
           contractKey: "edge-api",
           requiredCases: [{ caseKey: "edge-case", claimId: observedClaimId, kind: "success", vectorIds: [vector.id] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -735,7 +795,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
       ),
     );
     const cleanPlan = await approvedPlanFor(clean.contractId, [vector.id]);
-    const frozen = unwrap(await blueprints.freeze(projectId, reviewer, { planId: cleanPlan.planId }));
+    const frozen = unwrap(await blueprints.freeze(projectId, reviewer, { planId: cleanPlan.planId }, undisclosedDeclaration));
     expect(frozen.contractCount).toBe(1);
   });
 
@@ -757,7 +817,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
           requiredCases: [
             { caseKey: "holdout-only", claimId: holdoutOnlyClaimId, kind: "success", vectorIds: [holdout.id] },
           ],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -769,7 +829,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
       ),
     );
     const plan = await approvedPlanFor(contract.contractId, [holdout.id]);
-    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }));
+    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration));
     expect(reasonText(failure)).toContain("blueprint-without-public-sample");
   });
 
@@ -782,7 +842,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
         contractRequest({
           contractKey: "stale-api",
           requiredCases: [{ caseKey: "stale-case", claimId: observedClaimId, kind: "success", vectorIds: [vector.id] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -797,7 +857,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
     const bumped = writer.transact((tx) => tx.upsertProjectRevision(projectId, { graph: 1 }));
     if (!bumped.ok) throw new Error(JSON.stringify(bumped.error));
 
-    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }));
+    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration));
     expect(failure.code).toBe("STALE_INPUT");
     expect(failure.reason).toBe("graph-moved-since-plan");
   });
@@ -815,7 +875,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
           contractKey: "leaky-api",
           behaviorSpec: `GET /api/cart returns the item list, observed in ${evidenceOne}`,
           requiredCases: [{ caseKey: "leaky-case", claimId: observedClaimId, kind: "success", vectorIds: [vector.id] }],
-        }),
+        }), undisclosedDeclaration,
       ),
     );
     unwrap(
@@ -827,7 +887,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
       ),
     );
     const plan = await approvedPlanFor(contract.contractId, [vector.id]);
-    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }));
+    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: plan.planId }, undisclosedDeclaration));
     expect(failure.code).toBe("BLUEPRINT_BLOCKED");
     expect(reasonText(failure)).toContain("blueprint-discloses-reference:evidence-id");
     // The refused reason names the category, never the value it protects.
@@ -836,7 +896,7 @@ describe("the freeze gate blocks on colour, sample and drift (DESIGN §6, PRD A0
   });
 
   it("refuses a freeze request that names anything but a plan", async () => {
-    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: newId(), contractIds: [] }));
+    const failure = errorOf(await blueprints.freeze(projectId, reviewer, { planId: newId(), contractIds: [] }, undisclosedDeclaration));
     expect(failure.code).toBe("INVALID_INPUT");
     expect((failure.details["issues"] as string[]).join(",")).toContain("contractIds");
   });

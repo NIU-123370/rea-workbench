@@ -49,6 +49,7 @@ import { claimFactOf, contractContentOf } from "./contract-service.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, issueNames, type GateFailure } from "./gate-failure.ts";
 import { planContentOf, vectorFactsOf } from "./plan-service.ts";
+import { assertPayloadClean, type OperationFilterContext } from "./sanitizer.ts";
 import type { ArtifactPort, ContractRow, PlanRow, StorageTransaction, StorageWriterPort, VectorRow } from "./ports.ts";
 import type { VectorService } from "./vector-service.ts";
 
@@ -373,6 +374,7 @@ export class BlueprintService {
     projectId: Id,
     actor: Actor,
     input: unknown,
+    context: OperationFilterContext,
   ): Promise<Result<BlueprintCommit, GateFailure>> {
     if (!mayRecordDecision(actor)) {
       recordDeny(this.storage, {
@@ -493,6 +495,31 @@ export class BlueprintService {
       publicVectors,
       verificationScope,
     });
+    // §12.1 line 441 gives the handoff owner this door: the same filter that gates
+    // every emitted face runs on the allowlisted payload, and only a payload that
+    // passes gets a `blueprintDigest` and a public release. It is checked here -
+    // before the digest exists - because §12.1 forbids rewriting a body that already
+    // carries an approved digest, and `leakReasons` below is a different owner: it
+    // guards holdout references, not declared values.
+    const payloadCheck = assertPayloadClean(provisional as unknown as JsonValue, context.sensitive);
+    if (!payloadCheck.ok) {
+      recordDeny(this.storage, {
+        projectId,
+        actor,
+        resourceType: "blueprint",
+        action: "blueprint.freeze",
+        resourceId: planId,
+        decision: "deny",
+        reasonCode: payloadCheck.reason,
+        metadata: {},
+      });
+      return gateFail(
+        "SENSITIVE_CONTENT_BLOCKED",
+        payloadCheck.reason,
+        "the blueprint payload is refused by the diagnostic filter",
+      );
+    }
+
     const digest = blueprintDigestOf(provisional, this.limits);
     const payload = buildBlueprintPayload({
       blueprintId,

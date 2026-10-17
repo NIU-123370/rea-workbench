@@ -114,8 +114,15 @@ export const blueprintFreezeRequestSchema = z.strictObject({
 // allowed to decide, and `strictObject` is what makes that a named refusal rather than an ignored
 // extra field. §8's `expectedGraphRevision` is therefore subsumed: the plan row's own revision is
 // the concurrency token, and it is server-held.
+//
+// `sensitiveValues` is the one name in that list the route does honour, because §8 and §12.1 line
+// 441 both type it differently from the other four: it is not a fact about the plan, it is the
+// operation's exclusion context. So it is optional here, and the door forwards it to the worker's
+// frame context instead of the freeze request - the published blueprint is digested over what the
+// plan decided, never over what the caller asked to be hidden.
 export const blueprintFreezeHttpRequestSchema = z.strictObject({
   verificationPlanId: idSchema,
+  sensitiveValues: z.array(nonEmptyString).optional(),
 });
 
 // The receipt is what the freeze proves at the moment it commits: which plan became a blueprint,

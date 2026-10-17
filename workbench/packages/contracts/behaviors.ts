@@ -87,6 +87,19 @@ export const contractDraftRequestSchema = z.strictObject({
   requiredCases: z.array(requiredCaseSchema),
 });
 
+// The same body as §8 line 286 writes it. Only one name is added: `sensitiveValues?`, which §8
+// lists and §12.1 line 441 types as the operation's exclusion context rather than a field of the
+// contract. §8's other name for this route, `expectedGraphRevision`, is still refused by the strict
+// parse (issue #58 records that deviation) because the contract's own scope names the snapshot it
+// speaks for, and a second graph token on the request would be a fact the caller decides.
+// The door therefore forwards the context to the worker frame and keeps it out of this request, so
+// neither `contracts.payload_json` nor the contractDigest is computed over what the caller asked to
+// be hidden.
+export const contractDraftHttpRequestSchema = z.strictObject({
+  ...contractDraftRequestSchema.shape,
+  sensitiveValues: z.array(nonEmptyString).optional(),
+});
+
 export const contractReviewRequestSchema = z.strictObject({
   decision: z.enum(["approved", "rejected"]),
   reviewerId: nonEmptyString,

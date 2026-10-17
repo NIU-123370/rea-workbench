@@ -25,6 +25,7 @@ import type { ReviewStatus } from "../domain/vector.ts";
 import { isBuilder, mayRecordDecision, type Actor } from "./actor.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, issueNames, type GateFailure } from "./gate-failure.ts";
+import { assertPayloadClean, type OperationFilterContext } from "./sanitizer.ts";
 import type {
   ClaimRow,
   ContractRow,
@@ -130,6 +131,7 @@ export class ContractService {
     projectId: Id,
     actor: Actor,
     input: unknown,
+    context: OperationFilterContext,
   ): Result<ContractCommit, GateFailure> {
     if (isBuilder(actor)) {
       recordDeny(this.storage, {
@@ -264,6 +266,24 @@ export class ContractService {
             vectorIds: entry.vectorIds.map((id) => asId(id)),
           })),
         };
+
+        // §12.1 / D28 (PRD A11, and issue #8's fourth box): this body is one of the seven faces
+        // the single filter owner covers, and the check runs on `contractDigestInput`
+        // because that object is byte-for-byte what lands in `contracts.payload_json`.
+        // A hit therefore means nothing was persisted and no digest was minted - not
+        // that a copy was rewritten on its way to an approved body, which is the one
+        // thing §12.1 forbids (an approved body keeps its digest or does not exist).
+        const payloadCheck = assertPayloadClean(contractDigestInput(content), context.sensitive);
+        if (!payloadCheck.ok) {
+          return {
+            kind: "failure",
+            failure: gateFail(
+              "SENSITIVE_CONTENT_BLOCKED",
+              payloadCheck.reason,
+              "the contract body is refused by the diagnostic filter",
+            ),
+          };
+        }
 
         let digest: Digest;
         try {

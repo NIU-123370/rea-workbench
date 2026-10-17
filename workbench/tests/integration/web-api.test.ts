@@ -2195,8 +2195,11 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     const { session, seeded } = await chain("freeze-derive", true);
     const overreaching = await send(session, {
       verificationPlanId: String(seeded.planId),
-      // §8 line 292 names all four; §7.4 makes the first three functions of the approved plan and
-      // the sensitive list belongs to the capture, not to a freeze.
+      // §8 line 292 names four fields besides the plan; §7.4 makes the three below functions of the
+      // approved plan, so a freeze request that restates them is deciding facts the route does not
+      // own. §8's fifth name, `sensitiveValues`, is the one this door does honour - it is the
+      // operation's exclusion context (§12.1 line 441), not a fact about the plan - and the next case
+      // covers what it is for.
       targetId: String(seeded.targetId),
       contractRevisionIds: [String(seeded.contractId)],
       expectedGraphRevision: 0,
@@ -2204,9 +2207,51 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     }, "freeze-key-2");
     expect(overreaching.status, overreaching.text).toBe(400);
     const keys = ((JSON.parse(overreaching.text) as { error: { details: { rejectedKeys?: string[] } } }).error.details.rejectedKeys ?? []).sort();
-    expect(keys).toEqual(["contractRevisionIds", "expectedGraphRevision", "sensitiveValues", "targetId"]);
+    expect(keys).toEqual(["contractRevisionIds", "expectedGraphRevision", "targetId"]);
     // The declared sensitive value is a *value*, and §12.1 keeps it out of the echo.
     expect(overreaching.text).not.toContain("hunter2");
+  });
+
+  it("freezes nothing the declared exclusion catches, and keeps the declaration out of the journal", async () => {
+    const { session, seeded } = await chain("freeze-sensitive", true);
+    const journal = async () => {
+      const page = await call("GET", `${API_PREFIX}/projects/${String(session.projectId)}/audit?limit=50`, { headers: { host: host(), cookie: session.cookie } });
+      const parsed = JSON.parse(page.text) as {
+        data?: { entries?: { action: string; decision: string; reasonCode: string }[] };
+        entries?: { action: string; decision: string; reasonCode: string }[];
+      };
+      return parsed.data?.entries ?? parsed.entries ?? [];
+    };
+
+    // `tests/support/review-chain.ts` writes this contract body, so the declared literal is inside
+    // the payload the freeze is about to assemble - and the contract door let it through, because
+    // that operation declared nothing (§12.1 gives each operation its own context).
+    const refused = await send(
+      session,
+      { verificationPlanId: String(seeded.planId), sensitiveValues: ["returns the item list"] },
+      "freeze-key-sensitive",
+    );
+    expect(refused.status, refused.text).toBe(422);
+    expect(refused.text).toContain("SENSITIVE_CONTENT_BLOCKED");
+    expect(refused.text).toContain("declared-value-present");
+    expect(refused.text).not.toContain("returns the item list");
+    // The refusal is journalled and nothing was frozen: no allow row for the freeze, and the deny
+    // names the filter's reason rather than the value it refused to carry.
+    const afterRefusal = await journal();
+    expect(afterRefusal.filter((entry) => entry.action === "blueprint.freeze" && entry.decision === "allow")).toHaveLength(0);
+    expect(afterRefusal.filter((entry) => entry.reasonCode === "declared-value-present")).toHaveLength(1);
+
+    // Two requests that differ only in what they declare are the same safe request (§8 line 261 keeps
+    // sensitive originals out of the persisted request digest), so the second is answered from the
+    // journal rather than as a different request. A digest that covered the declaration would answer
+    // 409 here, and that split is the leak wearing a hash.
+    const first = await send(session, { verificationPlanId: String(seeded.planId), sensitiveValues: ["nothing-in-this-payload"] }, "freeze-key-clean");
+    expect(first.status, first.text).toBe(201);
+    const replay = await send(session, { verificationPlanId: String(seeded.planId), sensitiveValues: ["also-nothing-here"] }, "freeze-key-clean");
+    expect(replay.status, replay.text).toBe(201);
+    expect(JSON.parse(replay.text)).toEqual(JSON.parse(first.text));
+    const afterReplay = await journal();
+    expect(afterReplay.filter((entry) => entry.action === "blueprint.freeze" && entry.decision === "allow")).toHaveLength(1);
   });
 
   it("keeps the key honest: required, and not reusable for a different request", async () => {
@@ -2722,13 +2767,36 @@ describe("the three creation doors (§8 lines 282, 286, 289 / issue #58)", () =>
     expect(noKey.status, noKey.text).toBe(400);
     expect(noKey.text).toContain("idempotency-key-required");
 
-    // §8 line 282 offers `sensitiveValues` to a vector create; nothing in the create path or the
-    // stored sample has an owner for it (the declaration belongs to the capture), so the door
-    // names it rather than dropping it.
-    const withSensitive = await post(fix.session, `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`, { ...vectorBody(fix, "cart-sensitive"), sensitiveValues: ["hunter2"] }, "vector-sensitive");
-    expect(withSensitive.status, withSensitive.text).toBe(400);
-    expect(rejected(withSensitive.text)).toEqual(["sensitiveValues"]);
-    expect(withSensitive.text).not.toContain("hunter2");
+    // §8 line 282 offers `sensitiveValues` to a vector create, and §12.1 line 441 makes it the
+    // operation's exclusion context rather than a field of the sample. So the door honours the name -
+    // and honouring it is what lets the service refuse the sample, which is the point of asking.
+    const smuggled = await post(
+      fix.session,
+      `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`,
+      { ...vectorBody(fix, "cart-sensitive"), sdkInput: { include: "hunter2-session-token" }, sensitiveValues: ["hunter2-session-token"] },
+      "vector-sensitive-refused",
+    );
+    expect(smuggled.status, smuggled.text).toBe(422);
+    expect(smuggled.text).toContain("SENSITIVE_CONTENT_BLOCKED");
+    expect(smuggled.text).not.toContain("hunter2-session-token");
+
+    // The same door with a declaration the sample does not contain still creates, and the stored
+    // sample keeps no trace of what was declared (§12.1: 不进入主体、摘要).
+    const accepted = await post(
+      fix.session,
+      `${API_PREFIX}/projects/${String(fix.projectId)}/vectors`,
+      { ...vectorBody(fix, "cart-sensitive-ok"), sensitiveValues: ["nothing-in-this-sample"] },
+      "vector-sensitive-accepted",
+    );
+    expect(accepted.status, accepted.text).toBe(201);
+    const readBack = await call(
+      "GET",
+      `${API_PREFIX}/projects/${String(fix.projectId)}/vectors/${String(vectorCommitReceiptSchema.parse(JSON.parse(accepted.text) as JsonValue).vectorId)}`,
+      { headers: { host: host(), cookie: fix.session.cookie } },
+    );
+    expect(readBack.status, readBack.text).toBe(200);
+    expect(readBack.text).not.toContain("nothing-in-this-sample");
+    expect(readBack.text).not.toContain("sensitiveValues");
   });
 
   it("creates a contract draft and reports the revision the service chose", async () => {
@@ -2781,6 +2849,68 @@ describe("the three creation doors (§8 lines 282, 286, 289 / issue #58)", () =>
     if (!second.success) throw new Error(again.text);
     expect(second.data.contractId).not.toBe(receipt.data.contractId);
     expect(second.data.revision).toBe(2);
+  });
+
+  // §8 line 286 offers `sensitiveValues` to a contract create, and §12.1 line 441 says it is the
+  // operation's context rather than a field of the contract. The door therefore sends it beside the
+  // request, which makes two things checkable at once: a body carrying what the caller declared is
+  // refused before it is digested, and a body that does not is stored without the declaration in it.
+  it("runs the §12.1 door over a contract drafted through the door, and stores no declaration", async () => {
+    const fix = await seeded("door-contract-sensitive");
+    const path = `${API_PREFIX}/projects/${String(fix.projectId)}/contracts`;
+    const body = (overrides: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({
+      contractKey: "cart-filter-door",
+      targetId: String(fix.seeded.targetId),
+      scope: { snapshotDigest: fix.seeded.snapshotDigest, operationIds: ["getCart"], excludedBehaviors: [] },
+      behaviorSpec: "GET /api/cart returns the item list",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      httpOperations: [
+        {
+          operationId: "getCart",
+          method: "GET",
+          path: "/api/cart",
+          requestMediaType: null,
+          responses: [{ status: 200, mediaType: "application/json", schema: { type: "object" } }],
+        },
+      ],
+      errorCases: [],
+      limitations: [],
+      unknowns: [],
+      sourceClaimIds: [String(fix.seeded.claimId)],
+      requiredCases: [{ caseKey: "cart-ok", claimId: String(fix.seeded.claimId), kind: "success", vectorIds: [String(fix.seeded.vectorId)] }],
+      ...overrides,
+    });
+
+    const refused = await post(fix.session, path, { ...body(), sensitiveValues: ["returns the item list"] }, null);
+    expect(refused.status, refused.text).toBe(422);
+    expect(refused.text).toContain("SENSITIVE_CONTENT_BLOCKED");
+    expect(refused.text).not.toContain("returns the item list");
+    // Refused means not created: the revision the next draft takes is still the one it would have
+    // taken had this draft never arrived.
+    const drafted = await post(fix.session, path, body(), null);
+    expect(drafted.status, drafted.text).toBe(201);
+    const receipt = contractCommitReceiptSchema.safeParse(JSON.parse(drafted.text) as JsonValue);
+    if (!receipt.success) throw new Error(drafted.text);
+    expect(receipt.data.revision).toBe(1);
+
+    // The accepted draft reads back as the stored body: no `sensitiveValues` key, and the value the
+    // caller named is not in what the row holds (§12.1: 不进入主体、摘要、审批).
+    const declaredOnly = await post(
+      fix.session,
+      path,
+      { ...body({ contractKey: "cart-filter-door-2" }), sensitiveValues: ["nothing-in-this-body"] },
+      null,
+    );
+    expect(declaredOnly.status, declaredOnly.text).toBe(201);
+    const readBack = await call(
+      "GET",
+      `${API_PREFIX}/projects/${String(fix.projectId)}/contracts/${String(receipt.data.contractId)}`,
+      { headers: { host: host(), cookie: fix.session.cookie } },
+    );
+    expect(readBack.status, readBack.text).toBe(200);
+    expect(readBack.text).not.toContain("sensitiveValues");
+    expect(readBack.text).not.toContain("nothing-in-this-body");
   });
 
   it("builds a plan from §8's `exclusions` name and reports the derived counts", async () => {

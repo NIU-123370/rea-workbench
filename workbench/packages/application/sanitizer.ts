@@ -25,6 +25,15 @@ export type SensitiveDeclaration = {
   declaredValues: readonly string[];
 };
 
+// The shape a control-plane command carries this declaration in (§12.1 line 441
+// names `sensitiveValues` as an operation context of the vector, contract and
+// blueprint create interfaces). `null` is a different answer from an empty list:
+// "this operation had nothing to exclude" versus §12.1's "the context is gone and
+// must not be defaulted away", which the refusal below names separately.
+export type OperationFilterContext = {
+  sensitive: SensitiveDeclaration | null;
+};
+
 export type RedactedText = {
   text: string;
   excludedCount: number;
