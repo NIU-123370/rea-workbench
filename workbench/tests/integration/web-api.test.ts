@@ -3867,6 +3867,53 @@ describe("the import door (§8 line 272 / issue #58)", () => {
     const unknownProject = await upload(session, asId(newId()), formOf({ kind: "har" }), "import-key-19");
     expect(unknownProject.status, unknownProject.text).toBe(404);
   });
+
+  it("drives the row this door queued, and the evidence door then answers it (§8 lines 272+276+281 / issue #108)", async () => {
+    // The upload door has been here since round seven and the executor since PR #109; this case is the
+    // one that goes through **this** transport for both halves, so the queued row a browser leaves
+    // behind is proven drivable from the same side a browser sits on - not only from `worker.dispatch`.
+    const session = await pairSession();
+    const projectId = await freshProject(session, "import-driven");
+    const declared = "sesame-driven-value";
+    const uploaded = await upload(session, projectId, formOf({ kind: "har", sensitiveValues: [declared] }), "import-driven-1");
+    expect(uploaded.status, uploaded.text).toBe(202);
+    const receipt = harImportHttpResponseSchema.parse(JSON.parse(uploaded.text) as JsonValue);
+    const jobId = asId(receipt.job.id);
+    // The fixture's own evidence id, named here rather than read out of the reply: §8 line 281 is
+    // addressed by id, and the row's `resultRef` is the field that has to agree with it.
+    const evidenceId = `ev_${"a".repeat(64)}`;
+    const evidencePath = `${API_PREFIX}/projects/${String(projectId)}/evidence/${evidenceId}`;
+    const headers = { host: host(), origin: `http://${host()}`, cookie: session.cookie };
+
+    // Before the runner looks at it the door says "no such evidence" - and it says that sentence, not a
+    // generic failure, so "not yet" stays distinguishable from "not yours".
+    const before = await call("GET", evidencePath, { headers });
+    expect(before.status, before.text).toBe(404);
+    expect(((JSON.parse(before.text) as { error: { details: Record<string, unknown> } }).error.details)["reason"]).toBe("evidence-unknown");
+
+    for (let turns = 0; turns < 40; turns += 1) {
+      const outcome = await worker.runJobs();
+      if (!outcome.ok) throw new Error(`${outcome.error.code}:${outcome.error.reason}`);
+      if (outcome.value.kind === "idle") break;
+    }
+
+    const readBack = await call("GET", `${API_PREFIX}/projects/${String(projectId)}/jobs/${String(jobId)}`, { headers });
+    expect(readBack.status, readBack.text).toBe(200);
+    const row = jobRecordSchema.parse(JSON.parse(readBack.text) as JsonValue);
+    expect(row.state).toBe("succeeded");
+    expect(row.resultRef).toBe(evidenceId);
+    expect(row.cleanupState).toBe("complete");
+    expect(row.error).toBeNull();
+
+    const after = await call("GET", evidencePath, { headers });
+    expect(after.status, after.text).toBe(200);
+    const view = evidenceViewSchema.safeParse(JSON.parse(after.text) as JsonValue);
+    if (!view.success) throw new Error(`the evidence route refused its own schema: ${after.text}`);
+    expect((view.data.evidence as unknown as { evidence_id: string }).evidence_id).toBe(evidenceId);
+    // And the literal this caller declared is not in the body the door just handed back.
+    expect(after.text).not.toContain(declared);
+  });
+
 });
 
 // §8 line 294 over HTTP (issue #57). This rig declares no model endpoint, so the happy path is the
