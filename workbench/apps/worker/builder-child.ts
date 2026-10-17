@@ -8,8 +8,8 @@ import type { CanonicalLimits } from "../../packages/domain/canonical-json.ts";
 import type { JsonObject } from "../../packages/domain/json-value.ts";
 import type { BlueprintPayload } from "../../packages/domain/blueprint.ts";
 
-// The Builder role's own program (DESIGN §2 "Builder：独立进程 / 文件视图 / 无网络", §5 line
-// 425, §7.3, §10 / PRD A07, issue #19).
+// The Builder role's own program (DESIGN §2 "Builder：独立进程 / 文件视图 / 无网络",
+// §12 line 425, §7.3, §10 / PRD A07, issue #19).
 //
 // This file is what the worker spawns. It is handed two paths and nothing else: a handoff
 // file containing one frozen blueprint, and an output directory it owns. It cannot open the

@@ -5,10 +5,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   checkDocs,
+  checkSectionAnchors,
   checkSourceReferences,
   findIdReferences,
+  findSectionAnchors,
   parseAcceptanceRows,
   parseDecisionRows,
+  parseDesignSections,
   parseTestCaseRows,
   reconcile,
 } from "../../infra/release/docs-check.mjs";
@@ -143,6 +146,67 @@ describe("a source file may only name an id the three tables declare", () => {
   });
 });
 
+describe("a section citation has to land in the section it names", () => {
+  const sections = [
+    { section: "5", start: 97, end: 127 },
+    { section: "8", start: 223, end: 321 },
+    { section: "12", start: 423, end: 450 },
+  ];
+  const at = (section: string, from: number | null, to: number | null = null, line = 1) =>
+    [{ section, from, to: to ?? from, file: "f.ts", line }];
+
+  it("splits DESIGN.md at its `## N.` headings and runs the last section to the end", () => {
+    const markdown = ["## 1. 甲", "正文", "## 2. 乙", "正文", "正文"].join("\n");
+    expect(parseDesignSections(markdown)).toEqual([
+      { section: "1", start: 1, end: 2 },
+      { section: "2", start: 3, end: 5 },
+    ]);
+    expect(parseDesignSections("没有编号标题")).toEqual([]);
+  });
+
+  it("reads a pair, a range, and the line number that fell off the end of the comment", () => {
+    const text = ["// DESIGN §13 line 453", "// (§8 lines 278-279, §11)", "// exactly §8 line", "// 272's two, and the narrowing"].join("\n");
+    expect(findSectionAnchors("f.ts", text)).toEqual([
+      { section: "13", from: 453, to: 453, file: "f.ts", line: 1 },
+      { section: "8", from: 278, to: 279, file: "f.ts", line: 2 },
+      { section: "8", from: null, to: null, file: "f.ts", line: 3 },
+    ]);
+  });
+
+  it("refuses the citation whose line lives in another section, and names both ranges", () => {
+    expect(checkSectionAnchors(at("5", 425), sections, 482)).toEqual([
+      "design-anchor-outside-section:§5 line 425(f.ts:1) 该节是 97-127，而行号 425 属于 §12 423-450", // docs-check-ignore: the refusal text necessarily carries the mis-paired anchor
+    ]);
+  });
+
+  it("names a wrapped pair, an unknown section and an off-the-end line as three different faults", () => {
+    expect(checkSectionAnchors(at("8", null), sections, 482)).toEqual([
+      "design-anchor-wrapped:§8 line(f.ts:1) 行号掉到下一行，这一对读不出来源",
+    ]);
+    expect(checkSectionAnchors(at("99", 10), sections, 482)).toEqual([
+      "design-section-unknown:§99 line 10(f.ts:1) DESIGN.md 没有这一节", // docs-check-ignore: names the section that does not exist
+    ]);
+    expect(checkSectionAnchors(at("12", 900), sections, 482)).toEqual([
+      "design-anchor-past-end:§12 line 900(f.ts:1) DESIGN.md 共 482 行", // docs-check-ignore: names the line past the document end
+    ]);
+  });
+
+  it("says nothing about a pair that is inside its section, a range included", () => {
+    expect(checkSectionAnchors(at("8", 278, 279), sections, 482)).toEqual([]);
+    expect(checkSectionAnchors(at("5", 97), sections, 482)).toEqual([]);
+    // The section's own heading line is inside it, so citing the heading is legal.
+    expect(checkSectionAnchors(at("12", 423), sections, 482)).toEqual([]);
+  });
+
+  it("catches the range whose tail leaves the section it names", () => {
+    // Only the front number is inside §8 (223-321); 430 is §12. A checker that compared the
+    // start alone would call this a good citation, and `lines 310-430` reads as one claim.
+    expect(checkSectionAnchors(at("8", 310, 430), sections, 482)).toEqual([
+      "design-anchor-outside-section:§8 line 310-430(f.ts:1) 该节是 223-321，而行号 430 属于 §12 423-450", // docs-check-ignore: names the offending range on purpose
+    ]);
+  });
+});
+
 describe("the committed documents pass the gate they describe", () => {
   it("npm run docs:check exits clean against docs/PRD.md and docs/TESTPLAN.md", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
@@ -161,5 +225,9 @@ describe("the committed documents pass the gate they describe", () => {
     // root directory) prints an otherwise identical clean line, so the count is pinned to a
     // floor well below today's 119 references over 199 files rather than to the number itself.
     expect(output).toMatch(/源码引用 \d{3,} 处（\d{3,} 个文件）/);
+    // The citation surface is reported the same way: today 376 anchors against 14 sections, and
+    // a reader of this line can tell "nothing is wrong" from "nothing was read".
+    expect(output).toMatch(/设计锚点 \d{3,} 处（DESIGN \d{2} 节）/);
+    expect(output).not.toContain("- design-");
   });
 });

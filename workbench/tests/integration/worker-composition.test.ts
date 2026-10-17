@@ -439,8 +439,8 @@ describe("named commands and the local RPC (§14)", () => {
 
   // The cell §8 line 275's door makes necessary, rewritten for issue #108: the runner now drives the
   // ingestion `inspect` row, so "inspect is queued" is no longer one sentence. The three readings the
-  // doctor has to keep apart are a capture (no executor, and none reachable in this build), §8 line
-  // 310's directed investigation (a real job whose executor is the retained REA session, not shipped),
+  // doctor has to keep apart are a capture (no executor, and none reachable in this build) and the
+  // §8 line 310 directed investigation (a real job whose executor is the retained REA session, not shipped),
   // and a row whose input names neither projection - which the *runner* fails by name, so the doctor
   // counts it without inventing a reason for it. A queued `build` row still leaves it quiet, because
   // that kind does have an executor.

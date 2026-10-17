@@ -13,7 +13,7 @@ import { asDigest } from "../../packages/domain/canonical-json.ts";
 import { newId } from "../../packages/domain/identity.ts";
 import { blueprintPayload } from "../support/blueprint-seed.ts";
 
-// The Builder role as a real process (DESIGN §2, §5 line 425, §10 / PRD A07, issue #19).
+// The Builder role as a real process (DESIGN §2, §12 line 425, §10 / PRD A07, issue #19).
 //
 // `worker-composition.test.ts` already generates twice through the worker's own RPC, so the
 // spawning path is the production path and its happy case is covered there. This file adds the

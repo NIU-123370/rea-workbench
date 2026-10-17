@@ -43,7 +43,7 @@ npm ci
 | `packages/adapters/storage`                 | 唯一 SQLite 写连接、增量迁移、按摘要落地的不可变 artifact store、一致性备份                                                                                 |
 | `packages/adapters/sandbox`                 | broker 命令渲染、egress 地址判定、broker 帧编解码；隔离效果未经宿主验证                                                                                     |
 | `infra/review`                              | 评审 bot 的规则表与扫描器，产出 `.review/findings.json` 与 `.review/summary.md`                                                                            |
-| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账，**并核对源码里点名的 T/A/D 编号在三张表里都声明过**）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
+| `infra/release` / `infra/perf`            | `docs:check`（T01–T17 ↔ A01–A13 对账＋核对源码点名的 T/A/D 编号＋核对每条 `§N line M` 引用落在它点名的那一节里）与 T17 图更新 p95 测量器（写机器可读记录，不代表 A13 已达标）                                                        |
 | `tests/{unit,integration,fixtures,support}` | 纯逻辑门禁、真 SQLite / 真文件门禁、固定 envelope fixture，以及跨套件共用的交接数据播种（`support/blueprint-seed.ts`）                                       |
 
 Builder 生成支路（F08 / A07 / issue #19）的边界：
@@ -1268,6 +1268,49 @@ runner 的，见下文"这轮没做浏览器"）：
 不在 `docs/`，所以钉它就得让 `docs:check` 去读 API。本轮**不引入这条依赖**（离线闸不能因为网络抖动而变红），
 第四族留作"来源先落在文档里"之后的事。另：`docs-check-ignore` 现共 **9 处使用**（全在 `docs-check.test.ts`）
 ＋闸文件里 1 处常量定义；README 里那些 `A11`／`A17` 是**变异批次号**、不是验收号，所以本文不在扫描面内。
+
+发布门禁·第廿三轮（2026-10-18 03:40–03:49，**`§N line M` 这种"成对引用"第一次被核对**）：
+
+- **这是同一族的另一半天**：前两笔管的是**编号存不存在**，这一笔管的是**编号配对对不对**。
+  源码里有 **373 处**带行号的 `§N line M`（闸自己的读数）——节号说"哪条规则"、行号说"哪一句"。
+  文档重排时**节号不动、句子移动**，引用于是继续自称有权威，指的却是别节的句子。本仓判据文档
+  自己就吃过这个亏（换目录后行号位移），所以这不是假想。
+- **现查出 9 处坏的，全修了**：
+  - **6 处错号**：`packages/adapters/agents/builder-role.ts:4`、`apps/worker/builder-process.ts:20`、
+    `apps/worker/composition.ts:535`、`tests/integration/builder-process.test.ts:16`、
+    `tests/unit/builder-role-plan.test.ts:10` 都写 **§5 line 425**，而 425 行在 **§12（423–450）**；
+    §5 是「SQLite 表结构」（97–127）。那句「Builder 仅可读 blueprint class 和自己的输出目录」
+    正是 §12:425 的原文。另 `packages/application/job-lifecycle.ts:13` 写 **§14 line 419**，
+    419 行在 **§11（401–422）**——那一段就是 CleanupService / `cleanup-retry`。
+  - **3 处锚点被排版拆行**：`packages/application/har-ingestion.ts:460`、
+    `tests/integration/worker-composition.test.ts:442`（两处 `§8 line` 折到下一行的 `272`/`310`）、
+    `apps/worker/builder-child.ts:11`（`§5 line` 折到 `425`，顺带也是错号）。
+    ⇒ 拆行是**独立的一条规则** `design-anchor-wrapped`：按行扫的扫描器遇到拆行会**静默看不见**，
+    那正是"文档一半的引用我没读"却照样报绿的形状。
+  - 另有 **3 处散文跟着同一个错号**（`builder-role.ts:6`「§5 says…」」、`builder-role.ts:15`
+    「the boundary §5 names」、`builder-role-plan.test.ts:12`「§5's promise…」）。它们是 bare `§5`，
+    **闸不核 bare 引用**——这 3 处是判据之外的人工修正，不假装是闸抓到的。
+- **两条读数要如实分清**：
+  ① 第一版跑闸时它**先把我新写的测试自己判红了**（那条"必须携带坏配对"的期望字符串本身长得像
+  `§8 line 310-430`）⇒ 加行内标记；上一条说「共 9 处使用」是**当时**的读数，本笔后是 **13 处**
+  （全在 `docs-check.test.ts`），那条历史行不动。
+  ② **P3b 是"树上等价、语义不等价"的一支**：把节区间差一改掉（`next.start - 1` → `next.start`）后
+  整棵树 **0 条原因**——今天没有引用落在节边界；它只被合成用例打死（P3）。⇒ 别读成"差一无害"，
+  边界那一行归谁是真差别，只是这棵树没覆盖到它。
+- 出界的文案也改了一次：起初写「而**这一行**属于 §X」，遇到"只有区间尾部出界"就自相矛盾
+  （`§8 line 310-430` 会答"这一行属于 §8"）。改成报**越界的那个数**：
+  `design-anchor-outside-section:§8 line 310-430(f.ts:1) 该节是 223-321，而行号 430 属于 §12 423-450`。
+- 末态闸门：typecheck 0／lint **206 文件 0 条**／`test:unit` **677/39**（`docs-check.test.ts` 单档 17 条）／
+  `test:integration` **503 passed + 6 skipped / 25 files**／`review` **0 命中**／
+  `docs:check` **17·13·32·262 引用/199 文件·373 锚点/14 节** exit 0。
+  变异 **8 支**（P1–P7＋P3b）：P1/P2 由闸红并打出具名原因，P3–P7 由具名用例红，**P3b 存活（见上）**。
+
+**这轮仍然没做的**：闸只核**带行号**的配对；**bare `§N`**（本轮另一次测算里 1482 处，含 `§7.3`、
+`§11` 这类）不可核——它只指一节、不指一句，而且 `§7.3` 这种小节标题不在 `## N.` 名录里。
+⇒ "散文把某句话归给错的节"这一族仍然抓不到（本轮那 3 处就是这么来的，靠人眼）。
+两个数对不上要写清楚：373 是闸的读数、1482 是独立测算（后者把带豁免标记的行也算进去了），
+所以别把它们读成一个自洽的分解。DESIGN 之外文件的 `§` 引用（TESTPLAN／PRD 的节）今天全树
+**0 处带行号**，所以没为它们建解析器。
 
 
 ## 还没有的东西

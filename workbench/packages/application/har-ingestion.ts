@@ -457,8 +457,8 @@ export class HarIngestionService {
       );
     }
     // A declared URL target never reaches this line: it has no store-minted source artifact, and the
-    // `import-incomplete` refusal above is what says so. So the two kinds left are exactly §8 line
-    // 272's two, and the narrowing below is a type fact rather than a second gate.
+    // `import-incomplete` refusal above is what says so. So the two kinds left are exactly the two
+    // §8 line 272 names, and the narrowing below is a type fact rather than a second gate.
     const format: FileTargetKind = target.kind === "asar" ? "asar" : "har";
     const outcome = await this.inspector.inspect({
       capturePath,

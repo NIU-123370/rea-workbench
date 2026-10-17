@@ -17,7 +17,7 @@ import { isId, newId } from "../../packages/domain/identity.ts";
 import type { JsonObject, JsonValue } from "../../packages/domain/json-value.ts";
 import { isJsonObject } from "../../packages/domain/json-value.ts";
 
-// The parent half of the Builder role (DESIGN §2, §5 line 425, §7.3, §10 / PRD A07, issue #19).
+// The parent half of the Builder role (DESIGN §2, §12 line 425, §7.3, §10 / PRD A07, issue #19).
 //
 // The worker writes one file - the frozen handoff - into a directory the role owns, spawns the
 // role's program with an environment `planBuilderLaunch` rebuilt from scratch, waits, and then

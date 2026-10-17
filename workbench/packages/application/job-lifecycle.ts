@@ -10,7 +10,8 @@ import { gateFail, type GateFailure } from "./gate-failure.ts";
 import { projectJobRecord, requestCancel } from "./job-queue.ts";
 import type { LeaseRow, StorageWriterPort } from "./ports.ts";
 
-// Cancelling a job and asking for its cleanup again (§8 lines 278-279, §11, §14 line 419; issue #58).
+// Cancelling a job and asking for its cleanup again (§8 lines 278-279; §11, whose line 419 is the
+// CleanupService paragraph; issue #58).
 //
 // Both operations are deliberately narrow, and the narrowness is the rule rather than a limitation:
 //   * `cancel` moves a job along §11's state machine and nothing else. A queued job becomes
