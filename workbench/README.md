@@ -596,6 +596,49 @@ Next 中继，读数逐条对过——无 `targetId` 与 `targetId=not-a-uuid` *
   导入之后的 `capture.inspect` 跟进没从这道门跑过（它没有 HTTP 命令名，README 的「还没有的东西」里
   ASAR/HAR 解码那半仍按未接线读）。
 
+浏览器实测·第八轮（2026-10-17 07:03–07:13 UTC，三个真进程：worker（数据目录 `rea-rig-s5/data`）＋
+web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件的第一轮**——落地清单（§8 line 270）、
+作业两扇门（line 278-279）、验证请求（line 297）此前只有 HTTP 通路，操作员手上有门但没有按钮）：
+
+- **这一轮先抓到一个静默缺陷**：用 `http://127.0.0.1:4496` 打开时页面渲染正常但**完全不 hydrate**——
+  会话行停在 SSR 的 `会话：unknown`、点「改用列表视图」毫无反应、按配对按钮走的是浏览器**原生表单提交**
+  （URL 变成 `/?`），而 console 里除了 HMR websocket 失败**没有任何报错**。Next 16 对不认识的 Host 拒发 dev
+  资源，`next.config.mjs` 加上 `allowedDevOrigins: ["127.0.0.1", "localhost"]` 之后同一个 URL 的读数变成
+  `会话：unpaired` 且视图切换生效；`localhost` 那侧打印 `[HMR] connected`。这行配置**没有加测试**（断言它
+  等于把配置抄第二遍），证据就是上面这组前后读数。
+- 中继的 origin 门与 API 的 §14 origin 门是**两道门**：dev 进程没带 `WB_UI_ORIGIN` 时，在 `localhost:4496`
+  提交配对得到 **403 `proxy-origin-mismatch`**（中继只认自己配置的那一个 own origin；转发给 API 的 `origin`
+  是中继重写的），带上 `WB_UI_ORIGIN=http://localhost:4496` 后同一次点击成功。默认值是一对
+  `localhost:3000`／`127.0.0.1:4310`，改端口就得同时改这一个变量。
+- 落地页首屏（未配对，SSR 就有）：`[data-panel="project-list"]` 在、行 0 条、空态逐字
+  「还没有会话：项目清单要配对之后才读得到，用终端里打印的配对码建立会话。」，配对表单在同一屏。
+- 用表单里的一次性码配对成功 → 列表立刻重读，两行逐字 `browser-round-8｜图 1｜库存 1`／
+  `second-project｜图 1｜库存 1`，`data-projects-count="2"`，尾行「没有更多项目了」，「下一页」按钮 0 个
+  （`nextCursor` 是 null；控件不为自己造游标）。
+- 点行上的链接真的导航到 `/project/a3357b9d…`，会话行 `会话：paired`。cookie 是**按 origin 隔离**的：
+  同一套 rig 换到 `127.0.0.1` 那侧读回来是 `unpaired`——这是浏览器的规则，不是页面的分支。
+- 作业面板按 §11 决定给不给按钮：`verify｜succeeded｜清理 complete` 与 `build｜succeeded｜清理 pending`
+  两行都**没有**取消按钮，位置上是那句「这一行已是终态 succeeded：§11 不让终态复活，取消只会返回现状」；
+  前者的清理格写「作业行的清理状态是 complete，没有要重排的清理」，后者给 1 个「重排清理」。
+- 按「重排清理」→ 面板行「已请求重排清理：没有可重排的清理（这扇门只回收自己发过的 staging，§5）」，
+  重读后那一行仍是 `succeeded/pending`：门说没重排，页面就不显示成重排过。
+- 代码 tab 自己找到候选 `b52b8b7e…`（作业 `resultRef` 那条路）与 3 个文件；新控件的比较器输入框**初值是空的**
+  ——没有任何门列出装好的策略名（记在 #58），页面不替操作员猜一个。
+- 填一个不存在的 `looser-than-anything-v9` → 「验证请求被拒：comparator-policy-not-installed（declaredCount 2）」，
+  作业行**仍是 2 条**：被拒的请求连作业都不排（§10 那句在这里是可读的两件事）。
+- 改成 `exact-http-normalized-v1` → 「已排入验证队列：作业 64150627-6478-4470-a24f-a0935d8f62ca（queued）」，
+  列表头一行变成 `queued/pending`，两个按钮都在（非终态可取消、清理未完可重排）。
+- 按「请求取消」→ 面板行「已请求取消，现在这一行是 cancelled」，那一行 `cancelled/pending`，全页取消按钮
+  0 个、重排按钮 2 个：按钮的有无是 `jobActions` 一处判定，页面没有再写第二份。
+- console 全程两条信息（React DevTools 提示、`[HMR] connected`）加**一条故意的 400**（那次不存在的比较器名），
+  没有未捕获异常。变异：`mutate6.py` 16 条视图模型变异（U1-U16，含新抽出的 `isSessionReason`）**全被杀**，
+  跑完 `RESTORED rc=0`——顺带修掉一件事：`mutate5.py` 的备份目录是 `if not exists` 才写，于是它把 14:54
+  的旧快照当"还原"覆回了 `view-model.ts`，那一轮的 `RESTORED rc=1` 就是这件事的读数，不是测试红。
+- 这一轮**没验到的**：截图与真指针点击都拿不到（in-app 浏览器 viewport 0×0，pointer 动作直接报
+  `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`），上面所有动作是在真页面里派发真 DOM 事件、由 React 处理的，
+  **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
+  蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
+
 浏览器实测·第二轮（2026-10-17 04:23–04:26，真 Chrome 1600×1200，同一套三个真进程；这一轮
 把上面那条"代码给具名空态"读数是**作废**的，因为作业页与 resultRef 从那之后才通）：
 
@@ -631,6 +674,13 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 不可声明为已通过。
 
 明确**未实现 / 未验证**的范围：
+
+- 页面上的写控件只覆盖了一部分门：现在**有**按钮的是样本决定、作业取消、清理重排、验证请求，落地清单
+  与配对表单也在了（§8 line 270）；**没有**控件的是 `project.create`、`vector.create`、`plan.build`、
+  `blueprint.freeze` 与 HAR 上传——那几扇门在第七轮里是靠页面里的 `fetch` 驱动的，操作员点不到。
+  路由与命令都在，缺的是页面这一头（issue #58 的账）。
+- 换 UI 端口要同时换 `WB_UI_ORIGIN`：中继只认它启动时读到的那一个 own origin，浏览器用别的 host 或端口
+  打开就拿到 403 `proxy-origin-mismatch`（第八轮那次先被拒、配上变量后同一次点击成功，就是这个形状）。
 
 - ASAR 的导入 ingestion job、目标行与 artifact 落库尚未由 worker 装配接线
   （`apps/worker` 现在只注册 HAR 导入闭环，所以 `kind:"asar"` 的上传在门口就具名拒绝：

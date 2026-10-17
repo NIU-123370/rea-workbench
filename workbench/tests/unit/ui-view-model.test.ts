@@ -13,8 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
-  evidenceMetaLine, refusalFactsLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
-  pickCandidateSource,
+  evidenceMetaLine, isSessionReason, jobActionLine, jobActions, PROJECTS_EMPTY_LINE, pickCandidateSource, projectLine, projectsNotice, projectsPageOf, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, verificationRequestLine,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
 
@@ -485,5 +484,138 @@ describe("the single parse of an inventory reply (§8 lines 283 and 285 / issue 
     expect(relayData({ data: { csrfToken: "issued" } })).toEqual({ csrfToken: "issued" });
     expect(relayData({ csrfToken: "issued" })).toEqual({ csrfToken: "issued" });
     expect(relayData(null)).toBeNull();
+  });
+});
+
+
+// The controls the page can honestly offer (§8 lines 270, 277-279, 297).
+//
+// Each branch below is a decision the browser island makes *before* it renders a button or a line,
+// so a mutation that flips one of them has to show up as a wrong word on screen. That is the bar
+// this file holds itself to: an unexercised branch is a branch that should not exist.
+describe("the lifecycle controls on a job row (DESIGN §11, §8 lines 278-279)", () => {
+  const row = (state: string, cleanupState: string) => ({ id: "job-1", kind: "build", state, cleanupState });
+
+  it("offers cancel to the states §11 lets move", () => {
+    for (const state of ["queued", "running", "cancelling"]) {
+      const actions = jobActions(row(state, "pending"));
+      expect(actions.cancel, state).toBe(true);
+      expect(actions.cancelNote, state).toBeNull();
+    }
+  });
+
+  it("names the terminal state instead of offering a cancel that can only repeat it", () => {
+    for (const state of ["succeeded", "failed", "cancelled", "interrupted"]) {
+      const actions = jobActions(row(state, "pending"));
+      expect(actions.cancel, state).toBe(false);
+      // The note quotes the state the row is in: an operator deciding whether to click twice needs
+      // the reason, not a greyed-out control.
+      expect(actions.cancelNote, state).toContain(state);
+    }
+  });
+
+  it("refuses to guess at a state it cannot name", () => {
+    const actions = jobActions(row("paused", "pending"));
+    expect(actions.cancel).toBe(false);
+    expect(actions.cancelNote).toContain("paused");
+    expect(actions.cancelNote).toContain("不在 §11 的作业状态表里");
+  });
+
+  it("offers the cleanup retry whenever the row does not say it is done", () => {
+    expect(jobActions(row("succeeded", "failed")).cleanupRetry).toBe(true);
+    // `pending` stays offered even though it is the common case's opposite: the door re-schedules
+    // the *leases* it can prove it minted, and a job's cleanup state is a separate state (§11).
+    expect(jobActions(row("running", "pending")).cleanupRetry).toBe(true);
+    expect(jobActions(row("running", "pending")).cleanupRetryNote).toBeNull();
+    const done = jobActions(row("succeeded", "complete"));
+    expect(done.cleanupRetry).toBe(false);
+    expect(done.cleanupRetryNote).toContain("complete");
+  });
+
+  it("says what each door answered, including 'nothing was scheduled'", () => {
+    expect(jobActionLine("cancel", { state: "cancelling" })).toContain("cancelling");
+    expect(jobActionLine("cancel", {})).toBe("取消已被接受，但回包没带状态");
+    expect(jobActionLine("cleanup-retry", { leaseIds: ["a", "b"], cleanupState: "pending" })).toContain("2 个 lease");
+    expect(jobActionLine("cleanup-retry", { leaseIds: [], cleanupState: "failed" })).toContain("没有可重排的清理");
+    expect(jobActionLine("cleanup-retry", { cleanupState: "pending" })).toContain("pending");
+    expect(jobActionLine("cleanup-retry", {})).toContain("既没有 lease 清单也没有清理状态");
+    // A non-array `leaseIds` is not silently counted as zero: the answer would then claim a fact
+    // the reply never carried.
+    expect(jobActionLine("cleanup-retry", { leaseIds: "nope", cleanupState: "failed" })).toContain("failed");
+  });
+});
+
+describe("the verification request from the page (§8 line 297)", () => {
+  it("names the job it queued and says it is only queued", () => {
+    const line = verificationRequestLine({ id: "job-9", state: "queued", kind: "verify" });
+    expect(line).toContain("job-9");
+    expect(line).toContain("queued");
+    expect(line).toContain("队列");
+  });
+
+  it("does not turn a missing id into a success, nor a foreign kind into a verification", () => {
+    expect(verificationRequestLine({ state: "queued" })).toContain("没带作业 id");
+    expect(verificationRequestLine({ id: "x", kind: "build" })).toContain("不是 verify");
+    expect(verificationRequestLine({ id: "x" })).toContain("已排入验证队列：作业 x");
+  });
+});
+
+describe("the landing project list (§8 line 270)", () => {
+  it("reads the relay envelope and the bare page alike", () => {
+    const rowA = { id: "p1", name: "cart", graphRevision: 3, inventoryRevision: 4 };
+    expect(projectsPageOf({ data: { items: [rowA], nextCursor: "cursor-1" } })).toEqual({
+      rows: [rowA],
+      nextCursor: "cursor-1",
+    });
+    expect(projectsPageOf({ items: [rowA], nextCursor: null })).toEqual({ rows: [rowA], nextCursor: null });
+  });
+
+  it("drops a row it cannot link to, and keeps the numbers it can show", () => {
+    const listed = projectsPageOf({
+      items: [
+        { id: "p2", name: "no-revisions" },
+        { name: "no id", id: 7 },
+        null,
+      ],
+      nextCursor: 42,
+    });
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0]).toEqual({ id: "p2", name: "no-revisions", graphRevision: 0, inventoryRevision: 0 });
+    // A cursor this server did not issue as a string is no cursor: the page must not carry one it
+    // could not have been given.
+    expect(listed.nextCursor).toBeNull();
+  });
+
+  it("tells the three empty states apart, and the refusal is not one of them", () => {
+    expect(projectsNotice(null, 3)).toBe("");
+    expect(projectsNotice(null, 0)).toBe(PROJECTS_EMPTY_LINE["empty-page"]);
+    expect(projectsNotice({ reason: "cookie-absent", facts: {} }, 0)).toBe(PROJECTS_EMPTY_LINE["no-session"]);
+    // A stale cookie after a worker restart is the same operator problem as no cookie at all
+    // (§14: sessions live in the worker's memory), so it says pair again rather than "refused".
+    expect(projectsNotice({ reason: "session-unknown", facts: {} }, 0)).toBe(PROJECTS_EMPTY_LINE["no-session"]);
+    expect(projectsNotice({ reason: "projects-limit", facts: { limit: 5000, maxLimit: 200 } }, 0)).toContain("limit 5000");
+    // The same rule the form's visibility turns on, tested once rather than guessed twice.
+    expect(isSessionReason("cookie-absent")).toBe(true);
+    expect(isSessionReason("session-unknown")).toBe(true);
+    expect(isSessionReason("projects-limit")).toBe(false);
+  });
+
+  it("renders a row as the name plus the two revisions it read", () => {
+    expect(projectLine({ id: "p", name: "cart", graphRevision: 1, inventoryRevision: 2 })).toBe("cart｜图 1｜库存 2");
+  });
+});
+
+describe("one owner for how a refusal reads (§12.1)", () => {
+  it("publishes the named numbers and omits them when there are none", () => {
+    expect(refusalLine("决定被拒", "inventory-revision-conflict", { expected: 4, actual: 5 })).toBe(
+      "决定被拒：inventory-revision-conflict（actual 5 · expected 4）",
+    );
+    expect(refusalLine("决定被拒", "role-may-not-decide", {})).toBe("决定被拒：role-may-not-decide");
+    // The samples tab's wording is the same function now: two spellings of "this was refused and
+    // here is why" is how a page ends up hiding the numbers in one of its own panels.
+    expect(samplesRefusalLine("decision", "inventory-revision-conflict", { expected: 4, actual: 5 })).toBe(
+      refusalLine("决定被拒", "inventory-revision-conflict", { expected: 4, actual: 5 }),
+    );
+    expect(samplesRefusalLine("read", "vector-cursor", {})).toBe("库存读取被拒：vector-cursor");
   });
 });

@@ -2,52 +2,23 @@ import { z } from "zod";
 
 import { apiErrorSchema } from "./errors.ts";
 import { idSchema, instantSchema, nonEmptyString } from "./primitives.ts";
+// Imported for the schemas below *and* re-exported: a re-export alone would not put these names in
+// scope here, and a copy of the vocabulary in two files is what this move exists to remove.
+import { CLEANUP_STATES, JOB_KINDS, JOB_STATES } from "../domain/job-states.ts";
 
-export const JOB_KINDS = ["capture", "inspect", "build", "verify"] as const;
-
-export const JOB_STATES = [
-  "queued",
-  "running",
-  "cancelling",
-  "succeeded",
-  "failed",
-  "cancelled",
-  "interrupted",
-] as const;
-
-export const CLEANUP_STATES = ["pending", "complete", "failed"] as const;
-
-export type JobKind = (typeof JOB_KINDS)[number];
-export type JobState = (typeof JOB_STATES)[number];
-export type CleanupState = (typeof CLEANUP_STATES)[number];
-
-// State machine of DESIGN §11. `queued` may only reach running, failed or
-// cancelled; a cancelled job never resumes, and recovery marks lost executors
-// interrupted instead of replaying them.
-export const JOB_TRANSITIONS: Record<JobState, readonly JobState[]> = {
-  queued: ["running", "failed", "cancelled"],
-  running: ["cancelling", "succeeded", "failed", "interrupted"],
-  cancelling: ["cancelled", "interrupted"],
-  succeeded: [],
-  failed: [],
-  cancelled: [],
-  interrupted: [],
-} as const;
-
-export const TERMINAL_JOB_STATES: readonly JobState[] = [
-  "succeeded",
-  "failed",
-  "cancelled",
-  "interrupted",
-];
-
-export function isTerminalJobState(state: JobState): boolean {
-  return TERMINAL_JOB_STATES.includes(state);
-}
-
-export function canTransitionJob(from: JobState, to: JobState): boolean {
-  return JOB_TRANSITIONS[from].includes(to);
-}
+// §11's machine is the domain's, not this file's: the page has to consult it too and cannot reach
+// it through the zod primitives without pulling `node:crypto` into the browser bundle. Re-exported
+// here so every existing importer of the contract keeps one name for each of these facts.
+export {
+  CLEANUP_STATES,
+  JOB_KINDS,
+  JOB_STATES,
+  JOB_TRANSITIONS,
+  TERMINAL_JOB_STATES,
+  canTransitionJob,
+  isTerminalJobState,
+} from "../domain/job-states.ts";
+export type { CleanupState, JobKind, JobState } from "../domain/job-states.ts";
 
 export const jobRecordSchema = z.strictObject({
   id: idSchema,
