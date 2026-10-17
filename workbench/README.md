@@ -1434,6 +1434,31 @@ runner 的，见下文"这轮没做浏览器"）：
 所以它的证据是 8 条集成用例，不是一次 CI 绿；#123 剩下两格（`dev/build/start` 的命名、
 独立 `test:e2e` 档）**仍等你**，因为它们要么改文档、要么新增一条表外命令面。
 
+发布门禁·第廿七轮（2026-10-18 04:51–04:54，**把"`error_json` 按构造是安全的"从推断变成 enforced**）：
+
+- 来自 **#125 的第 5 格**（对账 `#8` 时留下的那条）：§12.1 要求"每一条消息、细节与日志行都按声明过滤"，
+  而 `jobs.error_json` 的唯一构造点 `job-queue.ts jobErrorFromFailure()` **不调用过滤器**。它当时能过，
+  是因为 `message` 放的是 `GateFailure.reason`（一个名字）、details 走 `SAFE_DETAIL_KEYS` 白名单——
+  **那是推断，不是读数**：没有任何用例证明"一个带值或带散文的 reason 进不去"。
+- 改法**不是**在这里再叫一次 `redactText`（拿不到声明上下文，见 #125 里"我不会先写一个不会红的检查"那条），
+  而是在构造点把话说死：`message` 只能是**裸名字** —— `/^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/`，
+  不合形状整条换成固定名 `reason-unshapeable`，**不截断、不回显**；`code` 原样保留，
+  所以一次替换仍可诊断。`limits.maxGenerationAttempts`、`proxy-path-depth:0` 这类带点带冒号的
+  **名字**照样原样通过——规则针对"散文与值"，不是"名字里不许有分隔符"。
+- 三条新用例（`tests/unit/job-queue.test.ts` 现 **12** 条）：具名原因逐字保留且 `retryable` 仍由状态表决定、
+  散文与 base64 形状被替换且**序列化结果不含原值任何片段**、替换之后 `code` 还在。
+  变异 **5 支全红**：T1 不做检查、T2 一律替换（证明它不是"吞掉一切"）、T3 放宽到允许空格、
+  **T4 替换时保留前 40 个字符**（半回显也抓到）、T5 `retryable` 恒真。
+- 一个副作用是**读数而不是断言**：全树跑完没有一条用例回归，说明今天确实没有非名字形状的 reason
+  流进这里；这条规则因此是"把已经成立的事变成不可违反"，不是改行为。
+- 末态闸门：typecheck 0／lint **207 文件 0 条**／`test:unit` **689/39**／`test:integration`
+  **516 passed + 6 skipped / 26 files**／`review` 0 命中／`docs:check` exit 0。
+
+**这轮仍然没做的**：#125 剩下的面仍等 #119 那一族的裁决（契约正文／蓝图 payload／导出要用哪一份声明）；
+`resource_leases.last_error_json` 这一面**今天没有任何非 null 写入点**
+（现读 `grep -rn "lastErrorJson: [^n]" packages apps` **0 命中**），所以它是"字段存在、生产者缺席"，
+既不勾也不假装修。
+
 
 ## 还没有的东西
 
@@ -1445,9 +1470,11 @@ API 进程本体（DESIGN §14 给 web 的只有 `WB_HOST`/`WB_PORT`/`WB_DATA_DI
 `http://127.0.0.1:4310` 上是真的：`POST /api/v1/session` 换 HttpOnly SameSite=Strict cookie +
 csrfToken + reviewerId，变更请求要 `X-CSRF-Token` 与精确 Host/Origin，SSE 按 worker 已提交的
 seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/web-proxy-route.test.ts` 用一个
-只发一帧就不说话的流把这条钉住）。`db:migrate` 与 `dev` 仍未实现——迁移由 worker 启动时执行
-（没有独立的迁移命令），`.env.example` 还在队列里；宿主 broker 的契约与控制面门禁已落地
-（issue #21，见下），但 `apps/broker` 进程本体仍未实现。本机没有 Docker 时，隔离类门禁一律
+只发一帧就不说话的流把这条钉住）。`npm run db:migrate` 已经有了（#126：先看计划、要批准、先备份，才迁移），
+但 worker 启动时自动跑迁移那条路不变；TESTPLAN §5 里剩下的是 `dev`/`build`/`start` 的**命名**
+（仓库现在叫 `ui:dev`/`ui:build`/`ui:start`）与一个独立的 `test:e2e` 档（#123，等你选）；
+`.env.example` 还在队列里；宿主 broker 的契约与控制面门禁已落地（issue #21，见下），
+但 `apps/broker` **进程本体仍未实现**（#121）。本机没有 Docker 时，隔离类门禁一律
 不可声明为已通过。
 
 明确**未实现 / 未验证**的范围：
