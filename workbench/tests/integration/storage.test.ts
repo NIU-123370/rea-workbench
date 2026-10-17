@@ -14,7 +14,7 @@ import {
   planMigrations,
 } from "../../packages/adapters/storage/database.ts";
 import { MIGRATIONS } from "../../packages/adapters/storage/migrations.ts";
-import { ArtifactStore, OWNERSHIP_MARKER } from "../../packages/adapters/storage/artifacts.ts";
+import { ArtifactStore, NODE_ARTIFACT_DURABILITY, OWNERSHIP_MARKER } from "../../packages/adapters/storage/artifacts.ts";
 import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
 import { newId, nowInstant } from "../../packages/domain/identity.ts";
 import type { Id } from "../../packages/domain/identity.ts";
@@ -449,5 +449,137 @@ describe("backup (DESIGN §13, D23, issue #7)", () => {
       .all() as { name: string }[];
     expect(names.map((row) => row.name)).toContain("evidence_records");
     copy.close();
+  });
+});
+
+describe("the flush order §5 promises before a name exists", () => {
+  // `rename` is atomic only once the bytes are on the device. These cases pin the two flushes
+  // the store used to claim in a comment without making: content before the rename, the
+  // directory entry after it - and that a failing flush is a refusal that leaves no half-written
+  // artifact and no orphan temp behind (T13's 不发布半写 artifact, T16's power-loss recovery).
+  let durRoot: string;
+
+  function recorder(failAt: "file" | "dir" | null) {
+    const ops: string[] = [];
+    return {
+      ops,
+      durability: {
+        async writeAndSync(file: string, bytes: Uint8Array) {
+          await NODE_ARTIFACT_DURABILITY.writeAndSync(file, bytes);
+          ops.push(`sync-file:${path.basename(file)}`);
+          if (failAt === "file") throw new Error("ENOSPC: no space left on device");
+        },
+        async syncDirectory(dir: string) {
+          await NODE_ARTIFACT_DURABILITY.syncDirectory(dir);
+          ops.push(`sync-dir:${path.basename(dir)}`);
+          if (failAt === "dir") throw new Error("EROFS: read-only file system, fsync");
+        },
+      },
+    };
+  }
+
+  beforeAll(async () => {
+    durRoot = await mkdtemp(path.join(tmpdir(), "rea-wb-dur-"));
+  });
+  afterAll(async () => {
+    await rm(durRoot, { recursive: true, force: true });
+  });
+
+  it("flushes the bytes while the final name does not exist, and the directory after it does", async () => {
+    // The rename itself is not observable from the port, so the order is proven by what is on
+    // the file system at each flush: no `.bin` yet when the content is flushed, the `.bin`
+    // present (and the temp gone) when the directory is flushed.
+    const seen: { op: string; binPresent: boolean; tempPresent: boolean }[] = [];
+    const projectId = newId();
+    const probe = {
+      async writeAndSync(file: string, bytes: Uint8Array) {
+        await NODE_ARTIFACT_DURABILITY.writeAndSync(file, bytes);
+        const entries = await readdir(path.dirname(file)).catch(() => []);
+        seen.push({ op: "sync-file", binPresent: entries.some((n) => n.endsWith(".bin")), tempPresent: entries.some((n) => n.endsWith(".tmp")) });
+      },
+      async syncDirectory(dir: string) {
+        await NODE_ARTIFACT_DURABILITY.syncDirectory(dir);
+        const entries = await readdir(dir).catch(() => []);
+        seen.push({ op: "sync-dir", binPresent: entries.some((n) => n.endsWith(".bin")), tempPresent: entries.some((n) => n.endsWith(".tmp")) });
+      },
+    };
+    const store = new ArtifactStore(durRoot, { durability: probe });
+    const published = await store.publish(projectId, "inspector", new Uint8Array([1, 2, 3, 4]));
+    if (!published.ok) throw new Error(JSON.stringify(published.error));
+    expect(seen).toEqual([
+      { op: "sync-file", binPresent: false, tempPresent: true },
+      { op: "sync-dir", binPresent: true, tempPresent: false },
+    ]);
+  });
+
+  it("flushes a staging payload before its final name exists", async () => {
+    // Different code path, same claim: the upload bytes are durable under the opaque id the
+    // import command later cites. Dropping the staging flush alone would otherwise pass.
+    const seen: { op: string; finalPresent: boolean; tempPresent: boolean }[] = [];
+    const projectId = newId();
+    const stagingId = "0f0f0f0f-0000";
+    const probe = {
+      async writeAndSync(file: string, bytes: Uint8Array) {
+        await NODE_ARTIFACT_DURABILITY.writeAndSync(file, bytes);
+        const entries = await readdir(path.dirname(file)).catch((): string[] => []);
+        seen.push({ op: "sync-file", finalPresent: entries.includes(stagingId), tempPresent: entries.some((n) => n.endsWith(".tmp")) });
+      },
+      async syncDirectory(dir: string) {
+        await NODE_ARTIFACT_DURABILITY.syncDirectory(dir);
+        const entries = await readdir(dir).catch((): string[] => []);
+        seen.push({ op: "sync-dir", finalPresent: entries.includes(stagingId), tempPresent: entries.some((n) => n.endsWith(".tmp")) });
+      },
+    };
+    const store = new ArtifactStore(durRoot, { durability: probe });
+    const staged = await store.writeStaging(projectId, stagingId, new TextEncoder().encode("har-bytes"));
+    if (!staged.ok) throw new Error(JSON.stringify(staged.error));
+    // Two content flushes land first: the ownership marker (no temp yet) and then the payload
+    // (temp present, final name not). The directory is flushed last, after the rename.
+    expect(seen).toEqual([
+      { op: "sync-file", finalPresent: false, tempPresent: false },
+      { op: "sync-file", finalPresent: false, tempPresent: true },
+      { op: "sync-dir", finalPresent: true, tempPresent: false },
+    ]);
+  });
+
+  it("the default durability really flushes - the promise was in a comment before it was in code", () => {
+    // Whether a device actually got fsynced is not observable from user space, so this guard is
+    // source-shaped on purpose: the ordering tests above prove the store *asks* for the flush,
+    // and this proves the shipped implementation performs one instead of a plain write.
+    const write = NODE_ARTIFACT_DURABILITY.writeAndSync.toString();
+    const dir = NODE_ARTIFACT_DURABILITY.syncDirectory.toString();
+    expect(write).toContain(".sync()");
+    expect(write).toContain(".close()");
+    expect(dir).toContain(".sync()");
+    expect(dir).toContain(".close()");
+  });
+
+  it("refuses a failed content flush without publishing or leaving a temp behind", async () => {
+    const spy = recorder("file");
+    const store = new ArtifactStore(durRoot, { durability: spy.durability });
+    const projectId = newId();
+    const refused = await store.publish(projectId, "blueprint", new TextEncoder().encode("half-written"));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.code).toBe("ARTIFACT_WRITE_FAILED");
+    const partition = path.join(durRoot, "projects", projectId, "artifacts", "blueprint");
+    expect(await readdir(partition).catch(() => [])).toEqual([]);
+  });
+
+  it("refuses a failed directory flush even though the bytes landed", async () => {
+    const spy = recorder("dir");
+    const store = new ArtifactStore(durRoot, { durability: spy.durability });
+    const projectId = newId();
+    const bytes = new TextEncoder().encode("renamed-but-not-persisted");
+    const refused = await store.publish(projectId, "report", bytes);
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.code).toBe("ARTIFACT_WRITE_FAILED");
+    // The name is on the file system, and the caller is told it did not land: reporting success
+    // here would be the half-published artifact T13 forbids, while deleting it would destroy
+    // bytes a retry wants. A retry of the same bytes then takes the `existing` path and succeeds.
+    const again = new ArtifactStore(durRoot);
+    const retried = await again.publish(projectId, "report", bytes);
+    expect(retried.ok).toBe(true);
   });
 });
