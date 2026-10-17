@@ -750,3 +750,82 @@ export function generatePanelOf(journal: JournalEntryWire[] | null): GeneratePan
   const blueprints = frozenBlueprintIds(journal);
   return { state: blueprints.length === 0 ? "no-blueprint" : "ready", blueprints };
 }
+
+// Every write control on this page needs the session's CSRF token, and all of them used to say the
+// same sentence in their own words - five copies is five chances for one panel to keep posting after
+// the worker restarted and took the token away. One string, one meaning: nothing was sent, and the
+// reason is the pairing, not the payload.
+export const NO_SESSION_LINE = "还没有可用的会话令牌，先完成配对。";
+
+// §8's `POST /projects` answer is the row it just wrote, and `graphRevision: 0` is the part an
+// operator reads as "nothing has been analysed yet" - so the line says it instead of a bare 已创建.
+// §8's column for this door is `{name:string}`, and the storage model treats the name as the only
+// thing an operator types there. An empty one is said before it is sent - not because the API accepts
+// it (it does not) but because "先写个名字" is the answer, while a 400 about a required field is not.
+export const PROJECT_NAME_EMPTY_LINE = "还没有写项目名：这道门收的就是一个名字，空着不算一次创建。";
+
+export function projectCreateLine(record: { id?: unknown; name?: unknown; graphRevision?: unknown }): string {
+  const id = typeof record.id === "string" ? record.id : null;
+  const name = typeof record.name === "string" ? record.name : null;
+  if (id === null || name === null) return "项目创建已被接受，但回包没带 id 或名字";
+  const revision = typeof record.graphRevision === "number" ? `｜图 ${String(record.graphRevision)}` : "";
+  return `已建项目 ${name}${revision}｜id ${id}`;
+}
+
+// §8 line 272's 202 is `{targetId, job}`: the file became a target and an inspect job, and nothing
+// else. The job's own state is quoted rather than assumed, because the door answers while the worker
+// has only just been handed the bytes - the inventory rows arrive when that job runs.
+export function importReceiptLine(record: { targetId?: unknown; job?: Record<string, unknown> | null }): string {
+  const targetId = typeof record.targetId === "string" ? record.targetId : null;
+  const job = record.job ?? {};
+  const jobId = typeof job["id"] === "string" ? job["id"] : null;
+  if (targetId === null || jobId === null) return "导入已被接受，但回包没带目标或作业 id";
+  const state = typeof job["state"] === "string" ? `（${job["state"]}）` : "";
+  const kind = typeof job["kind"] === "string" ? ` ${job["kind"]}` : "";
+  return `已收下采集文件：目标 ${targetId}｜作业${kind} ${jobId}${state}`;
+}
+
+// The form can tell before it sends that the `file` part is absent. This is not client-side
+// validation of what the door checks - the door still refuses an empty body by name - it is the
+// difference between "you have not picked a file yet" and a 400 that reads like a malfunction.
+export const UPLOAD_NO_FILE_LINE = "还没有选文件：这道门只收 multipart 的 `file` 部分，空体不算一次导入。";
+
+// --- What a control may send, decided once before anything crosses the socket ------------------
+//
+// Every write on this page repeats the same two questions - is there a token to sign with, and is
+// the body the door actually describes? Ten copies of those checks is ten chances for one panel to
+// keep posting after a restart took the token away, or to send a form with no file in it. Answering
+// them in functions means a test can say what happens, not only a browser.
+
+export type Gate = { ok: true } | { ok: false; line: string };
+
+// The token is the one this session was issued; an empty string means this page has never paired (or
+// the worker restarted and §14's memory-resident sessions went with it), so nothing is sent and the
+// sentence names the pairing rather than a 403 the operator would have to interpret.
+export function sessionGate(csrf: string): Gate {
+  return csrf === "" ? { ok: false, line: NO_SESSION_LINE } : { ok: true };
+}
+
+export type ProjectDraft = { ok: true; body: { name: string } } | { ok: false; line: string };
+
+export function projectDraftOf(rawName: string): ProjectDraft {
+  const name = rawName.trim();
+  return name === "" ? { ok: false, line: PROJECT_NAME_EMPTY_LINE } : { ok: true, body: { name } };
+}
+
+export type UploadDraft = { ok: true; form: FormData } | { ok: false; line: string };
+
+// The four names are exactly §8 line 272's list; a fifth would be refused by the door and a missing
+// `file` is said here rather than discovered as a 400. Optional fields are appended only when the
+// operator filled them, so an empty deadline does not arrive as an unparseable `""`.
+export function uploadDraftOf(input: { file: File | null; kind: string; deadlineAt: string; sensitiveValues: string }): UploadDraft {
+  if (input.file === null) return { ok: false, line: UPLOAD_NO_FILE_LINE };
+  const form = new FormData();
+  form.append("file", input.file);
+  form.append("kind", input.kind);
+  if (input.deadlineAt.trim() !== "") form.append("deadlineAt", input.deadlineAt.trim());
+  for (const value of input.sensitiveValues.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "")) {
+    form.append("sensitiveValues", value);
+  }
+  return { ok: true, form };
+}

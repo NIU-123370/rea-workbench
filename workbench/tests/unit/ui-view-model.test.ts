@@ -13,7 +13,7 @@ import {
   directedInquiry,
   listView,
   presentStatus,
-  blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
+  blueprintFreezeLine, evidenceMetaLine, FREEZE_EMPTY_LINE, importReceiptLine, NO_SESSION_LINE, projectDraftOf, PROJECT_NAME_EMPTY_LINE, projectCreateLine, sessionGate, uploadDraftOf, frozenBlueprintIds, freezablePlanIds, isSessionReason, jobActionLine, jobActions, freezePanelOf, GENERATE_EMPTY_LINE, generatePanelOf, journalEntriesOf, PROJECTS_EMPTY_LINE, pickCandidateSource, UPLOAD_NO_FILE_LINE, projectLine, projectsNotice, projectsPageOf, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, sampleRowsOf, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine,
 } from "../../apps/web/ui/view-model.ts";
 import type { GraphEdgeView, GraphNodeView } from "../../apps/web/ui/view-model.ts";
 
@@ -736,5 +736,80 @@ describe("what the journal says is freezable (§8 lines 291-292, 294 / §12.2)",
     expect(FREEZE_EMPTY_LINE["no-journal"]).not.toBe(FREEZE_EMPTY_LINE["no-plan"]);
     expect(FREEZE_EMPTY_LINE["no-plan"]).not.toBe(FREEZE_EMPTY_LINE["all-frozen"]);
     expect(GENERATE_EMPTY_LINE["no-blueprint"]).toContain("冻结");
+  });
+});
+
+// The two doors an operator reaches from the landing page and the 样本 tab (§8's `POST /projects`
+// and line 272). Both receipts are read field by field: each has a sentence for "the server did not
+// bring back what this line quotes", because a panel that fills the gap itself is a panel that has
+// invented an id.
+describe("the create and upload receipts (§8 POST /projects, line 272)", () => {
+  it("names the project it made, with the revision that says nothing is analysed yet", () => {
+    expect(projectCreateLine({ id: "p-1", name: "cart", graphRevision: 0 })).toBe("已建项目 cart｜图 0｜id p-1");
+    expect(projectCreateLine({ id: "p-1", name: "cart" })).toBe("已建项目 cart｜id p-1");
+    expect(projectCreateLine({ name: "cart" })).toContain("没带 id 或名字");
+    expect(projectCreateLine({ id: "p-1" })).toContain("没带 id 或名字");
+    expect(projectCreateLine({ id: "p-1", name: 7, graphRevision: 0 })).toContain("没带 id 或名字");
+  });
+
+  it("quotes the target and the job an import left behind, not a guessed state", () => {
+    expect(importReceiptLine({ targetId: "t-1", job: { id: "j-1", state: "queued", kind: "inspect" } })).toBe(
+      "已收下采集文件：目标 t-1｜作业 inspect j-1（queued）",
+    );
+    // A job with no state is a row the door wrote before the queue moved it - the line drops the
+    // parenthetical rather than printing `undefined`.
+    expect(importReceiptLine({ targetId: "t-1", job: { id: "j-1" } })).toBe("已收下采集文件：目标 t-1｜作业 j-1");
+    expect(importReceiptLine({ targetId: "t-1" })).toContain("没带目标或作业 id");
+    expect(importReceiptLine({ job: { id: "j-1" } })).toContain("没带目标或作业 id");
+    expect(importReceiptLine({})).toContain("没带目标或作业 id");
+  });
+
+  it("keeps the three things a control can say before it sends apart", () => {
+    expect(NO_SESSION_LINE).not.toBe(UPLOAD_NO_FILE_LINE);
+    expect(PROJECT_NAME_EMPTY_LINE).not.toBe(NO_SESSION_LINE);
+    // Each names the thing that is missing and where to fix it, which is the difference between a
+    // form and a guess: the session line points at pairing, the other two at the field itself.
+    expect(NO_SESSION_LINE).toContain("配对");
+    expect(UPLOAD_NO_FILE_LINE).toContain("file");
+    expect(PROJECT_NAME_EMPTY_LINE).toContain("名字");
+  });
+});
+
+describe("what a control is allowed to send, decided before the socket (§14)", () => {
+  it("holds every write back until there is a token to sign with", () => {
+    expect(sessionGate("")).toEqual({ ok: false, line: NO_SESSION_LINE });
+    expect(sessionGate("a-token")).toEqual({ ok: true });
+  });
+
+  it("trims a project name and refuses an empty one before posting it", () => {
+    expect(projectDraftOf("  cart  ")).toEqual({ ok: true, body: { name: "cart" } });
+    expect(projectDraftOf("   ")).toEqual({ ok: false, line: PROJECT_NAME_EMPTY_LINE });
+    // Whitespace-only is the same absence, and saying it once here is why the door never sees a body
+    // whose only field is blank.
+    expect(projectDraftOf("\t\n").ok).toBe(false);
+  });
+
+  it("builds the multipart body from the four §8 names and refuses a form with no file", () => {
+    const refused = uploadDraftOf({ file: null, kind: "har", deadlineAt: "", sensitiveValues: "" });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.line).toBe(UPLOAD_NO_FILE_LINE);
+
+    const file = new File([new Uint8Array([1, 2, 3])], "cart.har", { type: "application/json" });
+    const built = uploadDraftOf({ file, kind: "har", deadlineAt: "  ", sensitiveValues: " a , , b " });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    // An untouched deadline is absent, not an empty string the door would have to parse, and the
+    // sensitive list drops blanks rather than sending a declaration of "".
+    expect(built.form.getAll("deadlineAt")).toEqual([]);
+    expect(built.form.getAll("sensitiveValues")).toEqual(["a", "b"]);
+    expect((built.form.get("file") as File).name).toBe("cart.har");
+    expect(built.form.get("kind")).toBe("har");
+
+    const withDeadline = uploadDraftOf({ file, kind: "asar", deadlineAt: "2026-10-17T09:00:00.000Z", sensitiveValues: "" });
+    expect(withDeadline.ok).toBe(true);
+    if (!withDeadline.ok) return;
+    expect(withDeadline.form.getAll("deadlineAt")).toEqual(["2026-10-17T09:00:00.000Z"]);
+    expect(withDeadline.form.getAll("sensitiveValues")).toEqual([]);
   });
 });

@@ -654,6 +654,29 @@ web(127.0.0.1:4310)＋`next dev apps/web -p 4496`；这一轮是**页面控件�
   **像素层没核**；SSE `job.updated` 的推送没被观察——页面上每次状态变化都是门答完后**重新读清单**得来的；
   蓝图冻结（`POST /blueprints`）与 `candidate.generate` 在页面上仍然没有控件。
 
+浏览器实测·第十轮（2026-10-17 08:39–08:40 UTC，同一套三个真进程；这一轮加的是**页面上剩下的两把手**：
+落地页的「创建项目」（§8 的 `POST /projects`）与样本 tab 的「上传采集」（line 272 的 multipart 门），
+顺带把六个写控件共用的两句"能不能发"收成一处）：
+
+- 空名字点击 → 「还没有写项目名：这道门收的就是一个名字，空着不算一次创建。」；只填空白（`"   "`）同一句；
+  **两次都没有发出请求**（列表仍是 2 行），因为这句话是页面自己说的，不是 400 回来的。
+- 填 `made-from-the-page` → 「已建项目 made-from-the-page｜图 0｜id fbe7d6e4-0e0a-4365-8921-6d2354deaa50」，
+  列表立刻重读成 3 行，新那行是 `made-from-the-page｜图 0｜库存 0`——图 0 是 §8 那一列自己要求的字段。
+- 新项目的样本 tab：先点「上传」（没选文件）→ 「还没有选文件：这道门只收 multipart 的 `file` 部分，空体不算一次导入。」，
+  作业面板仍 0 行；`GET /projects/:p` 的 `targetIds` 仍为空——这句话也没有换到一次请求。
+- 用 `DataTransfer` 放进一个真 HAR（一条 `GET https://shop.example/api/cart` 记录）并声明两个敏感值 →
+  「已收下采集文件：目标 932c392a-110b-4270-8942-f98e9c0af053｜作业 inspect a02529e6-654d-446b-b8ce-289c08fcd9c3（queued）」；
+  处理函数随后 `load()` 重读整页：`targetIds` 真的有那一个目标、`GET /jobs` 里那一行是 `inspect/queued/pending`、
+  库存栏从「本项目还没有目标」变成带 `data-inventory-revision="0"` 的清单。
+- 同一栏换 `kind:"asar"` **带**敏感值 → 「采集上传被拒：import-asar-sensitive-values-unsupported」（422）；
+  把敏感值清空再点 → 「采集上传被拒：import-asar-not-wired」（503）。**门里那两条不同的路在页面上是两句话**，
+  页面没有先替它们做任何校验。
+- console 只有两条信息 + 那两条**故意的** 422/503，没有未捕获异常。
+
+页面控件之外的两处变化：`sessionGate` / `projectDraftOf` / `uploadDraftOf` 是新的三个持有者——六个写控件以前
+各写一遍「有没有令牌」「体的必填字段齐不齐」，现在只有一处；`postJson` 与新的 `postForm` 共用同一个 `post`
+（ multipart 的 `content-type` 必须由浏览器带 boundary，所以它是唯一一处不写这个头的地方）。
+
 浏览器实测·第九轮（2026-10-17 08:12–08:17 UTC，三个真进程：worker（数据目录 `rea-rig-s9/data`）＋
 web(127.0.0.1:4310)＋`next dev apps/web -p 4496`（`WB_UI_ORIGIN=http://localhost:4496`）；这一轮测的是
 **契约 tab 上新增的两扇门**：冻结蓝图（§8 line 292）与发起生成（line 294）。rig 的准备脚本只写到
@@ -728,10 +751,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
 
 明确**未实现 / 未验证**的范围：
 
-- 页面上的写控件现在覆盖到「批计划 → 冻结蓝图 → 发起生成」这一段（第九轮有浏览器读数）：**有**按钮的是
-  落地清单、配对表单、样本决定、作业取消、清理重排、验证请求、蓝图冻结、发起生成；**没有**控件的是
-  `project.create`、`vector.create`、`contract`(草稿)、`plan.build` 与 HAR 上传——那几扇要靠页面里的
-  `fetch` 驱动，操作员点不到（issue #58 的账）。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
+- 页面上的写控件现在覆盖到「建项目 → 上传采集 → 批 → 冻 → 生成」以及作业的两扇门（第九、十轮有浏览器
+  读数）：**有**按钮的是落地清单、新建项目、配对表单、采集上传、样本决定、作业取消、清理重排、验证请求、
+  蓝图冻结、发起生成；**没有**控件的是 `vector.create`、`contract`(草稿) 与 `plan.build` 三扇创建门——
+  它们的必填输入要从证据正文里派生（record ordinal、schema 体、requiredCases 联集），页面上做一个能填的
+  表就等于做一个会猜的表，所以这三扇仍靠 `fetch` 驱动，是 issue #58 剩下的账。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
   读不到日志就说读不到（`FREEZE_EMPTY_LINE` 的三种空态各有自己的句子）。
 - §10 的 evaluator 有了一条**具名命令**（`verification.complete`，PR #84 之后由这一笔加上，issue #75 的
