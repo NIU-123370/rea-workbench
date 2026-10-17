@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { asId, newId } from "../../packages/domain/identity.ts";
-import type { Id } from "../../packages/domain/identity.ts";
+import type { Id, Instant } from "../../packages/domain/identity.ts";
+import type { Digest } from "../../packages/domain/canonical-json.ts";
 import type { JsonValue } from "../../packages/domain/json-value.ts";
 import { bootWorker, COMMAND_NAMES } from "../../apps/worker/composition.ts";
 import { parseFrame, startWorkerRpc } from "../../apps/worker/rpc-server.ts";
@@ -22,6 +23,7 @@ import type { Result } from "../../packages/domain/result.ts";
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const inspector: Actor = { actorId: "local-operator", actorKind: "inspector" };
 const builder: Actor = { actorId: "builder-agent", actorKind: "builder" };
+const evaluator: Actor = { actorId: "trusted-evaluator", actorKind: "evaluator" };
 
 // The worker's whole command surface, written out here so a reviewer sees a new name
 // as an edit to a boundary rather than as a line in a handler table (DESIGN §14).
@@ -51,6 +53,7 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "plan.read",
   "verification.read",
   "verification.request",
+  "verification.complete",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -425,6 +428,128 @@ describe("named commands and the local RPC (§14)", () => {
     expect(forged.ok).toBe(false);
     if (forged.ok) return;
     expect(forged.error.reason).toBe("generation-endpoint-not-configured");
+  });
+
+  // §10's 具名 completion RPC, given a name (issue #75). An evaluator is not a browser, so §8's 40
+  // routes have no line for it and the closed command table *is* its wire surface. What is provable
+  // from here is the two things that were missing: that the name exists, and that the roles stay
+  // outside it - the service answers for the rest (comparator policy, transcript re-hash, identity
+  // binding), and its own suite covers those rules.
+  it("names the evaluator's completion and keeps every other role out of it (§10)", async () => {
+    const created = unwrap(await request("project.create", { name: "verify-completion" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+
+    // The role rule runs before the schema: the same well-formed-looking body from a builder is
+    // refused for who sent it, not for what it typed, and the two refusals must not be confusable.
+    const builderRole = await request("verification.complete", { projectId, request: { candidateId: newId() } }, builder);
+    expect(builderRole.ok).toBe(false);
+    if (builderRole.ok) return;
+    expect(builderRole.error.code).toBe("ACCESS_DENIED");
+    expect(builderRole.error.reason).toBe("builder-may-not-record-a-verification");
+
+    const inspectorRole = await request("verification.complete", { projectId, request: {} }, inspector);
+    expect(inspectorRole.ok).toBe(false);
+    if (inspectorRole.ok) return;
+    expect(inspectorRole.error.reason).toBe("only-the-evaluator-records-a-verification");
+
+    // The evaluator reaches the schema. A body missing every required field is refused with the names
+    // of what is absent...
+    const empty = await request("verification.complete", { projectId, request: {} }, evaluator);
+    expect(empty.ok).toBe(false);
+    if (empty.ok) return;
+    expect(empty.error.code).toBe("INVALID_INPUT");
+    expect(empty.error.reason).toBe("completion-schema");
+    expect(JSON.stringify(empty.error.details)).toContain("candidateId");
+
+    // ...and one that has all of them plus a key §10 does not name is refused for the extra key:
+    // §7.3's handoff is the whole input, so a completion carrying an unlisted field (here a
+    // self-declared verdict) is rejected by name rather than ignored or honoured.
+    const whole = {
+      candidateId: newId(),
+      jobId: newId(),
+      blueprintId: newId(),
+      planId: newId(),
+      comparatorPolicyId: "exact-http-v1",
+      runnerImageDigest: "1".repeat(64),
+      observations: [],
+      reportStagingId: "12345678-1234-1234-1234-123456789012",
+      reportSha256: "2".repeat(64),
+      limitations: [],
+      nonsense: "self-declared",
+    };
+    const extra = await request("verification.complete", { projectId, request: whole }, evaluator);
+    expect(extra.ok).toBe(false);
+    if (extra.ok) return;
+    expect(extra.error.reason).toBe("completion-schema");
+    expect(JSON.stringify(extra.error.details)).toContain("nonsense");
+  });
+
+  // The absence this issue is about has to be sayable: a `verify` row sits in the queue and nothing
+  // in this build takes it (the runner's kind list is deliberately `build` only). The doctor is the
+  // surface for "this capability is not here", and it must not warn about work nobody is waiting on.
+  it("says out loud when a queued verification has no executor (§10, issue #75)", async () => {
+    const quiet = (await worker.doctor()).checks.find((check) => check.name === "verification-executor");
+    expect(quiet?.state).toBe("ok");
+    expect(quiet?.facts).toEqual({ queuedVerifyCount: 0 });
+
+    const created = unwrap(await request("project.create", { name: "verify-waiting" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const jobId = newId();
+    const at = new Date().toISOString() as Instant;
+    // A queued `build` row is not waiting on an evaluator - that one has an executor since #57 - so
+    // it goes in first and the check has to stay quiet past it. Without this the warning would be
+    // "there are queued jobs", which is a different claim than the one §10 needs made.
+    const buildJob = newId();
+    const seeded = worker.writeConnection.transact((tx) => {
+      tx.insertJob({
+        id: buildJob,
+        projectId,
+        targetId: null,
+        kind: "build",
+        state: "queued",
+        cleanupState: "pending",
+        inputJson: { blueprintId: newId() },
+        resultRef: null,
+        errorJson: null,
+        idempotencyKey: `build-${buildJob}`,
+        requestDigest: ("6".repeat(64)) as Digest,
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: at,
+        updatedAt: at,
+      });
+      return true;
+    });
+    if (!seeded.ok) throw new Error(JSON.stringify(seeded.error));
+    const stillQuiet = (await worker.doctor()).checks.find((check) => check.name === "verification-executor");
+    expect(stillQuiet?.state).toBe("ok");
+    expect(stillQuiet?.facts).toEqual({ queuedVerifyCount: 0 });
+
+    const inserted = worker.writeConnection.transact((tx) => {
+      tx.insertJob({
+        id: jobId,
+        projectId,
+        targetId: null,
+        kind: "verify",
+        state: "queued",
+        cleanupState: "pending",
+        inputJson: { candidateId: newId(), comparatorPolicyId: "exact-http-v1" },
+        resultRef: null,
+        errorJson: null,
+        idempotencyKey: `verify-${jobId}`,
+        requestDigest: ("7".repeat(64)) as Digest,
+        deadlineAt: null,
+        retryAt: null,
+        createdAt: at,
+        updatedAt: at,
+      });
+      return true;
+    });
+    if (!inserted.ok) throw new Error(JSON.stringify(inserted.error));
+
+    const loud = (await worker.doctor()).checks.find((check) => check.name === "verification-executor");
+    expect(loud?.state).toBe("degraded");
+    expect(loud?.reasons).toEqual(["verification-executor-not-installed"]);
   });
 
   it("carries a generation frame through the local RPC and answers with the worker's own refusal", async () => {

@@ -147,6 +147,12 @@ export const COMMAND_NAMES = [
   // different actor's decision: the Builder submits, the control plane decides what is compared
   // and against which named comparator.
   "verification.request",
+  // The other half of the same row: what a verify job is *waiting for*. §10 gives the trusted
+  // evaluator the completion, and §14 makes it a named command on the worker's private socket -
+  // there is no §8 route for it, because an evaluator is not a browser (issue #75). The service
+  // behind it owns every rule (role, named comparator policy, transcript re-hash, identity binding);
+  // this name is what puts it on the wire instead of only in a test.
+  "verification.complete",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -830,6 +836,12 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       }
       return relay(verifications.request(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {}, key));
     },
+    // The evaluator's completion (§10's 具名 completion RPC). The frame's actor is what the service
+    // gates on - a builder or an inspector reaching this name is refused there with its own reason,
+    // not filtered here - and the payload is passed as the service's own schema reads it, so the
+    // staging bytes stay an opaque id plus a digest rather than a path or a storage key.
+    "verification.complete": async (payload, actor) =>
+      relay(await verifications.complete(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
     "blueprint.freeze": async (payload, actor) =>
       relay(await blueprints.freeze(projectIdOr(payload), actor, asRecord(payload)["request"] ?? {})),
     "blueprint.read": async (payload, actor) => {
@@ -1107,6 +1119,20 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
           profile === null
             ? { state: "failed", reasons: ["limits-unknown-no-profile"] }
             : { state: "ok", facts: profile.profile.limits as unknown as JsonValue },
+      },
+      {
+        // §10's evaluator is a separate trusted process this build does not ship, and the runner
+        // deliberately does not take `verify` rows (issue #75). The check stays quiet while nothing
+        // is waiting on that absent executor and says so in the surface built for it as soon as
+        // something is - which is what keeps a `queued` verification from reading as "in progress".
+        name: "verification-executor",
+        run: (): CheckOutcome => {
+          const waiting = writer.transact((tx) => tx.listJobsByStates(["queued"], RECOVERY_SCAN_LIMIT).filter((job) => job.kind === "verify").length);
+          if (!waiting.ok) return { state: "failed", reasons: [`verification-queue-read-${waiting.error.code}`] };
+          return waiting.value === 0
+            ? { state: "ok", facts: { queuedVerifyCount: 0 } }
+            : { state: "degraded", reasons: ["verification-executor-not-installed"] };
+        },
       },
     ]);
   }

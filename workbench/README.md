@@ -734,6 +734,16 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   `fetch` 驱动，操作员点不到（issue #58 的账）。冻结与生成能上页面，是因为 §8 没有计划与蓝图的**清单**门，
   本页改从 §8 line 302 的本项目决策日志里读「哪些计划已批准、哪些蓝图已冻结」：一条 journal 行都不自己造，
   读不到日志就说读不到（`FREEZE_EMPTY_LINE` 的三种空态各有自己的句子）。
+- §10 的 evaluator 有了一条**具名命令**（`verification.complete`，PR #84 之后由这一笔加上，issue #75 的
+  第一条），但**没有 evaluator 进程**：runner 依旧只认 `build`（V1 变异钉着"放开 kinds 就跑红"），所以
+  `verify` 作业仍然停在 `queued`。这条缺席现在由 doctor 的一格说出来：`verification-executor` 在没有
+  verify 作业时是 `ok`（facts 只有 `queuedVerifyCount: 0`），一旦队列里等着一件就 `degraded` 报
+  `verification-executor-not-installed`——一条已排入 `build` 作业不会让它报警，两件事是不同的缺席。
+  completion 体的 schema 是硬门：少字段按缺的名字拒，多带一个 §10 没点名的键（试的是自报结论）按那个
+  键名拒；角色门在 schema **之前**，builder 与 inspector 拿到的是自己的理由而不是"体不对"。
+  仍未裁决的两点留在 #75：提交的字节走 staging 还是 RPC body（现在按 `evaluatorCompletionSchema` 的
+  `reportStagingId + reportSha256`，即前者），以及谁把 `queued` 变 `running`（本 build 的答案是"没人"，
+  所以才有上面那格报警）。
 - 页面**没有订阅 §13 的 `job.updated`**：作业面板只在一次门答完之后重读清单，所以 worker 泵循环推进的行
   不会自己刷新（第九轮读到过一屏 `queued` 与四个 `succeeded` 并存——那是上一次的快照，不是服务在骗人）。
   事件流与 SSE 门本身是通的（`tests/unit/web-proxy-route.test.ts` 把「不缓冲」钉住了），缺的是这个页面用它。
