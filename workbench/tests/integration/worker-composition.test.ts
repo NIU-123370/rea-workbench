@@ -43,9 +43,11 @@ const EXPECTED_COMMANDS: readonly string[] = [
   "vector.review",
   "contract.create",
   "contract.review",
+  "contract.read",
   "plan.build",
   "plan.review",
   "plan.read",
+  "verification.read",
   "blueprint.freeze",
   "blueprint.handoff",
   "blueprint.manifest",
@@ -268,6 +270,30 @@ describe("named commands and the local RPC (§14)", () => {
     // Handoff itself is the one Builder read path; it fails here for an unknown
     // blueprint, not for the actor.
     expect(handed.error.reason).toBe("blueprint-unknown");
+  });
+
+  it("answers the contract and report reads for the control plane and refuses a Builder by name (§8 lines 288, 298)", async () => {
+    const created = unwrap(await request("project.create", { name: "read-commands" }, inspector)) as { id: string };
+    const projectId = asId(created.id);
+    const cases = [
+      { command: "contract.read", key: "contractId", reason: "builder-has-no-contract-permission" },
+      { command: "verification.read", key: "verificationId", reason: "builder-may-not-read-report" },
+    ] as const;
+    for (const one of cases) {
+      const refused = await request(one.command, { projectId, [one.key]: newId() }, builder);
+      expect(refused.ok).toBe(false);
+      if (refused.ok) continue;
+      expect(refused.error.code).toBe("ACCESS_DENIED");
+      // The named reason, not a generic one: the page's disabled control quotes it, and a
+      // paraphrase here would make two spellings of one §7.3 boundary.
+      expect(refused.error.reason).toBe(one.reason);
+      // The same command for the control plane gets past the role gate and into the lookup, so
+      // the refusal above cannot be a missing row wearing the role's clothes.
+      const looked = await request(one.command, { projectId, [one.key]: newId() }, inspector);
+      expect(looked.ok).toBe(false);
+      if (looked.ok) continue;
+      expect(looked.error.code).toBe("NOT_FOUND");
+    }
   });
 
   it("marks a lost executor interrupted and keeps its evidence", async () => {

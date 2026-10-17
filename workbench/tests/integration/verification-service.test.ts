@@ -513,7 +513,7 @@ describe("recording a verification (DESIGN §10)", () => {
     ]);
     expect(journal("verification.complete", "allow")).toEqual(["verification-recorded"]);
 
-    const viewed = unwrap(await verifications.read(projectId, committed.verificationId));
+    const viewed = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
     expect(viewed.report.digest).toBe(committed.report.digest);
     expect(viewed.staleness).toEqual([]);
   });
@@ -639,7 +639,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("refuses to read back a report whose body disagrees with its row", async () => {
     const scenario = await seedScenario("tampered-report");
     const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
-    const stored = unwrap(await verifications.read(projectId, committed.verificationId));
+    const stored = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
 
     // A report body that is internally valid and correctly hashed, but bound to a
     // plan digest the row does not carry. The artifact store cannot tell this
@@ -664,7 +664,7 @@ describe("recording a verification (DESIGN §10)", () => {
     });
     if (!repointed.ok) throw new Error(JSON.stringify(repointed.error));
 
-    const denied = await failureOf(verifications.read(projectId, copy.id));
+    const denied = await failureOf(verifications.read(projectId, inspector, copy.id));
     expect(denied.code).toBe("REA_CONTRACT_MISMATCH");
     expect(denied.reason).toBe("report-row-disagreement");
   });
@@ -717,7 +717,7 @@ describe("recording a verification (DESIGN §10)", () => {
     );
     expect(committed.report.result).toBe("FAIL");
     // The control plane keeps the diff: it is the evidence for the fix.
-    const stored = unwrap(await verifications.read(projectId, committed.verificationId));
+    const stored = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
     expect(JSON.stringify(stored.report.outcomes)).toContain("comparison-mismatch");
 
     const summary = unwrap(await verifications.builderSummary(projectId, committed.verificationId));
@@ -732,7 +732,7 @@ describe("recording a verification (DESIGN §10)", () => {
   it("reports staleness from the rows that exist now without rewriting the report", async () => {
     const scenario = await seedScenario("stale");
     const committed = unwrap(await verifications.complete(projectId, evaluator, completionFor(scenario)));
-    const storedBefore = unwrap(await verifications.read(projectId, committed.verificationId));
+    const storedBefore = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
 
     // A later import adds a sample to the same snapshot. The frozen plan is not
     // rewritten and neither is this report; the vector set the run was compared
@@ -746,7 +746,7 @@ describe("recording a verification (DESIGN §10)", () => {
       approved: true,
     });
 
-    const after = unwrap(await verifications.read(projectId, committed.verificationId));
+    const after = unwrap(await verifications.read(projectId, inspector, committed.verificationId));
     expect(after.report.digest).toBe(storedBefore.report.digest);
     expect(after.report.identities.vectorSetDigest).toBe(storedBefore.report.identities.vectorSetDigest);
     expect(after.staleness).toEqual(["identity-changed:vectorSetDigest"]);

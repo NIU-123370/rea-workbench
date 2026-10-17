@@ -408,7 +408,38 @@ export class VerificationService {
 
   // A published report never changes: the stored body is re-hashed and re-parsed,
   // and staleness is reported next to it from the rows that exist now.
-  async read(projectId: Id, verificationId: Id): Promise<Result<VerificationView, GateFailure>> {
+  //
+  // The role is checked before the row is looked up. §7.3 gives a Builder the blueprint
+  // projection and nothing else, and a verification report names the holdout cases and how
+  // each one ended — the exact content the candidate must not see. Refusing after a lookup
+  // would also let the answer differ between "no such verification" and "not for you", which
+  // is an existence probe.
+  async read(projectId: Id, actor: Actor, verificationId: Id): Promise<Result<VerificationView, GateFailure>> {
+    if (isBuilder(actor)) {
+      recordDeny(this.storage, {
+        projectId,
+        actor,
+        resourceType: "verification",
+        action: "verification.read",
+        resourceId: verificationId,
+        decision: "deny",
+        reasonCode: "builder-may-not-read-report",
+        metadata: {},
+      });
+      return gateFail(
+        "ACCESS_DENIED",
+        "builder-may-not-read-report",
+        "a Builder reads blueprint projections only (DESIGN §7.3)",
+      );
+    }
+    return this.readView(projectId, verificationId);
+  }
+
+  // The lookup itself, with no role test in it. `builderSummary` below is the *sanctioned*
+  // Builder view of the same row: it projects a few categories out of the report and never
+  // returns this. Keeping one body means the two paths cannot disagree about what a stored
+  // report is - the digest re-check, the schema parse and the self-check run identically.
+  private async readView(projectId: Id, verificationId: Id): Promise<Result<VerificationView, GateFailure>> {
     const looked = this.storage.transact((tx) => {
       const row = tx.getVerification(projectId, verificationId);
       if (row === null) return null;
@@ -509,7 +540,7 @@ export class VerificationService {
   // entries and the transcript stay out; the self-check below turns that claim
   // into a gate instead of a comment.
   async builderSummary(projectId: Id, verificationId: Id): Promise<Result<BuilderSummary, GateFailure>> {
-    const viewed = await this.read(projectId, verificationId);
+    const viewed = await this.readView(projectId, verificationId);
     if (!viewed.ok) return viewed;
     const report = viewed.value.report;
     const projected: ReportedCase[] = report.outcomes.map((outcome) => ({
