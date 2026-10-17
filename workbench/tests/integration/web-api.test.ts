@@ -16,7 +16,7 @@ import { startWebServer, type WebServer } from "../../apps/web/server.ts";
 // The page's own draft builders, driven from real replies: a test of the door alone cannot show that
 // what this UI would send is something the door accepts, and a unit test of the builders alone cannot
 // show that the three reads they consume say what the page assumes they say.
-import { CAPTURE_TARGET_NOT_URL_LINE, captureDraftOf, captureProfileOptionsOf, inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, relayData } from "../../apps/web/ui/view-model.ts";
+import { CAPTURE_TARGET_NOT_URL_LINE, captureDraftOf, captureProfileOptionsOf, inspectDraftOf, inspectSubjectOf, inspectTargetReadOf, INSPECT_TARGET_URL_LINE, NO_SESSION_LINE, relayData, targetDraftOf, targetReceiptLine } from "../../apps/web/ui/view-model.ts";
 import { AccessLog } from "../../apps/web/access-log.ts";
 import { graphViewSchema } from "../../packages/contracts/graph.ts";
 import { evidenceViewSchema, projectPageSchema, projectViewSchema } from "../../packages/contracts/resources.ts";
@@ -2327,6 +2327,66 @@ describe("the freeze route (§8 line 292 / issue #58)", () => {
     });
     expect(noCsrf.status, noCsrf.text).toBe(403);
     expect(noCsrf.text).toContain("csrf-token-missing");
+  });
+
+  // The same reconciliation the other doors get: the page's own builder, fed from what the page can
+  // actually read (a csrf token from its own session and a typed address), must produce the body this
+  // door takes - and where the page refuses, the reason it prints has to be the *door's* reason name,
+  // not a second rule that happens to agree today. `urlLocatorDefects` is the shared owner.
+  it("accepts the body the declare control builds, and refuses the same defects the page names", async () => {
+    const paired = await pairSession();
+    const projectId = await freshProject(paired, "door-target-page-draft");
+    const session: FreezeSession = { ...paired, projectId };
+
+    const drafted = targetDraftOf({ csrf: session.csrf, url: "  https://shop.example/cart  " });
+    expect(drafted.ok).toBe(true);
+    if (!drafted.ok) return;
+    // Two keys, and the trimmed address: §8 line 273's body names `kind` and `url` and nothing else,
+    // so a third field would be this page inventing an input the door cannot store.
+    expect(Object.keys(drafted.body).sort()).toEqual(["kind", "url"]);
+    expect(drafted.body).toEqual({ kind: "url", url: "https://shop.example/cart" });
+
+    const created = await declareTarget(session, drafted.body as unknown as Record<string, JsonValue>);
+    expect(created.status, created.text).toBe(201);
+    const receipt = targetCreatedSchema.safeParse(JSON.parse(created.text) as JsonValue);
+    if (!receipt.success) throw new Error(created.text);
+    const line = targetReceiptLine(relayData(JSON.parse(created.text) as JsonValue));
+    expect(line).toContain(receipt.data.id);
+    expect(line).toContain("身份未知");
+    expect(line).toContain("url-declared-not-captured");
+    expect(line).toContain(`日志 seq ${String(receipt.data.auditSeq)}`);
+    // The sentence must not promise a snapshot: §8 line 273 says a declared URL's identity is unknown
+    // until a capture runs, and a receipt that read like "已就绪" would be the page claiming an
+    // observation nobody made.
+    expect(line).not.toContain("undefined");
+
+    // Each address the page would refuse, asked of the door instead: the name in the page's sentence and
+    // the name in the door's refusal are one vocabulary.
+    for (const url of ["https://user:token@shop.example/cart", "file:///etc/passwd", "https://shop.example/x#access_token=1"]) {
+      const page = targetDraftOf({ csrf: session.csrf, url });
+      expect(page.ok).toBe(false);
+      if (page.ok) return;
+      const door = await declareTarget(session, { kind: "url", url });
+      expect(door.status, door.text).toBe(400);
+      const reason = (JSON.parse(door.text) as { error: { details: { reason: string } } }).error.details.reason;
+      expect(page.line).toContain(reason);
+      // The refused address is not echoed by the page either - the field that failed is the one that may
+      // carry the credential (§5).
+      expect(page.line).not.toContain("token");
+      expect(page.line).not.toContain("access_token");
+    }
+
+    // And an unpaired page refuses before anything reaches this door: the project still has no targets,
+    // which is the observable difference between "the control refused" and "the door refused".
+    const cold = targetDraftOf({ csrf: "", url: "https://shop.example/cart" });
+    expect(cold.ok).toBe(false);
+    if (cold.ok) return;
+    expect(cold.line).toBe(NO_SESSION_LINE);
+    const view = await call("GET", `${API_PREFIX}/projects/${String(projectId)}`, { headers: { host: host(), cookie: session.cookie } });
+    // One row - the 201 above. The three defects the page refused were also refused by the door when
+    // asked directly, and the unpaired draft never reached it at all, so this project has exactly the
+    // target it was granted: a page-side refusal that still wrote a row would show up here as two.
+    expect(((relayData(JSON.parse(view.text) as JsonValue) as { targetIds: string[] }).targetIds).length).toBe(1);
   });
 
   it("reads a frozen blueprint back over HTTP with the plan id for this role (§8 line 293)", async () => {

@@ -351,3 +351,20 @@ describe("the directed-inspect panel before any read has happened", () => {
     expect(html).toContain("尚未发起：这一发只会排一个采集作业，不会给出结论。");
   });
 });
+
+// The declare-target control (§8 line 273, issue #58's last handle). It is the one write control whose
+// only input is typed, so the two things worth pinning at first paint are that it offers no address of
+// its own, and that it sits *before* the composer it feeds - the composer's subject comes from the
+// project row, and a control placed after the section that depends on it reads like an afterthought.
+describe("the target-declare panel before anything is typed", () => {
+  it("offers an empty address and no receipt", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toContain('data-panel="target-declare"');
+    expect(html.indexOf('data-panel="target-declare"')).toBeLessThan(html.indexOf('data-panel="capture-compose"'));
+    // Nothing prefilled: a suggested address would be the page choosing which site a project is about.
+    expect(html).toContain('<input id="declare-url" data-declare-url="true" type="text" autoComplete="off" value=""/>');
+    expect(html).toContain("尚未声明：这一发只写一行目标，不会去访问任何东西。");
+    expect(html).not.toContain("已声明 URL 目标");
+    expect(html).not.toContain("身份未知（");
+  });
+});
