@@ -123,6 +123,11 @@ describe("a source file may only name an id the two tables declare", () => {
       `acceptance-ref-undeclared:${inventedAcceptance}(apps/worker/restore.ts:1)`,
       `test-case-ref-undeclared:${otherInventedCase}(apps/worker/restore.ts:1)`,
     ]);
+
+    // Both tables are consulted. A checker that read only the case list still passes every
+    // assertion above, because that fixture holds no accepted criterion — the mutation that
+    // taught me that was killed only by the tree-level case, so the claim gets named here too.
+    expect(checkSourceReferences(findIdReferences("f.ts", "// A05 and T01"), declared)).toEqual([]);
   });
 });
 
