@@ -1,3 +1,4 @@
+import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,8 +29,13 @@ import type { Actor } from "../../packages/application/actor.ts";
 import type { GateFailure } from "../../packages/application/gate-failure.ts";
 import type { Result } from "../../packages/domain/result.ts";
 import { exportManifestSchema, exportRecordSchema } from "../../packages/contracts/export.ts";
+import type { OperationFilterContext } from "../../packages/application/sanitizer.ts";
 import { hex } from "../support/blueprint-seed.ts";
-import { seedVerifiedScenario, type VerifiedOverrides } from "../support/verification-seed.ts";
+import { seedVerifiedScenario, type ReportOutcomeRow, type VerifiedOverrides } from "../support/verification-seed.ts";
+
+// Every case below states its own exclusion context: §12.1 forbids defaulting a declaration
+// that was not supplied, so the service takes it as an argument rather than inferring one.
+const NO_EXCLUSIONS: OperationFilterContext = { sensitive: { declaredValues: [] } };
 
 // Export packages against real storage (DESIGN §10, §11, §8 / PRD F11, issue #22).
 //
@@ -116,6 +122,15 @@ function packageRowCount(): number {
   return Number(row.n);
 }
 
+// The store's own partition for published packages: `<root>/projects/<project>/artifacts/export/<sha>.bin`.
+// An artifact *row* is only written by the commit, so a check that ran after `publish` but before the
+// transaction would still leave the row count at zero - the files are the witness that no byte was
+// ever handed to the store.
+function packageFiles(): string[] {
+  const dir = path.join(root, "projects", String(projectId), "artifacts", "export");
+  return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".bin")).sort() : [];
+}
+
 function journal(action: string, decision: string): string[] {
   const rows = readAudit(writer, { after: 0, projectId, limit: 500 });
   if (!rows.ok) throw new Error(JSON.stringify(rows.error));
@@ -187,7 +202,7 @@ describe("a draft package says what it is (PRD F11)", () => {
         candidateId: scene.candidateId,
         verificationId: null,
         label: "draft",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(record.label).toBe("draft");
     expect(record.downloadUrl).toBe(`/api/v1/projects/${projectId}/exports/${record.id}/download`);
@@ -211,7 +226,7 @@ describe("a draft package says what it is (PRD F11)", () => {
   it("refuses a builder actor for both halves of delivery", async () => {
     const scene = await seedVerified("draft-builder");
     const refused = await failureOf(
-      exports_.create(projectId, builder, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+      exports_.create(projectId, builder, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     expect(refused.code).toBe("ACCESS_DENIED");
     expect(refused.reason).toBe("builder-may-not-export");
@@ -220,7 +235,7 @@ describe("a draft package says what it is (PRD F11)", () => {
 
   it("refuses a candidate that is not this project's", async () => {
     const refused = await failureOf(
-      exports_.create(projectId, reviewer, { candidateId: newId(), verificationId: null, label: "draft" }),
+      exports_.create(projectId, reviewer, { candidateId: newId(), verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     expect(refused.code).toBe("NOT_FOUND");
     expect(refused.reason).toBe("candidate-unknown");
@@ -235,7 +250,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: scene.candidateId,
         verificationId: scene.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(record.manifest.statusNote).toEqual([]);
     expect(record.manifest.deliverability.canExportVerifiedSamples).toBe(true);
@@ -264,7 +279,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: scene.candidateId,
         verificationId: scene.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(refused.code).toBe("STALE_INPUT");
     expect(JSON.stringify(refused.details)).toContain("cleanup-pending");
@@ -279,7 +294,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: scene.candidateId,
         verificationId: scene.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(JSON.stringify(refused.details)).toContain("cleanup-failed");
   });
@@ -291,7 +306,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: failed.candidateId,
         verificationId: failed.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(JSON.stringify(refusedFail.details)).toContain("verified-samples-blocked:result-fail");
 
@@ -301,7 +316,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: noBinding.candidateId,
         verificationId: null,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(refusedLabel.reason).toBe("verified-samples-blocked:no-verification-bound");
 
@@ -313,7 +328,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: stale.candidateId,
         verificationId: stale.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     expect(JSON.stringify(refusedStale.details)).toContain("report-stale");
   });
@@ -325,7 +340,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: scene.candidateId,
         verificationId: scene.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     // The package existed before the world moved under it; §10 forbids letting it leave.
     db.prepare("UPDATE candidates SET digest = ? WHERE project_id = ? AND id = ?").run(asDigest(hex("moved-after-export")), projectId, scene.candidateId);
@@ -345,7 +360,7 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
         candidateId: scene.candidateId,
         verificationId: scene.verificationId,
         label: "verified-samples",
-      }),
+      }, NO_EXCLUSIONS),
     );
     const looked = writer.transact((tx) => {
       const row = tx.getExport(projectId, record.id);
@@ -364,8 +379,8 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
     const input = { candidateId: scene.candidateId, verificationId: scene.verificationId, label: "verified-samples" as const };
     const exportCountBefore = exportRowCount();
     const packageCountBefore = packageRowCount();
-    const first = unwrap(await exports_.create(projectId, reviewer, input));
-    const second = unwrap(await exports_.create(projectId, reviewer, input));
+    const first = unwrap(await exports_.create(projectId, reviewer, input, NO_EXCLUSIONS));
+    const second = unwrap(await exports_.create(projectId, reviewer, input, NO_EXCLUSIONS));
     expect(second.id).not.toBe(first.id);
     expect(exportRowCount()).toBe(exportCountBefore + 2);
     // Same facts: one package artifact, two export records pointing at it.
@@ -379,13 +394,13 @@ describe("verified-samples needs a current PASS and a finished cleanup (§10, §
     const scene = await seedVerified("verified-across-clock");
     const input = { candidateId: scene.candidateId, verificationId: scene.verificationId, label: "verified-samples" as const };
     const packageCountBefore = packageRowCount();
-    const first = unwrap(await exports_.create(projectId, reviewer, input));
+    const first = unwrap(await exports_.create(projectId, reviewer, input, NO_EXCLUSIONS));
     // A zip entry's DOS timestamp has a two-second quantum, so this wait is what turns the
     // assertion into a proof rather than a coin toss: stamp the archive with the wall clock and
     // the second export lands in a later bucket, hashes differently, and stores a second copy of
     // bytes that are identical to the first. The export rows still carry their own instants.
     await new Promise((resolve) => setTimeout(resolve, 2_100));
-    const second = unwrap(await exports_.create(projectId, reviewer, input));
+    const second = unwrap(await exports_.create(projectId, reviewer, input, NO_EXCLUSIONS));
     expect(second.sha256).toBe(first.sha256);
     expect(packageRowCount()).toBe(packageCountBefore + 1);
     expect(second.id).not.toBe(first.id);
@@ -422,7 +437,7 @@ describe("the package carries the bytes it claims and no others", () => {
     if (target === null) throw new Error("the store refused to resolve its own key");
     await writeFile(target, "{}");
     const refused = await failureOf(
-      exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+      exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     expect(refused.reason).toBe("package-source-digest-mismatch");
     expect(exportRowCount()).toBe(exportsBefore);
@@ -431,7 +446,7 @@ describe("the package carries the bytes it claims and no others", () => {
   it("records each entry's digest in the manifest so a reader can check it", async () => {
     const scene = await seedVerified("manifest-parts");
     const record = unwrap(
-      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     const archived = unwrap(await exports_.archive(projectId, reviewer, record.id));
     // The manifest is not a table of contents of intentions: every part has to hash to the
@@ -468,7 +483,7 @@ describe("the package carries the bytes it claims and no others", () => {
       zipLimits: ZIP_LIMITS,
     });
     const refused = await failureOf(
-      racing.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+      racing.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     expect(refused.code).toBe("REVISION_CONFLICT");
     expect(refused.reason).toBe("candidate-changed-under-export");
@@ -481,7 +496,7 @@ describe("the reply is a named contract, not a dump", () => {
   it("lists exports with their recorded digests and relative routes", async () => {
     const scene = await seedVerified("list-one");
     const record = unwrap(
-      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     const listed = unwrap(await exports_.list(projectId, reviewer, 10));
     expect(listed.map((entry) => entry.id)).toContain(record.id);
@@ -505,7 +520,7 @@ describe("the reply is a named contract, not a dump", () => {
     // the door's own contract then refused as a shape problem naming nothing. Say which package.
     const scene = await seedVerified("list-broken-manifest");
     const record = unwrap(
-      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
     );
     // The listing is oldest-first with a limit, so prove the row is in scope before expecting the
     // refusal - otherwise this case would pass by reading past it.
@@ -525,5 +540,117 @@ describe("the reply is a named contract, not a dump", () => {
     const refused = await failureOf(exports_.archive(projectId, reviewer, newId()));
     expect(refused.code).toBe("NOT_FOUND");
     expect(refused.reason).toBe("export-unknown");
+  });
+});
+
+// §12.1 lists 导出诊断 as one of the seven faces the single filter owner covers, and issue #125's
+// census found this face had no call point at all: a package was assembled and published without
+// anything checking the report entries it carried. The three cases below are the face, the half
+// that does not need a declaration, and the proof that the declaration is not part of the package.
+describe("the package goes past the filter owner on its way out (§12.1 / issue #125)", () => {
+  const SECRET = "sk-live-4f8a-session-token";
+  // §10's per-case row: the diff the trusted evaluator published for the one case the report claims.
+  const cookieRow = (vectorId: Id): ReportOutcomeRow => ({
+    vectorId,
+    state: "passed",
+    reason: null,
+    // The pair is a structure, not a string, so nothing has to be declared for it to be recognised -
+    // this is the 已知传输认证结构 half of §12.1's input list. A diff that quotes the request headers
+    // it compared is exactly how one reaches a stored report.
+    safeDiff: [{ name: "cookie", value: "sid=7c1f-not-declared" }],
+  });
+
+  it("refuses a declared value sitting in a report entry, and lands nothing", async () => {
+    const scene = await seedVerified("filter-declared", {
+      limitations: [`captured header carried ${SECRET}; upstream producer did not redact it`],
+    });
+    const exportsBefore = exportRowCount();
+    const packagesBefore = packageRowCount();
+    const filesBefore = packageFiles();
+    const refused = await failureOf(
+      exports_.create(projectId, reviewer, {
+        candidateId: scene.candidateId,
+        verificationId: scene.verificationId,
+        label: "verified-samples",
+      }, { sensitive: { declaredValues: [SECRET] } }),
+    );
+    expect(refused.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refused.reason).toBe("declared-value-present");
+    // Neither the value nor a hash of it is stored or echoed (§12.1: 既不保存原文，也不保存该值的 hash).
+    expect(JSON.stringify(refused.details)).not.toContain(SECRET);
+    expect(refused.message).not.toContain(SECRET);
+    // The refusal happens before `artifacts.publish`, so there is no half-written package to find -
+    // in the rows or on the disk.
+    expect(exportRowCount()).toBe(exportsBefore);
+    expect(packageRowCount()).toBe(packagesBefore);
+    expect(packageFiles()).toEqual(filesBefore);
+    expect(journal("export.create", "deny")).toContain("declared-value-present");
+  });
+
+  it("refuses a transport-auth structure with no declaration supplied", async () => {
+    // An empty declaration is not a bypass: this is the half of the face that does not depend on
+    // what the caller named, and without this case the whole gate would be a declaration echo.
+    const scene = await seedVerified("filter-structure", { outcomes: [cookieRow(newId())] });
+    const packagesBefore = packageRowCount();
+    const filesBefore = packageFiles();
+    const refused = await failureOf(
+      exports_.create(projectId, reviewer, {
+        candidateId: scene.candidateId,
+        verificationId: scene.verificationId,
+        label: "verified-samples",
+      }, NO_EXCLUSIONS),
+    );
+    expect(refused.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refused.reason).toBe("transport-auth-structure");
+    expect(refused.message).not.toContain("7c1f-not-declared");
+    // The audit row carries *this* refusal's reason, not a fixed one: without this line the gate
+    // could log every export refusal as `declared-value-present` and still look correct (§12.2's
+    // safeMetadata names facts, so the fact it names has to be the true one).
+    expect(journal("export.create", "deny")).toContain("transport-auth-structure");
+    expect(packageRowCount()).toBe(packagesBefore);
+    expect(packageFiles()).toEqual(filesBefore);
+  });
+
+  it("refuses a declared value the manifest itself names, not only one the report carries", async () => {
+    // The manifest is the other half of the face: it names the candidate, the project and the plan
+    // the package is bound to. Declaring an id that only the manifest holds is what keeps the
+    // manifest in `checked` load-bearing rather than decorative.
+    const scene = await seedVerified("filter-manifest-face");
+    const packagesBefore = packageRowCount();
+    const filesBefore = packageFiles();
+    const refused = await failureOf(
+      exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, {
+        sensitive: { declaredValues: [String(scene.candidateId)] },
+      }),
+    );
+    expect(refused.code).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(refused.reason).toBe("declared-value-present");
+    // The id never appears in the refusal the operator gets back.
+    expect(JSON.stringify(refused)).not.toContain(String(scene.candidateId));
+    expect(packageRowCount()).toBe(packagesBefore);
+    expect(packageFiles()).toEqual(filesBefore);
+  });
+
+  it("names the same package with or without an irrelevant declaration", async () => {
+    // §12.1 line 441: the declaration is an operation context — 不进入主体、摘要 — so what a caller
+    // asks to be hidden cannot change the bytes or their digest. Two rows, one package (§5's
+    // 不覆盖旧包), because the only difference between the calls is what was never written down.
+    const scene = await seedVerified("filter-context-not-in-digest");
+    const exportsBefore = exportRowCount();
+    const packagesBefore = packageRowCount();
+    const declared = unwrap(
+      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, {
+        sensitive: { declaredValues: ["a-string-this-package-does-not-hold"] },
+      }),
+    );
+    const plain = unwrap(
+      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }, NO_EXCLUSIONS),
+    );
+    expect(declared.sha256).toBe(plain.sha256);
+    expect(declared.id).not.toBe(plain.id);
+    // Two records, one package: the declaration changed no byte, so §5's dedupe inside a class is
+    // what a caller can still tell happened.
+    expect(exportRowCount()).toBe(exportsBefore + 2);
+    expect(packageRowCount()).toBe(packagesBefore + 1);
   });
 });

@@ -1068,11 +1068,17 @@ export async function bootWorker(request: CompositionRequest): Promise<Result<Wo
       const parsed = exportCreateRequestSchema.safeParse(asRecord(payload)["request"] ?? {});
       if (!parsed.success) return gateFail("INVALID_INPUT", "export-create", "the export request was rejected");
       const verificationId = parsed.data.verificationId ?? null;
+      const fields = asRecord(payload);
       return relay(
         await exports_.create(projectIdOr(payload), actor, {
           candidateId: asId(parsed.data.candidateId),
           verificationId: verificationId === null ? null : asId(verificationId),
           label: parsed.data.label,
+        }, {
+          // The package is assembled from rows several earlier operations wrote, so §12.1's rule
+          // that a later operation gets its exclusion context re-supplied lands here as a frame
+          // field beside `request`, the same way the four create doors receive it.
+          sensitive: { declaredValues: stringList(fields["sensitiveValues"]) },
         }),
       );
     },
