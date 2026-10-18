@@ -21,7 +21,7 @@ import { reaEvidenceSchema } from "../../packages/contracts/rea-evidence.ts";
 // loud when it did not run: a skipped file is evidence that the live check is
 // pending, never evidence that it passed.
 //
-//   REA_LIVE_BIN=/path/to/rea-source/scripts/rea.mjs npm run test:integration
+//   REA_LIVE_BIN=/path/to/rea-source/scripts/rea.mjs npm run test:e2e
 //
 // The run on 2026-10-16 used the pinned baseline 98d8470d built with node 24.18.0;
 // what it observed is written down in the PR that added this file.

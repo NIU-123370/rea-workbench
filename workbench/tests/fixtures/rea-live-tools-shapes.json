@@ -5,7 +5,7 @@
     "launched": "node /private/tmp/rea-source/scripts/rea.mjs --mcp",
     "driver": "this repository's own packages/adapters/rea/protocol.ts connectReaStdio + handshake",
     "capturedAt": "2026-10-16",
-    "capturedBy": "issue #14 (S14) live probe; re-runnable via tests/integration/rea-live-provider.test.ts with REA_LIVE_BIN set",
+    "capturedBy": "issue #14 (S14) live probe; re-runnable via tests/e2e/rea-live-provider.test.ts with REA_LIVE_BIN set",
     "handshake": {
       "protocolVersion": "2025-06-18",
       "serverInfo": {
