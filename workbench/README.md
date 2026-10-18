@@ -1885,8 +1885,42 @@ network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待
 交付面的页面控件仍没有（第廿二轮的 6 条无调用方清单不变）；`verified-samples` 那一档导出依旧没有真读数，
 因为这台机器产不出一份 current PASS 报告（verify 作业没有完成者，#75 那一片）。
 
-## 还没有的东西
+发布门禁·第三十六轮（2026-10-18 08:33–08:41，**§12.1 七个面的最后一格：包出门之前过一次过滤器**）：
 
+- **更正上一条**（第三十五轮标题里的「两扇门当场答不出成功」过宽）：本轮把那两个修复文件回退到修复前、重跑 census，
+  实读是**一扇**——`GET /projects/:p/exports` 在任何真有包的工程上回 `503 REA_CONTRACT_MISMATCH / export-list-shape`；
+  第二个缺陷（读不懂的 `manifest_json` 被写成 `{}`）在同一扇门的数据路径上，不是另一扇门。这条按同一读数贴回 #58。
+  那次重跑顺带露出 census 的**顺序盲区**：它按依赖顺序走（后面的门要用前面回包里的 id），一抛错就停，所以一轮只点名一扇——
+  今天「41 扇全绿」是真的，将来某扇坏了时它后面那几扇在同一轮里是「没读到」，不是「读过了、没问题」。这条**未交付**，记在本地任务。
+- 本轮做的是 #125 那张七面清单上唯一还剩的格子：**导出**。落点在 `ExportService.create` 的
+  `entries` 齐了之后、`buildZipArchive`/`artifacts.publish`/`commitDecision` 之前，检查三样工作台自己拼出去的东西：
+  manifest、绑定的报告条目、coverage 投影。**两处刻意不查**并写明归属：`blueprint.json` 在冻结前已由 handoff owner
+  查过（§12.1 line 441 第二句），候选源码是被审的对象、不是工作台自有输出——过滤它等于改写 §5 说「包是冻结事实的副本」的那份东西。
+- 通道照仓里已经落地的四扇门（§8 lines 272/282/286/292 都列 `sensitiveValues?`）：契约字段 optional、过 socket 时与 `request`
+  **平级**、不进幂等摘要也不进包体。**这条门的名字 §8 line 299 没有**——这是具名偏离，理由引 §12.1 line 441 的
+  「后续操作仍需排除上下文时，调用方必须重新显式提供 `sensitiveValues`」；导出正是这样一个后续操作，
+  而声明不能从已落库的载荷反推。等你的裁决：把名字补进那一行，还是改走别的通道。
+- **空声明不等于放行**：`transport-auth-structure` 那一半不需要任何声明——报告条目里一个 `{name:"cookie", value:…}` 就当场拒。
+  这一条是有用的：如果门只查声明值，那它只是声明的回声。
+- 新增用例 **5** 条（`export-service` 17→**21**、`web-api` 123→**124**）；`tests/support/verification-seed.ts` 的
+  `VerifiedOverrides` 加 `limitations?`/`outcomes?` 两个入口——`counts.total` 本来就是 1，补一行 `outcomes` 是把夹具
+  原来欠的那行补上，不是造一个新事实。HTTP 那条用真 socket 证明字段真跨过去了：声明报告里那句
+  「no retry semantics observed」⇒ 422 `declared-value-present` 且列表还是空；声明一个包里没有的串 ⇒ 201。
+- 变异 **8 支全杀**：E1 整块删掉（3 红）、E2 上下文换成 `null`（14 红——每一次导出都被拒）、E3 不查 manifest（1 红）、
+  E4 不查报告条目（2 红）、E5 检查挪到 publish 之后（3 红）、E6 审计 reason 硬编码（1 红）、
+  E7 web 门不转发该字段（1 红）、E8 worker 门收帧不用（1 红）。**其中两支是第一轮活下来、补断言才杀的**：
+  E5 原本杀不掉，因为 artifact 行是 `commitDecision` 里写的、"行数没变"分不出检查在 publish 前还是后——补 `packageFiles()`
+  直接数 `projects/<id>/artifacts/export/*.bin` 这些字节；E6 原本也活，因为两条拒绝用例的审计 reason 里只有声明那一支被点过名，
+  硬编码成 `declared-value-present` 照样过——补一条「结构那一支的 deny 审计必须点名 `transport-auth-structure`」。
+- 末态闸门：typecheck 0／lint **214 文件 0 条**／`review` 207 文件命中 **0**／`test:unit` **713/39** 未动／
+  `test:integration` **594 passed + 6 skipped / 29 files**／`docs:check` exit 0（设计锚点 409→**410** 处，
+  路由 §8 40 条 · 挂载 41 条 · 已记偏差 3 条 / 具名键 8 词 · 已记幂等偏差 2 条未变）。
+
+**这轮仍然没做的**：页面没有「为一次导出声明排除值」的控件，所以**声明**那一半从 UI 走不到（结构那一半不需要声明，门在页面上照样活着）；
+`sensitiveValues` 这个字段名 §8 line 299 不列，等你裁决；census 的顺序盲区（一轮只点一扇）；#58 第 4 框那句
+「每条新路由都在真浏览器点一次」仍差第廿二轮记的 6 条无调用方门。
+
+## 还没有的东西
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
 自己（解析 `WB_*`、拿写锁、跑迁移、开本机 RPC，并把配对码只打在终端）；`npm run web` 是
 API 进程本体（DESIGN §14 给 web 的只有 `WB_HOST`/`WB_PORT`/`WB_DATA_DIR` 三个字段，它不碰文件

@@ -24,6 +24,7 @@ import { isBuilder } from "./actor.ts";
 import { commitDecision, recordDeny, type Step } from "./decision.ts";
 import { blockedByReasons, gateFail, type GateFailure } from "./gate-failure.ts";
 import type { ArtifactPort, StorageWriterPort } from "./ports.ts";
+import { assertPayloadClean, type OperationFilterContext } from "./sanitizer.ts";
 import type { VerificationService } from "./verification-service.ts";
 
 // Export packages and the verified-samples gate (DESIGN §10, §11, §8 / PRD F11, issue #22).
@@ -103,6 +104,7 @@ export class ExportService {
     projectId: Id,
     actor: Actor,
     input: { candidateId: Id; verificationId: Id | null; label: ExportLabel },
+    context: OperationFilterContext,
   ): Promise<Result<ExportCommit, GateFailure>> {
     const refused = this.refused(projectId, actor, "create");
     if (refused !== null) return refused;
@@ -231,6 +233,54 @@ export class ExportService {
     }
     if (entries.length !== declaredPackageEntries(bound).length) {
       return gateFail("REA_CONTRACT_MISMATCH", "package-entry-count", `the package holds ${String(entries.length)} of ${String(declaredPackageEntries(bound).length)} entries`);
+    }
+    // §12.1 names 导出诊断 as one of the seven faces the single filter owner covers, and #125 is the
+    // census that found this face had no call point at all. The check runs on what the package
+    // carries out the door *as workbench output*: the manifest (its status note and deliverability
+    // reasons are composed here, from rows several earlier operations wrote) and, for a bound
+    // package, the report the coverage numbers are computed from - which is the same report the
+    // `reports/verification.json` entry holds byte-for-byte, because that entry is the artifact row
+    // this call just re-hashed above.
+    //
+    // Two faces are deliberately not re-checked here, and not because it would be cheap: the
+    // blueprint entry already passed the handoff owner's check before its digest (§12.1 line 441's
+    // second sentence), and the candidate's own source files are the subject under review rather
+    // than the workbench's own output - filtering them would rewrite what §5 says a package is a
+    // copy of.
+    //
+    // An empty declaration is not an absent gate: `assertPayloadClean` still refuses a stored
+    // transport-auth structure, which is the face §12.1 named "已知传输认证结构" for.
+    const checked: { entry: string; value: JsonValue }[] = [{ entry: "MANIFEST.json", value: manifest }];
+    if (bound && report !== null) {
+      checked.push(
+        { entry: "reports/verification.json", value: report as unknown as JsonValue },
+        // `coverageOf` types its reply as a loose record because it is a projection, not a contract;
+        // the same value is what `JSON.stringify` writes into the entry two lines above, so checking
+        // it here is checking the bytes that land.
+        { entry: "reports/coverage.json", value: coverageOf(report) as unknown as JsonValue },
+      );
+    }
+    for (const face of checked) {
+      const payloadCheck = assertPayloadClean(face.value, context.sensitive);
+      if (!payloadCheck.ok) {
+        // Named, and only named: neither the value nor the entry's contents go into the audit row,
+        // because §12.1 forbids storing the excluded literal or a hash of it.
+        recordDeny(this.storage, {
+          projectId,
+          actor,
+          resourceType: "export",
+          action: "export.create",
+          resourceId: null,
+          decision: "deny",
+          reasonCode: payloadCheck.reason,
+          metadata: { candidateId: candidate.id, label: input.label },
+        });
+        return gateFail(
+          "SENSITIVE_CONTENT_BLOCKED",
+          payloadCheck.reason,
+          "the package is refused by the diagnostic filter before any byte is published",
+        );
+      }
     }
     // The archive's entry timestamp is a *frozen fact*, not the moment the operator asked.
     // A package is a copy of frozen facts (§10), so two exports of the same candidate and report

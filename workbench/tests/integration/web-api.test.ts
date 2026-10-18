@@ -617,6 +617,54 @@ describe("the export routes (§8 lines 299-300 / issue #22)", () => {
     expect(badId.status).toBe(404);
     expect(badId.text).toContain("export-unknown");
   });
+
+  it("carries the package's exclusion context across the socket (§12.1 / issue #125's last face)", async () => {
+    const session = await pairSession();
+    const created = await call("POST", `${API_PREFIX}/projects`, {
+      body: JSON.stringify({ name: "exports-filter" }),
+      headers: headersFor(session, { "idempotency-key": "exports-filter-project" }),
+    });
+    expect(created.status, created.text).toBe(201);
+    const project = String((JSON.parse(created.text) as { id: string }).id);
+    const declared = await call("POST", `${API_PREFIX}/projects/${project}/targets`, {
+      headers: headersFor(session),
+      body: JSON.stringify({ kind: "url", url: "https://shop.example/cart" }),
+    });
+    expect(declared.status, declared.text).toBe(201);
+    const scene = await seedVerifiedScenario({
+      writer: worker.writeConnection,
+      store: new ArtifactStore(dataDir),
+      projectId: asId(project),
+      targetId: asId(String((targetCreatedSchema.parse(JSON.parse(declared.text) as JsonValue) as { id: string }).id)),
+      name: "exports-filter",
+    });
+    const body = { candidateId: String(scene.candidateId), verificationId: String(scene.verificationId), label: "verified-samples" };
+    // The seeded report says one limitation in plain words: "no retry semantics observed". Naming
+    // that string is enough to make the door refuse - which can only happen if the list crossed
+    // the socket into the service, because §8's row for this route does not name the field and a
+    // door that ignored it would answer 201.
+    const refused = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: headersFor(session),
+      body: JSON.stringify({ ...body, sensitiveValues: ["no retry semantics observed"] }),
+    });
+    expect(refused.status, refused.text).toBe(422);
+    expect(refused.text).toContain("SENSITIVE_CONTENT_BLOCKED");
+    expect(refused.text).toContain("declared-value-present");
+    // Nothing landed: the listing this project would answer is still empty.
+    const listed = await call("GET", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: { host: `127.0.0.1:${String(address.port)}`, cookie: session.cookie },
+    });
+    expect(listed.status, listed.text).toBe(200);
+    expect(JSON.parse(listed.text) as unknown[]).toEqual([]);
+
+    // The same body declaring a string the package does not hold ships the package: the gate belongs
+    // to the content, not to the presence of a declaration.
+    const shipped = await call("POST", `${API_PREFIX}/projects/${project}/exports`, {
+      headers: headersFor(session),
+      body: JSON.stringify({ ...body, sensitiveValues: ["a-string-this-package-does-not-hold"] }),
+    });
+    expect(shipped.status, shipped.text).toBe(201);
+  });
 });
 
 describe("the graph read the three columns are built from (DESIGN §6, §8 / issue #18)", () => {

@@ -8,6 +8,7 @@ import { SqliteStorageWriter } from "../../packages/adapters/storage/writer.ts";
 import { BuilderService } from "../../packages/application/builder-service.ts";
 import type { Actor } from "../../packages/application/actor.ts";
 import type { ArtifactRow, JobRow, LeaseRow } from "../../packages/application/ports.ts";
+import type { VerificationReportWire } from "../../packages/contracts/verification.ts";
 import { hex, seedBlueprintForGeneration } from "./blueprint-seed.ts";
 
 // A verification row plus the report artifact it claims, agreeing field for field (DESIGN §10,
@@ -44,7 +45,17 @@ export type VerifiedOverrides = {
   result?: "PASS" | "FAIL" | "UNKNOWN";
   cleanupState?: JobRow["cleanupState"];
   leaseState?: LeaseRow["cleanupState"];
+  // The two report fields that hold free text: what a verifier said about the run, and the per-case
+  // rows behind the counts the report already claims (`counts.total` is 1, so an empty `outcomes`
+  // is the fixture leaving a row out rather than a run that saw nothing). Both are how a package
+  // ends up carrying a string nobody declared at completion time - the case §12.1's
+  // 「后续操作仍需排除上下文时，调用方必须重新显式提供 sensitiveValues」 is about.
+  limitations?: readonly string[];
+  outcomes?: readonly ReportOutcomeRow[];
 };
+
+/** One row of the stored report's outcome list (§10's `outcomes`), as the report schema shapes it. */
+export type ReportOutcomeRow = VerificationReportWire["outcomes"][number];
 
 function fail(message: string): never {
   throw new Error(message);
@@ -146,8 +157,8 @@ export async function seedVerifiedScenario(deps: {
     counts: { total: 1, passed: 1, failed: 0, blocked: 0, skipped: 0 },
     inventoryCounts: { total: 1, selected: 1, excluded: 0, blocked: 0 },
     excludedVectors: [],
-    outcomes: [],
-    limitations: ["no retry semantics observed"],
+    outcomes: overrides.outcomes ?? [],
+    limitations: overrides.limitations ?? ["no retry semantics observed"],
   };
   const reportDigest = asDigest(hex(`report-${name}`));
   // Stored with a key order and formatting a re-serialization would not reproduce, so a reader

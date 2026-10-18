@@ -49,12 +49,21 @@ export const exportManifestSchema = z.strictObject({
   parts: z.array(exportPartSchema),
 });
 
+// §8 line 299 names the three fields this door reads. One more name is accepted and is *not* one of
+// them: `sensitiveValues?`, which §12.1 line 441 types as an operation's exclusion context rather
+// than a field of any record — 「后续操作仍需排除上下文时，调用方必须重新显式提供 sensitiveValues」 makes the
+// export such an operation, because the package carries report entries that no earlier check saw as
+// a set. It is the same shape #128 landed for the contract create row and is recorded on issue #125
+// as a field §8's row does not list; it never reaches the service's `input`, the manifest, the
+// artifact bytes or the package digest, so a package that passes would hash the same with or
+// without it.
 export const exportCreateRequestSchema = z.strictObject({
   candidateId: idSchema,
   // The spec spells this `verificationId?:Id`; an omitted field and an explicit null are
   // the same thing in JSON, so the wire accepts both and the record stores null.
   verificationId: idSchema.nullable().optional(),
   label: z.enum(EXPORT_LABEL_VALUES),
+  sensitiveValues: z.array(nonEmptyString).optional(),
 });
 
 export const exportRecordSchema = z.strictObject({

@@ -1573,7 +1573,13 @@ async function createExport(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   }
   const outcome = await deps.worker.call(
     "export.create",
-    { projectId, request: { candidateId: parsed.value.candidateId, verificationId: parsed.value.verificationId ?? null, label: parsed.value.label } },
+    {
+      projectId,
+      request: { candidateId: parsed.value.candidateId, verificationId: parsed.value.verificationId ?? null, label: parsed.value.label },
+      // §12.1 line 441: the exclusion list is this operation's context, so it travels beside the
+      // request and never inside it - the package that lands is the same bytes either way.
+      ...(parsed.value.sensitiveValues === undefined ? {} : { sensitiveValues: parsed.value.sensitiveValues }),
+    },
     ctx.actor,
   );
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
