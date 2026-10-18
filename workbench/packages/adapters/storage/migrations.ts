@@ -29,6 +29,43 @@ function digestColumn(name: string, nullable = true): string {
   return `${name} TEXT CHECK (${digestCheck(name, nullable)})`;
 }
 
+// Which tables a migration touches, read off its own SQL. This exists because §5's protocol asks the
+// operator to approve a *change* before it happens, and a plan that names only an id and a digest
+// asks them to approve something they cannot see. Best effort by design: a statement whose target the
+// patterns below do not cover is reported as no table found rather than guessed at, so the reader of
+// the line knows the list is incomplete instead of believing it is exhaustive.
+//
+// What the caller has to know, all of it read off the shipped migrations rather than assumed:
+// a rebuild names both sides (0005 lists `artifacts` and `artifacts_new`, and only `artifacts`
+// survives the run) because the intermediate table is part of the change being approved; 0006 and
+// 0007 contain no table statement, so their table is reached only through an index's `ON` clause;
+// and the ALTER and INSERT patterns below are named by no shipped migration on its own (0005's ALTER
+// and INSERT both name the table its CREATE already names), which is why the tests drive those two
+// forms through the plan line rather than relying on the schema alone.
+//
+// `tests/integration/migrate-command.test.ts` reconciles the list against `sqlite_master` for every
+// migration - the direction that can fail silently is a statement form these patterns miss. That
+// reconciliation is where the list's one known hole was found: `AUTOINCREMENT` makes SQLite create
+// its own `sqlite_sequence`, which no statement names, so the line lists the tables a migration
+// declares rather than every object the run leaves behind.
+export function migrationTargets(sql: string): string[] {
+  const found = new Set<string>();
+  const patterns = [
+    /\bCREATE TABLE(?: IF NOT EXISTS)?\s+(?:"?([A-Za-z_][A-Za-z0-9_]*)"?)\b/gu,
+    /\bALTER TABLE\s+(?:"?([A-Za-z_][A-Za-z0-9_]*)"?)\b/gu,
+    /\bDROP TABLE(?: IF EXISTS)?\s+(?:"?([A-Za-z_][A-Za-z0-9_]*)"?)\b/gu,
+    /\bCREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)?\s+(?:"?[A-Za-z_][A-Za-z0-9_]*"?\s+)?ON\s+(?:"?([A-Za-z_][A-Za-z0-9_]*)"?)\b/gu,
+    /\bINSERT INTO\s+(?:"?([A-Za-z_][A-Za-z0-9_]*)"?)\b/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of sql.matchAll(pattern)) {
+      const table = match[1];
+      if (table !== undefined) found.add(table);
+    }
+  }
+  return [...found].sort();
+}
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     id: "0001-core",

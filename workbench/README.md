@@ -187,9 +187,12 @@ Builder 生成支路（F08 / A07 / issue #19）的边界：
   manifest，得到的是一份描述「从未存在过的瞬间」的备份。verify 的退出码看 `reasons` 是否为空，
   而不是看有没有找到文件——「找到了但有一堆说不清」不是通过。
 - `npm run db:migrate`（TESTPLAN §5 那三条命令里最后缺的一条）把**顺序**当成实现：
-  不带 `-- --approve` 只打印待应用的迁移（`pending <id> sql_sha256=<摘要>`——摘要用的是 runner
-  将要记录的那个 `checksum`，不是另算的一份，否则操作者拿它跟 `schema_migrations` 对不上）并以
-  **退出码 2** 结束；0 会被读成"迁完了"，所以这里既不是 0 也不是 1。
+  不带 `-- --approve` 只打印待应用的迁移（`pending <id> sql_sha256=<摘要> tables=<这条迁移声明的表 | none-detected>`
+  ——摘要与表名都取自**将要被应用的那份 SQL**（视图与 `applyMigrations` 拿到的 steps 同源），表名由
+  `migrations.ts` 的 `migrationTargets()` 从 SQL 本身读，两者都不另算一份，否则操作者拿它跟 `schema_migrations`
+  对不上）并以**退出码 2** 结束；0 会被读成"迁完了"，所以这里既不是 0 也不是 1。
+  表名这一半的边界写在代码注释里：重建会同时列被换掉的表与中间表（`0005` 列 `artifacts` 与 `artifacts_new`，
+  后者跑完不存在），`AUTOINCREMENT` 让 SQLite 自己建的 `sqlite_sequence` 则不列——这一行说的是"这条迁移声明了什么"。
   带批准时**先 `consistentBackup()` 再 `applyMigrations()`**，所以中途失败的回包会告诉你
   「备份在失败之前就有了」（`backup taken before the failure: <文件名>`），失败的这一步不被记录。
   它也**先拿 worker 那把排他锁**：活着的 worker 握着它就直接拒，不打开库、不备份、不动 `schema_migrations`。
@@ -2029,6 +2032,52 @@ HTTP 那一跳的两个数字早有断言钉着（`web-api.test.ts` 那条既有
   `docs:check` exit 0（设计锚点 413 → **420** 处，源码引用 276 处／207 文件未变）。
   补一条过程读数：本轮第一次跑 lint 时是 **2 条警告**（测试里多余的 `\"` 转义，`no-useless-escape`），
   清掉才到 0——不是"一开始就 0"。
+
+发布门禁·第三十九轮（2026-10-18 11:36–12:05，**#123 第 1 框补齐：计划行开始说"改哪张表"**）：
+
+- 那一框要的四件事里三件早就在（显式批准、先 `consistentBackup()` 再应用、历史迁移被改写即拒），缺的是
+  **目标表**：`db:migrate` 的计划行只有 `pending <id> sql_sha256=<摘要>`，也就是让操作者批准一个他看不见改了什么的变更。
+  现在每行是 `pending <id> sql_sha256=<64 hex> tables=<a,b,c | none-detected>`，七条迁移现读现抄：
+  `0001-core`→artifacts,jobs,projects,resource_leases,schema_migrations,targets／
+  `0002-evidence-graph`→claim_evidence,claims,evidence_records,graph_edges／
+  `0003-delivery`→blueprints,candidates,contract_revisions,test_vectors,verification_plans,verifications／
+  `0004-events-audit`→audit_entries,events,exports／`0005-artifact-export-class`→artifacts,artifacts_new／
+  `0006-jobs-project-created`→jobs／`0007-vectors-target-keyset`→test_vectors。
+- **四条读数是"逐条迁移对照 `sqlite_master`"跑出来的，不是先写的断言**（`migrate-command.test.ts` 里那条对照用例
+  把七条迁移一条条应用，比较前后的表定义与新增索引的归属表）：
+  ① 第一次红是 `0004` 用了两次 `AUTOINCREMENT`，SQLite 因此自己建 `sqlite_sequence`，而**没有任何语句点名过它** ⇒ 这一行的
+  边界是"这条迁移声明了哪些表"，不是"这轮跑完库里多了哪些对象"；边界写进 `migrationTargets` 的注释而不是悄悄放过。
+  ② `0006` 与 `0007` 里**一条 table 语句都没有**，表只出现在索引的 `ON` 子句里 ⇒ 没有这条模式它们俩都会印 `none-detected`。
+  ③ `0005` 的重建同时列 `artifacts` 与 `artifacts_new`，而后者在同一个事务里被改名、跑完不存在 ⇒ 中间名保留是刻意的
+  （它就是被批准的那笔改动的一半），也正因如此对照只做**反方向**：凡迁移改过的表必须在行上，行上多出来的名字快照证不了。
+  ④ `ALTER TABLE` 与 `INSERT INTO` 两个模式**现有迁移一条也证不了**——我原以为 `0006` 是"ALTER＋索引"，读了 SQL 才知道
+  它只有 `CREATE INDEX`；`0005` 的 ALTER 和 INSERT 都指它自己 CREATE 的那张表 ⇒ 这两支改由注入 steps 走真实渲染器各证一条，
+  不是留着当摆设。
+- 顺带修的一层（同一条框的另一半）：计划行以前按模块里的 `MIGRATIONS` 查摘要，而 `applyMigrations` 记的是
+  **交给它的那份 steps** 的摘要 ⇒ 只要调用方给了不同的 SQL，操作者批准的数与被写进 `schema_migrations` 的数就不是同一个。
+  现在视图与 runner 同源。边界要写清：`steps` 注入今天只有测试在用，所以**这不是线上会走的缺陷**，是"这条闸原本不可能被判真"。
+- 模型侧变异 **14 支全杀**（每支各至少 1 条用例红）：解析器恒返回空（5 红）／删索引模式（2）／删 ALTER（1）／删 INSERT（1）／
+  删 DROP（1）／删 CREATE TABLE（3）／不跳 `IF NOT EXISTS`（3，会把 `IF` 当表名）／不认带引号的表名（1）／不排序（1）／
+  不去重（1，`0005` 的 `artifacts_new` 被点名三次）／视图改回查 `MIGRATIONS`（3）／去掉 `none-detected` 那一支（1）／
+  整段 `tables=` 不印（4）／runner 改用内置列表而不用注入的 steps（2）。
+- 一条过程读数，关于工具本身：**第一版变异脚本自己造成了一次未恢复**。它按 `^Tests` 找 vitest 汇总行，而汇总行前面有两个空格，
+  于是脚本在**已经把源文件改成变异体之后**抛错退出，`migrations.ts` 停在被改写的状态；我从备份恢复时，第二次运行已经把
+  "已变异的那份"当原样存了备份 ⇒ 文件里出现两条 `if (sql !== "") return [];`，逐行删掉才回到本轮的实现状态。
+  脚本随后改成 `try/finally` 恢复＋每支跑完断言字节相同，14 支结束打印 `restored byte-for-byte`。⇒ 结论：**变异脚本必须自带"恢复失败就停"**，
+  否则它红的是树，不是测试。
+- 本轮前两次 `test:integration` 各红 **1 条**，都在 #72 那对重启用例里（第一次 `worker-restart.test.ts`
+  「lets exactly one of two starters take a dead holder over」，第二次 `worker-restart-unclean.test.ts`
+  「the graceful path still removes the lock: expected true to be false」）。**未定性，本 PR 不改它**，能给的读数都在：
+  两个文件单独跑各自全绿（10/10、1/1）；随后 3 次全量 `601 passed + 6 skipped / 29 files` 全绿；按同一序列
+  （起 worker→等 pair 码→SIGKILL→再起→SIGTERM）写的探针跑 3 轮，退出码 0、锁与 socket 都被删、stderr 空；
+  曾怀疑是 `WB_PORT` 撞车（4319/4320 被三个测试文件同用），**读了 `apps/worker/rpc-server.ts` 才否掉**——worker 只监听
+  unix socket，不绑 TCP 端口，`WB_PORT` 只出现在配对 URL 的文本里。机制没定位，另开 issue 记这些读数。
+- 闸门：typecheck 0／lint **214 文件 0 警告 0 错误**／`review` 207 文件命中 **0**／`test:unit` **724/39**（本轮未加单元用例）／
+  `test:integration` **601 passed + 6 skipped / 29 文件**（本轮 +5，全在 `migrate-command.test.ts`：8 → 13）／
+  `docs:check` exit 0（设计锚点 **420** 处未变、源码引用 276 处／207 文件未变）／`perf:t17` 照旧
+  `gateHostSatisfied: false`（本机 darwin，非 Linux x64，A13 那条不变）。
+- #123 还剩三格：第 2 格（`dev`/`build`/`start` 改代码名还是在 README 承认偏离）**等他选**；第 3 格（`test:e2e` 单独成档）
+  与第 4 格（三条命令进不进 `gates`、不进的理由写在哪）不需要任何人裁决，接下来做。
 
 ## 还没有的东西
 
