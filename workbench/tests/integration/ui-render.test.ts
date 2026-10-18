@@ -122,6 +122,16 @@ describe("the left column says what a refused task said (issue #59)", () => {
   // The other half of issue #59: an operator who cannot ask for a page the door refuses can never be
   // told the cap. First paint only - whether the typed number reaches the panel is a browser question
   // and is recorded from the browser pass, not claimed here.
+  // §8 line 267's revoke had no caller either: the page could pair but never hand the session back.
+  it("offers the revoke, and says nothing about it until it is asked", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toContain("data-session-sign-out");
+    // No notice paragraph exists before an operator has clicked - a page that greeted everyone with
+    // "session revoked" would be reporting an action that never happened.
+    expect(html).not.toContain("data-session-line");
+    expect(html).not.toContain("会话已撤销");
+  });
+
   it("offers the page size the door bounds, un-defaulted and un-clamped", () => {
     const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
     expect(html).toMatch(/<input[^>]*data-jobs-limit[^>]*type="number"/);

@@ -16,6 +16,7 @@ import {
   COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
   inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, inspectClaimsNoteFor,
   INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES, INSPECT_CAPTURE_NOTE,
+  jobDetailLine, jobDetailOf, reportLine, reportOf, SESSION_SIGN_OUT_LINE, VERIFIED_SAMPLES_NEEDS_JOB_LINE, verificationIdOfJob,
   EXPORTS_EMPTY_LINE, exportDownloadLine, exportReceiptLine, exportRowOf, exportsRowsOf,
   captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, TARGET_URL_EMPTY_LINE, targetDraftOf, targetReceiptLine, approvedContractIds, planBuildLine, planDraftOf, planExclusionOf, planSubjectLine, planSubjectOf, PLAN_CONTRACT_UNLISTED_LINE, PLAN_CONTRACT_UNSELECTED_LINE, PLAN_NO_CONTRACTS_LINE, PLAN_NO_INVENTORY_LINE, PLAN_NO_JOURNAL_LINE, PLAN_NO_SNAPSHOT_LINE, PLAN_NO_TARGET_LINE, PLAN_SUCCESSOR_EMPTY_LINE, PLAN_TARGET_UNREADABLE_LINE, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
 } from "../../apps/web/ui/view-model.ts";
@@ -1923,5 +1924,55 @@ describe("what the delivery panel says about a package (issue #58)", () => {
     // "no packages yet" into "the listing did not come back", and those are three different next steps.
     expect(new Set(lines).size).toBe(3);
     for (const line of lines) expect(line.length).toBeGreaterThan(8);
+  });
+});
+
+// §8 line 276 and line 298: the two reads that turn "a job was queued" into something the page can
+// name. Before this round both doors had no caller at all, so the verification id - which §8 gives no
+// list route for - could not reach the operator except by typing it in.
+describe("reading one job row and the report it points at (issue #58)", () => {
+  const verifyJob = { id: newId(), kind: "verify", state: "succeeded", cleanupState: "complete", deadlineAt: null, retryAt: null, cleanupRetryAt: null, resultRef: newId(), error: null };
+
+  it("says what one job row is, including the two times only the single read carries", () => {
+    const quiet = jobDetailOf(verifyJob);
+    expect(verificationIdOfJob(quiet)).toBe(quiet.resultRef);
+    expect(jobDetailLine(quiet)).toContain(`作业 ${quiet.id}：verify｜succeeded｜清理 complete`);
+    expect(jobDetailLine(quiet)).toContain(`resultRef ${verifyJob.resultRef}`);
+    // A retry time is a fact this door owns: the page listing has none, so the line has to show it
+    // when it is there and stay silent when it is not - one branch asserted alone would let either
+    // mistake through.
+    expect(jobDetailLine(quiet)).not.toContain("重试行于");
+    const queued = jobDetailOf({ ...verifyJob, state: "queued", retryAt: "2026-10-18T03:00:00.000Z", cleanupRetryAt: "2026-10-18T04:00:00.000Z" });
+    expect(jobDetailLine(queued)).toContain("重试行于 2026-10-18T03:00:00.000Z");
+    expect(jobDetailLine(queued)).toContain("清理重排于 2026-10-18T04:00:00.000Z");
+  });
+
+  it("names a refusal by the reason the details carry, not by the code", () => {
+    const failed = jobDetailOf({ ...verifyJob, state: "failed", resultRef: null, error: { code: "RESOURCE_LIMIT", message: "spent", retryable: false, details: { reason: "generation-budget-exhausted" } } });
+    expect(failed.errorReason).toBe("generation-budget-exhausted");
+    expect(jobDetailLine(failed)).toContain("被拒：generation-budget-exhausted");
+    // And a row that was never refused says nothing about a failure at all.
+    expect(jobDetailLine(jobDetailOf(verifyJob))).not.toContain("被拒");
+  });
+
+  it("only reads a verification id out of a verify row", () => {
+    const detail = jobDetailOf(verifyJob);
+    expect(verificationIdOfJob(jobDetailOf({ ...verifyJob, kind: "build" }))).toBeNull();
+    expect(verificationIdOfJob(jobDetailOf({ ...verifyJob, resultRef: null }))).toBeNull();
+    expect(verificationIdOfJob(detail)).toBe(detail.resultRef);
+  });
+
+  it("reports a verdict, its counts and its limits without inventing a number", () => {
+    const full = reportOf({ id: newId(), result: "PASS", currentness: "current", counts: { total: 4, passed: 3, failed: 1, blocked: 0 }, limitations: ["a", "b"] });
+    expect(reportLine(full)).toBe(`验证报告 ${full.id}：PASS｜current｜通过 3／失败 1／阻断 0／共 4｜限制 2 条`);
+    const missing = reportOf({});
+    expect(missing.result).toBe("（回包没带 result）");
+    expect(reportLine(missing)).toContain("通过 ?");
+    expect(reportLine(missing)).toContain("限制 0 条");
+  });
+
+  it("keeps the two lines it says without a read distinct", () => {
+    expect(SESSION_SIGN_OUT_LINE).not.toBe(VERIFIED_SAMPLES_NEEDS_JOB_LINE);
+    expect(VERIFIED_SAMPLES_NEEDS_JOB_LINE).toContain("resultRef");
   });
 });
