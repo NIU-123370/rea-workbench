@@ -500,6 +500,27 @@ describe("the reply is a named contract, not a dump", () => {
     expect(parsed.success).toBe(true);
   });
 
+  it("refuses a stored manifest that no longer parses, naming the row instead of emptying it", async () => {
+    // This entry used to be built with `manifest: {}` when the stored JSON failed to parse, which
+    // the door's own contract then refused as a shape problem naming nothing. Say which package.
+    const scene = await seedVerified("list-broken-manifest");
+    const record = unwrap(
+      await exports_.create(projectId, reviewer, { candidateId: scene.candidateId, verificationId: null, label: "draft" }),
+    );
+    // The listing is oldest-first with a limit, so prove the row is in scope before expecting the
+    // refusal - otherwise this case would pass by reading past it.
+    const before = unwrap(await exports_.list(projectId, reviewer, 500));
+    expect(before.map((entry) => String(entry.id))).toContain(String(record.id));
+    const stored = db.prepare("SELECT manifest_json FROM exports WHERE project_id = ? AND id = ?").get(projectId, record.id) as { manifest_json: string };
+    db.prepare("UPDATE exports SET manifest_json = ? WHERE project_id = ? AND id = ?").run('{"schemaVersion":99}', projectId, record.id);
+    const refused = await failureOf(exports_.list(projectId, reviewer, 500));
+    // Put the row back: every other case in this file lists the same project's packages.
+    db.prepare("UPDATE exports SET manifest_json = ? WHERE project_id = ? AND id = ?").run(stored.manifest_json, projectId, record.id);
+    expect(refused.code).toBe("REA_CONTRACT_MISMATCH");
+    expect(refused.reason).toBe("export-manifest-unreadable");
+    expect(JSON.stringify(refused.details)).toContain(String(record.id));
+  });
+
   it("refuses a download for an export this project does not have", async () => {
     const refused = await failureOf(exports_.archive(projectId, reviewer, newId()));
     expect(refused.code).toBe("NOT_FOUND");

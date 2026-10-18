@@ -1846,6 +1846,45 @@ network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待
 另有两条门**没有回包体契约**可解析（`GET /events` 的帧由 `encodeSseFrame` 自己规定，下载门回的是字节）。
 这两件事是下一条要交的账，本轮只把刻度写清楚，不顺手改行为。
 
+发布门禁·第三十五轮（2026-10-18 08:02–08:11，**每扇挂上的门第一次被逐一点开——两扇门当场答不出成功**）：
+
+- 上一轮那条门只回答"挂了哪些门"。#58 第 1 框真正要的是后半句：**每扇门都得真能答 §8 那个状态、
+  回包还得能被 §8 那个形状的契约解析**。之前这件事没人证明过——第廿五轮那个 `GET /health` 挂了很久、
+  只能回 503 就是同一形状。本轮交的是 `tests/integration/route-success-census.test.ts`：
+  一次真实装配（worker＋RPC＋真 HTTP 服务＋已安装 profile）里按依赖顺序把 **41 扇门全部走一遍**，
+  每扇记下自己答了什么，然后每扇一条用例；外加一条守卫用例把这张表与 `routeTemplates()` **双向**对账
+  （少一扇＝红，多一扇／只写在表里没走过＝也红）。
+- **现读抓到的第一个真缺陷（交付面）**：`GET /projects/:p/exports` 对**任何一个真的有包的工程**都回
+  **503 `REA_CONTRACT_MISMATCH / export-list-shape`**。根因是字段数：worker 回的是服务自己的提交记录，
+  除 §8 点名的五个字段外还带 `byteLength` 与 `createdAt`，而这道门拿 `exportListSchema`
+  （`strictObject`）去解析**整个数组**，多余键即 `unrecognized_keys`。
+  为什么一直没出声：`POST /exports` 那道门**早就**用 `pickFields` 挑过这五个字段（所以创建不受影响），
+  而唯一存在过的列表用例读的是**一个空工程**——空数组里没有任何东西能违反 strictObject。
+  修法照创建门那一例走（同一个 `EXPORT_RECORD_FIELDS` 所有者、逐条投影后再解析；不是数组仍按同名拒绝）。
+- **第二个**：`ExportService.list` 遇到解析不了的 `manifest_json` 会填一个 `{}` 交出去——
+  下游于是报"形状不对"却不说是哪一行。现在具名拒绝 `export-manifest-unreadable` 并带上 `exportId`。
+  这条用例第一次跑是**假过**的：列表是 `ORDER BY created_at ASC LIMIT ?`，被弄坏的那行是最新的，
+  limit=10 直接把它排除在外 ⇒ 断言当然碰不到拒绝。补了一条"先证明这一行在这次读数里"再期望拒绝。
+- **三条审阅门与 §8 的差异现在是证出来的**：`asksFor` 断"回包**仍然**过不了那条记录契约"
+  （§8 lines 285/287/291 要的是 TestVector／ContractRevision／VerificationPlan，门答的是提交回执）。
+  这句话以前只写在 README 与 issue 里；等哪天门真回记录，这条断言会红，逼着把注记删掉。
+- 新增用例 **43** 条（`test:integration` 546→**589 passed + 6 skipped / 28 files**）；`test:unit` **713/39** 未动。
+- 变异 **9 支：7 杀、2 存活**，两支存活都是**冗余**而不是装饰，并且各自有反证：
+  D6「删掉 census 里的回包形状断言」单独不动颜色，因为门自己先解析——把**门那道解析与投影一起拿掉**，
+  census 立刻红并把 `byteLength`／`createdAt` 逐字打出来（本轮实跑过这一支）；
+  D9「删掉 `asksFor` 那条反向断言」同样不红，因为它本质是变化探测器：今天没有可观察差别，
+  红的是"哪天门真回记录"那一刻。其余 7 支全红：列表门不再投影／创建门不再投影／
+  表里少一扇／把 202 期望改成 200／表里凭空多一扇／把 `{}` 兜底改回来／把具名拒绝分支变成不可达。
+- 末态闸门：typecheck 0／lint **214 文件 0 条**／`review` 207 文件命中 **0**／`test:unit` **713/39**／
+  `test:integration` **589 passed + 6 skipped / 28 files**／`docs:check` exit 0
+  （源码引用 276 处／207 文件、设计锚点 **409** 处、路由 §8 40 条 · 挂载 41 条 · 已记偏差 3 条 / 具名键 8 词 · 已记幂等偏差 2 条）。
+
+**这轮仍然没做的**：`GET /projects/:p/events` 与 `GET /exports/:e/download` **没有 JSON 回包契约**可解析
+（帧语法归 `encodeSseFrame`，包体是字节）——census 对这两扇只能证到"状态码＋`content-type`＋首帧/头里的 sha256＋ZIP 魔数"这一层；
+`§8` 与门之间那三条"回记录 vs 回回执"的差异本轮**只证不修**（改了要动 §8 或者动回包形状，是你的话）；
+交付面的页面控件仍没有（第廿二轮的 6 条无调用方清单不变）；`verified-samples` 那一档导出依旧没有真读数，
+因为这台机器产不出一份 current PASS 报告（verify 作业没有完成者，#75 那一片）。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
