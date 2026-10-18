@@ -14,16 +14,38 @@ npm ci
 
 ## 门禁命令
 
-| 命令 | 做什么 | 失败时 |
-| --- | --- | --- |
-| `npm run typecheck` | `tsc --noEmit`，严格模式 + `erasableSyntaxOnly`（禁 enum / namespace / 构造器参数属性） | 检查变红 |
-| `npm run test:unit` | `tests/unit/**`，纯逻辑与契约层 | 检查变红 |
-| `npm run test:integration` | `tests/integration/**`，真 SQLite 文件、真文件系统、锁与迁移 | 检查变红 |
-| `npm run lint` | oxlint（`no-unused-vars` 等 96 条规则） | 检查变红 |
-| `npm run review` | 本仓库自带的评审 bot：7 条设计规则扫描，产出 `.review/findings.json` 与 `.review/summary.md` | 有 P1 时退出码 1 |
+| 命令 | 做什么 | 失败时 | 在 CI 里 |
+| --- | --- | --- | --- |
+| `npm run typecheck` | `tsc --noEmit` 两套（严格模式 + `erasableSyntaxOnly`，禁 enum / namespace / 构造器参数属性；`tsconfig.ui.json` 那套管 Next 外壳） | 检查变红 | gates 与 review bot 都跑 |
+| `npm run lint` | oxlint（`no-unused-vars` 等 96 条规则） | 检查变红 | gates 与 review bot 都跑 |
+| `npm run review` | 本仓库自带的评审 bot：7 条设计规则扫描，产出 `.review/findings.json` 与 `.review/summary.md` | 有 P1 时退出码 1 | review bot 跑，并把结论贴成一条 review |
+| `npm run test:unit` | `tests/unit/**`，纯逻辑与契约层 | 检查变红 | gates 跑 |
+| `npm run test:integration` | `tests/integration/**`，真 SQLite 文件、真文件系统、锁与迁移 | 检查变红 | gates 跑 |
+| `npm run test:e2e` | `tests/e2e/**`——**需要仓外宿主**的那一档：装好的 REA provider（`REA_LIVE_BIN`）与将来的真浏览器驱动 | 没有宿主时**具名跳过**；跳过不是通过 | **不进 CI**（理由见下） |
+| `npm run test` | 上面三档串跑 | 任一档红即红 | CI 不跑这个别名，它按名字点前两档 |
+| `npm run docs:check` | 发布矩阵对账（T01-T17 vs A01-A13、§8 路由表 vs 挂载路由、具名键清单） | 有洞即构建失败 | gates 跑 |
+| `npm run perf:t17` | T17 投影侧度量，打印一行 `record: {...}` | 不改退出码 | 跑但**不判定**（advisory，`continue-on-error: true`） |
 
 评审 bot 在 PR 上会自动跑并把结论贴成一条 review（`REQUEST_CHANGES` 或 `COMMENT`）；
 本地也可以单独跑 `npm run review`，规则表在 `infra/review/rules.mjs`。
+**分档不是装饰**：`tests/unit/test-tiers.test.ts` 钉住"每个 `*.test.ts` 恰好被一档认领"、
+"每档至少有一个用例"、以及"CI 不跑的那一档必须在上面这张表的最后一格写着不进 CI"，
+所以把用例放进修不了任何档的目录、或者悄悄删掉整档，都会红。
+
+### TESTPLAN §5 规划里不进 CI 的命令（#123 第 4 框的理由）
+
+- **`npm run db:migrate` 不进 CI：它会改一个库。** CI 里没有"操作者批准"这一环，而这条命令的全部设计就是
+  批准之前不动手（第三十九轮：计划行现在连表名都给出来）。它该被证的那部分本来就在 CI 里——
+  `tests/integration/migrate-command.test.ts` 用临时目录把顺序、退出码 2、先备份、拒绝被改写的历史迁移全跑了一遍。
+- **`npm run test:e2e` 不进 CI，缺的不是机器**。CI 那台 runner 实测（逐字抄自 PR #144 的 gates 日志
+  job `117583112702` 的「A13 lane host facts」一步）：`node v24.18.0 linux/x64`、`nproc` 打印 `4`、
+  `google-chrome -> /usr/bin/google-chrome version=Google Chrome 155.0.8059.39`、`chromium -> ... Chromium 155.0.8059.0`。
+  缺的是两样仓库里的东西：**还没有驱动浏览器的自动化用例**（此前所有真浏览器读数都是人驱动的，见"浏览器实测"那些轮），
+  以及 CI 里没有 `REA_LIVE_BIN` 指向的那份 REA 安装。⇒ 这一档今天的价值是"把需要宿主的用例和 CI 兜着的用例分开放"，
+  不是"CI 覆盖了端到端"。
+- **`npm run dev` / `build` / `start` 不在 CI 里跑**：CI 只做 `typecheck`（含 `tsconfig.ui.json` 那一套），
+  **不跑 `next build`**，也不起 dev/start；这三条的名字与语义（改代码名，还是在 README 承认 §5 指的是整个工作台而这里是外壳）
+  还等 #123 第 2 框的决定，所以这里只写"没进 CI"这一半事实。
 
 ## 目录与依赖方向
 
@@ -262,8 +284,8 @@ SDK 差分验证（DESIGN §10 / PRD F09 A08 / issue #20）的判据也单独说
 `2025-06-18`，173 个工具，广告出的 envelope **16 个字段全部 required**、
 `additionalProperties:false`，`confidence` 与 `authority` 的枚举与镜像逐字一致——
 所以 `rea-evidence.ts` 里那条"故意比上游 producer default 更严"的偏差不再是偏差。
-`tests/integration/rea-live-provider.test.ts` 在设了 `REA_LIVE_BIN` 时才跑真会话，
-没设就整支显式跳过，绝不把"没跑"算成"跑过"。
+`tests/e2e/rea-live-provider.test.ts` 在设了 `REA_LIVE_BIN` 时才跑真会话（`npm run test:e2e`，
+它不进 CI，理由写在上面那张表下面），没设就整支显式跳过，绝不把"没跑"算成"跑过"。
 
 本地会话与 API（DESIGN §8 §14 / D30 / issue #17）的边界：
 
@@ -2078,6 +2100,51 @@ HTTP 那一跳的两个数字早有断言钉着（`web-api.test.ts` 那条既有
   `gateHostSatisfied: false`（本机 darwin，非 Linux x64，A13 那条不变）。
 - #123 还剩三格：第 2 格（`dev`/`build`/`start` 改代码名还是在 README 承认偏离）**等他选**；第 3 格（`test:e2e` 单独成档）
   与第 4 格（三条命令进不进 `gates`、不进的理由写在哪）不需要任何人裁决，接下来做。
+
+发布门禁·第四十轮（2026-10-18 12:31–12:40，**#123 第 3、4 两格：`test:e2e` 单独成档，并把"哪条不进 CI"写成一张能对账的表**）：
+
+- 分档的做法：新增 `vitest.e2e.config.ts`（`tests/e2e/**`）＋ `npm run test:e2e`，把唯一那支**需要仓外宿主**的用例
+  `rea-live-provider.test.ts` 从 `tests/integration/` 搬到 `tests/e2e/`（`git mv`，仓库里那条 `capturedBy` 的说明与
+  README 里指路径的那句一起改）。搬完之后 `test:integration` **28 个文件、0 支整档跳过**；`test:e2e` 本机跑出来是
+  `1 skipped (1) / Tests 6 skipped (6)`——跳过那一支会打印 `REA_LIVE_BIN is not set: …`，这就是这一档存在的意义：
+  在 `test:integration` 里，一次跳过读起来像"闸跑过了，这段不重要"。
+  **本轮没能证的那半**：`/private/tmp/rea-source` 已经不在了（10-16 那次的固定基线构建被清掉），所以
+  `REA_LIVE_BIN=... npm run test:e2e` 这条**今天在本机跑不出来**，证到的只有"没有宿主时具名跳过"这一支。
+- `npm run test` 现在串跑三档。理由与代价都写在那张表的下面一格：CI 按名字点它要跑的两档，而 `npm run test` 是人敲的，
+  少一档就会变成"只有记得命令的人才会跑"。
+- 第 4 格（三条命令进不进 gates）没有靠一段散文回答，而是把**门禁命令表加了最后一格"在 CI 里"**，并把
+  `docs:check`、`perf:t17`、`npm run test` 三行补齐（原表少这三行）。下面写清三条不进 CI 的理由：
+  `db:migrate` 会改库（它该被证的部分本来就在 `migrate-command.test.ts` 里）；`test:e2e` 缺的不是机器；
+  `dev`/`build`/`start` 今天 CI 连 `next build` 都没跑，名字那一半还等第 2 格的决定。
+- **一条读数把"CI 没有浏览器"这个说法否掉了**：逐字抄自 PR #144 的 gates 日志（job `117583112702`，
+  「A13 lane host facts」那一步）——`node v24.18.0 linux/x64`、`nproc` 打印 `4`、
+  `google-chrome -> /usr/bin/google-chrome version=Google Chrome 155.0.8059.39`、`chromium -> ... Chromium 155.0.8059.0`。
+  ⇒ A13/#23 缺的是**仓库里还没有驱动浏览器的自动化用例**，不是宿主；`test:e2e` 不进 CI 的真实理由也是这一条＋
+  CI 里没有那份 REA 安装。同一份日志里 T17 的记录是 `{"p50":0.2973670000000084,"p95":1.0978929999999991,"max":1.652749,`
+  `"samples":40,"host":"linux/x64","browserLane":false,"gateHostSatisfied":false}`。
+- 新挡 `tests/unit/test-tiers.test.ts` 4 条：每个 `*.test.ts` 恰好被一档认领／每档至少有一个用例／
+  CI 不跑的那一档必须在表的最后一格写着"不进 CI"／`npm run test` 必须串跑三档。
+  **五条探针各杀掉恰好一条**（逐个破、跑完立刻恢复，最后一次跑基线 4/4 绿、四个文件逐字节还原）：
+  放一个不属于任何档的文件（红在"认领"）、把 e2e 的 include 改成 `tests/unit/**`（红在"认领"，双档同领）、
+  把那唯一文件搬回 integration 让 e2e 变空档（红在"每档至少一个用例"——这一条不是被"认领"那条顺手带出来的，
+  因为此时每个文件仍被认领）、把 README 那格的"不进 CI"擦掉（红在"CI 不跑就写理由"）、
+  从 `npm run test` 里去掉一档（红在"串跑"）。
+  一条工具自曝：探针第一版把五个破坏**在测量之前就一次性施加**了，于是每条探针都"红 3 条"，看着像互相牵连；
+  改成 break→measure→restore 逐条做之后，才是上面这个"各杀一条"的形状。
+- 闸门：typecheck 0／lint **215 文件 0 警告 0 错误**（比上一轮 +1：新增的挡在 `tests/` 下；`vitest.e2e.config.ts` 落在
+  lint 的四个目录之外，但它在 `tsconfig.json` 的 include 里，所以 typecheck 管得到）／`review` **208 文件命中 0**（+1：新的挡）／
+  `test:unit` **728/40**（+4：分档挡）／`test:integration` **601 passed / 28 文件**（去掉整档跳过的 6 条后如此）／
+  `test:e2e` `1 skipped / 6 skipped`／`docs:check` exit 0（源码引用 276 处／**208 个文件**、设计锚点 420 处不变）。
+- **那条重启用例的红又出现了第三次**，仍是 `worker-restart.test.ts`「lets exactly one of two starters take a dead holder over」。
+  本轮实跑：顺序跑各档时整套红 1 条，随后 2 次整套 601/601 全绿；单跑该文件 10/10 绿。
+  今天累计＝7 次全量里 3 次红，两次红的是不同文件。**这一轮把机制往前推了一步，但没有证死**：
+  读 `acquireWorkerLock` 的两次尝试能看出一个洞——证明持有者已死之后那次 `unlink` **不看文件的身份**，
+  所以"甲 unlink→甲 `open(wx)` 建出新锁→乙才轮到它那次 unlink"这个交错里，乙删掉的是甲**刚建好的活锁**，
+  于是两个 starter 都 ok，`won` 就不是 1。按那条用例的形状在本机空转跑 400 轮（同一个进程内 `Promise.all` 两个
+  `acquireWorkerLock`，每轮现起现杀一个真 pid），读数 `{"won=1 loser=DATA_DIR_LOCKED":400}`——
+  **400 轮里这个洞一次也没被撞开**，所以它现在是"读代码读出来的可能机制"，不是"已复现的原因"。
+  下一步要么把它写进 #145 一起裁决（换 `flock()` 就不需要探 pid、也不需要 unlink，但那是换机制，得他点），
+  要么先给这次 unlink 加身份核对（`lstat` 的 ino 相同才动手）。本 PR 不动它。
 
 ## 还没有的东西
 
