@@ -16,6 +16,7 @@ import {
   COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, COMPARATOR_UNSELECTED_LINE, comparatorOptionsOf, verifyDraftOf,
   inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, inspectClaimsNoteFor,
   INSPECT_CHOICE_UNLISTED_LINE, INSPECT_FIRST_ANALYSIS_NOTE, INSPECT_GRAPH_UNREAD_LINE, INSPECT_NEEDS_CLAIMS_LINE, INSPECT_NO_TARGET_LINE, INSPECT_QUESTION_EMPTY_LINE, INSPECT_REVISION_UNREAD_LINE, INSPECT_SCOPE_UNSELECTED_LINE, INSPECT_TARGET_UNREADABLE_LINE, INSPECT_TARGET_URL_LINE, INQUIRY_KIND_LINES, INSPECT_CAPTURE_NOTE,
+  EXPORTS_EMPTY_LINE, exportDownloadLine, exportReceiptLine, exportRowOf, exportsRowsOf,
   captureActionOf, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, TARGET_URL_EMPTY_LINE, targetDraftOf, targetReceiptLine, approvedContractIds, planBuildLine, planDraftOf, planExclusionOf, planSubjectLine, planSubjectOf, PLAN_CONTRACT_UNLISTED_LINE, PLAN_CONTRACT_UNSELECTED_LINE, PLAN_NO_CONTRACTS_LINE, PLAN_NO_INVENTORY_LINE, PLAN_NO_JOURNAL_LINE, PLAN_NO_SNAPSHOT_LINE, PLAN_NO_TARGET_LINE, PLAN_SUCCESSOR_EMPTY_LINE, PLAN_TARGET_UNREADABLE_LINE, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_WAIT_STATE_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_NO_TARGET_LINE, CAPTURE_TARGET_UNREADABLE_LINE, CAPTURE_TARGET_NOT_URL_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILE_UNSELECTED_LINE, CAPTURE_START_URL_EMPTY_LINE, CAPTURE_TIMEOUT_LINE,
 } from "../../apps/web/ui/view-model.ts";
 import type { CaptureActionRow, CaptureProfileOption, JournalEntryWire, PlanExclusionRow, GraphEdgeView, GraphNodeView, InspectSubject, InspectTargetRead } from "../../apps/web/ui/view-model.ts";
@@ -1874,3 +1875,53 @@ describe("jobFailureLine says what the refusal published (issue #59)", () => {
     if ("reason" in running) throw new Error("the panel refused to build");
     expect(running.failure).toBeNull();
   })
+
+// The delivery surface (§8 lines 299-300, PRD F11, issue #58's fourth box): none of the three export
+// doors had a page caller before this round, so the model side is where the rules can be pinned.
+describe("what the delivery panel says about a package (issue #58)", () => {
+  const manifest = { statusNote: "这是 draft：没有绑定的验证报告，不声称已验证" };
+  const row = { id: newId(), label: "draft", downloadUrl: `/api/v1/projects/${newId()}/exports/${newId()}/download`, sha256: "a".repeat(64), manifest };
+
+  it("keeps every row a listing carries, with the digest and the route the door named", () => {
+    const rows = exportsRowsOf([row, { ...row, id: newId() }]);
+    expect(rows).toHaveLength(2);
+    const [first] = rows;
+    if (first === undefined) throw new Error("the listing lost its first row");
+    // The digest and the route are the two facts a package is worth: an id alone is not downloadable.
+    expect(first.downloadUrl).toBe(row.downloadUrl);
+    expect(first.sha256).toBe("a".repeat(64));
+    expect(first.statusNote).toBe(manifest.statusNote);
+  });
+
+  it("names the field a row is missing instead of dropping the row", () => {
+    const broken = exportRowOf({ label: "draft" });
+    expect(broken.id).toBeNull();
+    expect(broken.downloadUrl).toBeNull();
+    // A field that *is* there stays: the panel is reporting what it read, not rewriting the row.
+    expect(broken.label).toBe("draft");
+    expect(broken.sha256).toBe("（回包没带摘要）");
+    expect(broken.statusNote).toBeNull();
+    // And a row that is not an object at all still says which fields it could not find.
+    expect(exportRowOf(null).label).toBe("（回包没带 label）");
+    // Both halves of the download line: a row with a route gets nothing said about it, a row without
+    // one gets a sentence naming which id is un-downloadable. Asserting only one half would let a
+    // version that always returns the sentence, or always returns null, pass.
+    expect(exportDownloadLine(broken)).toContain("没带下载路由");
+    expect(exportDownloadLine(exportRowOf(row))).toBeNull();
+  });
+
+  it("will not write a receipt for a package it has no id for", () => {
+    expect(exportReceiptLine(exportRowOf(row))).toContain(`已打出交付包 ${row.id}`);
+    expect(exportReceiptLine(exportRowOf(row))).toContain("sha256 " + "a".repeat(64));
+    expect(exportReceiptLine(exportRowOf(row))).toContain(manifest.statusNote);
+    expect(exportReceiptLine(exportRowOf({ label: "draft" }))).toBe("打包已被接受，但回包没带 id");
+  });
+
+  it("says a different thing for each of the three emptinesses it can be in", () => {
+    const lines = [EXPORTS_EMPTY_LINE["no-candidate"], EXPORTS_EMPTY_LINE["empty-page"], EXPORTS_EMPTY_LINE.unread];
+    // Three states, three sentences: a copy-paste would collapse "no candidate to package" into
+    // "no packages yet" into "the listing did not come back", and those are three different next steps.
+    expect(new Set(lines).size).toBe(3);
+    for (const line of lines) expect(line.length).toBeGreaterThan(8);
+  });
+});

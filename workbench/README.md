@@ -1957,6 +1957,39 @@ HTTP 那一跳的两个数字早有断言钉着（`web-api.test.ts` 那条既有
 另外两条待你决定：给这仓加 DOM 测试环境（把 T3/T6/T7 变成机器可杀）、以及 #122 那三种触发形状选哪一种
 （它决定 `ReaRetention` 的生产构造点长什么样，也因此压着 #14 的第 3、4 框）。
 
+发布门禁·第三十七轮＋浏览器实测·第廿四轮（2026-10-18 10:01–10:21，**交付三扇门里的两扇第一次有了页面调用方；第三扇有了控件但本轮没有读数**）：
+
+- 第廿二轮记下「挂好的门里有 6 条在页面里没有调用方」，其中三条是交付面：
+  `POST /projects/:p/exports`、`GET /projects/:p/exports`、`GET /projects/:p/exports/:e/download`。
+  本轮现读仍是 `grep -c exports apps/web/app/client/workbench.tsx` → **0**。这就是 #58 第 4 框那句
+  「每条路由都在真浏览器点一次」对这几条**根本无法开始**的原因。
+  **本轮补到的是两扇**：清单读门有了挂载调用方、创建门有了按钮；下载那一扇**只有控件**——
+  每一行渲染的是一个 `<a download href=门给的相对路由>`，而本项目一行都没有，所以它今天仍无真浏览器读数，
+  我也不把它算成"点过了"。
+- 报告那一栏下面多了一格「交付包」：挂载时随其它面板一起读一次清单；读回来了就按**每一包一行**列出
+  标签、64 位摘要、`statusNote` 与一个同源 `<a download>`；读不回来说一句、读回来是空的再说另一句、
+  还没有候选时打包那一发在页面自己这一侧就具名停住（三句各不相同，且都有断言）。
+  **verified-samples 这一档本轮不 offer**：它要一个 verificationId，而只有单条作业读门
+  （§8 line 276 的 `GET /jobs/:j`）能给出那个 id——那是下一片，不是这一片；页面不端出自己填不了的选项。
+- 模型侧新四个所有者：`exportRowOf`／`exportsRowsOf`／`exportReceiptLine`／`exportDownloadLine`，
+  加一份三句各不一样的 `EXPORTS_EMPTY_LINE`。**一行都不会被悄悄丢掉**：读不懂的字段写成
+  「（回包没带 label）」这种点名句子留在原位——清单自己变短是比"看着坏掉"更坏的结果。
+- 真浏览器读数（三进程：worker 4312＋web 4313＋`next build`/`next start -p 4499`，项目 `rig-59`）：
+  `GET …/exports` → **200**（网络面板逐字，reqid 7442），面板逐字
+  「本项目还没有交付包：下面这一发按 §10 打一个 draft 包，它不声称已验证。」；
+  点「为当前候选打一个 draft 包」→ 页面自己的具名停住，逐字
+  「还没有可打包的候选：作业清单里得有一行 build 作业，它的 resultRef 指着候选。」
+- **创建与下载这两扇本轮没有真浏览器读数**，原因不是没做控件：这个项目没有候选，而页面**没有任何一条用户动作
+  能造出候选**——造样本（`POST /vectors`）那一扇门至今没有页面调用方（也在这 6 条清单里），
+  所以「声明目标 → 上传 → 样本 → 契约 → 计划 → 冻结 → 生成」这条链在页面侧是断的。
+  我没有为了读数去播种（#107 正是因为"读数全来自播种"才立着的）。
+- 闸门：typecheck 0／lint 214 文件 0 条／`review` 207 文件命中 0／`test:unit` **717/39**（本轮 +4）／
+  `test:integration` **595 passed + 6 skipped / 29 files**（本轮无新增集成用例，未回归）／`docs:check` exit 0。
+- 变异：模型侧 **8 支全杀**（不交 id／缺 label 给空串／摘要不点名／downloadLine 永远不说话／
+  downloadLine 永远说话／收据不写摘要／两种空态共用一句／不读 manifest 的 statusNote），每支都是 1–2 条用例红。
+  客户端接线那三支（挂载少读一次、没有候选时照样发、两种空态混用）**只有浏览器能杀**——
+  与 #59 那轮同一形状：这仓没有 DOM 测试环境，所以本轮那两条逐字读数就是它们的见证。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
@@ -1996,7 +2029,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   第廿二轮又把这条账往反方向量了一次：**挂好的门里有 6 条在页面里没有调用方**
   （交付三件套 `POST/GET /projects/:p/exports` 与 `GET .../exports/:e/download`、`GET /projects/:p/verifications/:v`、
   `GET /projects/:p/jobs/:j`、`DELETE /session`）——所以「每条新路由都在浏览器里点一次」对这几条**无法开始**，
-  要么补控件、要么改判据，那是 #58 那一边等的决定。已点到真页面的：作业取消（`queued → cancelled`）与清理重排（202，
+  要么补控件、要么改判据，那是 #58 那一边等的决定。
+  **第廿四轮把这一格往下推了两扇**：清单与创建现在有调用方（清单在挂载读取里、创建在按钮上），
+  剩 **4 条**：下载（控件已渲染，但项目里没有一行，所以仍无读数）、
+  `GET /projects/:p/verifications/:v`、`GET /projects/:p/jobs/:j`、`DELETE /session`。
+  已点到真页面的：作业取消（`queued → cancelled`）与清理重排（202，
   但那一行没有可重排的 owned 清理，所以时间字段照旧 `null`）、请求验证（比较器三档逐字、未选被挡下）。
 - 「被拒」那一格有一条真浏览器读数了（第廿一轮）：一次预算耗尽的生成在左栏逐字显示
   「本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 2 · maxAttempts 1）」，且同一格 `任务`
