@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReactFlow, Background, Controls } from "@xyflow/react";
 // React Flow ships its layout as CSS: without it the node boxes are not positioned and
 // the edge layer never renders, so a canvas that looks populated can still show no
@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalFactsLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
 import type { CandidateDiscovery, CaptureActionRow, CaptureProfileOption, PlanExclusionRow, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
@@ -57,6 +57,15 @@ export type JobsPagePayload = {
   }[];
   nextCursor: string | null;
 };
+
+// §8 line 277 lets a caller name the page size, and the door owns the default it applies when nobody
+// does - so `null` here is "not stated", not "zero", and no copy of the server's number lives in this
+// file. Six call sites used to spell `/jobs?limit=50` out individually, which is how five of them
+// ended up dropping the refusal (issue #59): one builder, one place to be wrong.
+function jobsPageUrl(projectId: string, limit: number | null): string {
+  const page = `/api/v1/projects/${projectId}/jobs`;
+  return limit === null ? page : `${page}?limit=${String(limit)}`;
+}
 
 export type CandidatePayload = {
   id: string;
@@ -305,6 +314,10 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [samplesNotice, setSamplesNotice] = useState<string | null>(null);
   const [csrf, setCsrf] = useState("");
   const [jobsNotice, setJobsNotice] = useState<string | null>(null);
+  // The page size this panel asks for, as typed. Empty means "say nothing and take the door's
+  // default"; the number is what makes `jobs-limit` and the two figures it names reachable at all,
+  // because an operator who cannot ask for too large a page can never be told the cap (issue #59).
+  const [jobsLimitInput, setJobsLimitInput] = useState("");
   const [verifyNotice, setVerifyNotice] = useState<string | null>(null);
   const [comparator, setComparator] = useState("");
   // The installed comparator policies, read from the worker (issue #82). `null` means "the list did
@@ -364,6 +377,39 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [planRows, setPlanRows] = useState<PlanExclusionRow[]>([]);
   const [planNotice, setPlanNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // `Number("")` is 0, which the door would read as a stated page of zero rows, so the empty
+  // box is turned into `null` - "not stated" - before the URL is built. A value the door's own
+  // whole-number test refuses (`abc`, 1.5) is sent as typed and comes back named.
+  const jobsLimit = jobsLimitInput === "" ? null : Number(jobsLimitInput);
+
+  // Five places re-read the job list after an action, and all five used to say
+  // `if (page.ok) setJobs(...)`: a refusal left the panel showing the rows from the previous read and
+  // said nothing at all (issue #59). One owner: publish the page, or publish what the door refused it
+  // for, with the numbers the door named.
+  const readJobs = useCallback(
+    async (tell: (line: string) => void): Promise<void> => {
+      const page = await getJson(jobsPageUrl(props.projectId, jobsLimit));
+      if (page.ok) {
+        setJobs(page.value as JobsPagePayload);
+        return;
+      }
+      tell(refusalLine("作业清单读取被拒", page.reason, page.facts));
+    },
+    [jobsLimit, props.projectId],
+  );
+
+  // The page size only means anything as a read. An input that changed the number in the box while the
+  // rows on screen still came from the previous page would be the page showing what it predicted, so a
+  // change re-reads — and if the new size is one the door refuses, the refusal with its two numbers is
+  // what lands in the panel instead (issue #59). Tracked by last-read value so the mount read that
+  // `load` already does is not repeated here.
+  const lastReadJobsLimit = useRef<number | null>(null);
+  useEffect(() => {
+    if (lastReadJobsLimit.current === jobsLimit) return;
+    lastReadJobsLimit.current = jobsLimit;
+    void readJobs(setJobsNotice);
+  }, [jobsLimit, readJobs]);
 
   const load = useCallback(async () => {
     const health = await getJson("/api/v1/session");
@@ -464,9 +510,14 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     // The candidate is discovered, not typed (§8 lines 277 + 294): the job page names the
     // build job whose resultRef is the candidate, and only then does the file list have an
     // address. A refusal here says which of those two steps did not happen.
-    const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
+    const page = await getJson(jobsPageUrl(props.projectId, jobsLimit));
     if (!page.ok) {
-      setCodeNotice(`作业清单读取被拒：${page.reason}`);
+      const line = refusalLine("作业清单读取被拒", page.reason, page.facts);
+      // Two panels hang off this one read: the 作业 list, and the 代码 tab's candidate discovery,
+      // which cannot pick a build job out of a page it never received. Both say the same sentence -
+      // the first because it has no rows to show, the second because the rows it would show are stale.
+      setJobsNotice(line);
+      setCodeNotice(line);
       return;
     }
     const loaded = page.value as JobsPagePayload;
@@ -478,11 +529,13 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     }
     const files = await getJson(`/api/v1/projects/${props.projectId}/candidates/${picked.candidateId}`);
     if (!files.ok) {
-      setCodeNotice(`候选文件清单读取被拒：${files.reason}`);
+      setCodeNotice(refusalLine("候选文件清单读取被拒", files.reason, files.facts));
       return;
     }
     setCandidate(files.value as CandidatePayload);
-  }, [props.projectId]);
+    // `jobsLimit` belongs to this list because this read is the one that fills the 作业 panel: a page
+    // that changed the size and did not re-read would show the old page under the new number.
+  }, [jobsLimit, props.projectId]);
 
   useEffect(() => {
     void load();
@@ -576,10 +629,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         return;
       }
       setJobsNotice(jobActionLine(action, (relayData(got.value) as Record<string, unknown> | null) ?? {}));
-      const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
-      if (page.ok) setJobs(page.value as JobsPagePayload);
+        await readJobs(setJobsNotice);
     },
-    [csrf, props.projectId],
+    [csrf, props.projectId, readJobs],
   );
 
   // §8 line 297 from the browser. The comparator is chosen from the list this build installed
@@ -604,10 +656,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         return;
       }
       setVerifyNotice(queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "verify", done: "已排入验证队列" }));
-      const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
-      if (page.ok) setJobs(page.value as JobsPagePayload);
+        await readJobs(setJobsNotice);
     },
-    [comparator, comparators, csrf, props.projectId],
+    [comparator, comparators, csrf, props.projectId, readJobs],
   );
 
   // The subject a directed inspect may name, read out of the two reads that own it (issue #58). It is
@@ -659,9 +710,8 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     setInspectNotice(
       queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "inspect", done: "已排入定向调查" }),
     );
-    const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
-    if (page.ok) setJobs(page.value as JobsPagePayload);
-  }, [csrf, graphRevision, inspectChosen, inspectGraph, inspectQuestion, inspectScope, inspectTarget, props.projectId]);
+    await readJobs(setJobsNotice);
+  }, [csrf, graphRevision, inspectChosen, inspectGraph, inspectQuestion, inspectScope, inspectTarget, props.projectId, readJobs]);
 
   // One row of the action list, patched in place. `map` by position rather than by value: two rows can
   // legitimately be identical (click the same button twice), so a value-keyed patch would edit both.
@@ -702,8 +752,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     setCaptureNotice(
       queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "capture", done: "已排入采集" }),
     );
-    const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
-    if (page.ok) setJobs(page.value as JobsPagePayload);
+    await readJobs(setJobsNotice);
   }, [
     captureHeaderValues,
     captureProfileId,
@@ -718,6 +767,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     csrf,
     graphRevision,
     props.projectId,
+    readJobs,
   ]);
 
   // §8 line 273 from the browser. This is the one write control that needs no idempotency key - the
@@ -871,10 +921,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
         return;
       }
       setGenerateNotice(queuedJobLine((relayData(got.value) as Record<string, unknown> | null) ?? {}, { kind: "build", done: "已排队生成" }));
-      const page = await getJson(`/api/v1/projects/${props.projectId}/jobs?limit=50`);
-      if (page.ok) setJobs(page.value as JobsPagePayload);
+        await readJobs(setJobsNotice);
     },
-    [csrf, props.projectId],
+    [csrf, props.projectId, readJobs],
   );
 
   const openFile = useCallback(
@@ -882,7 +931,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       if (candidate === null) return;
       const got = await getJson(`/api/v1/projects/${props.projectId}/candidates/${candidate.id}/files/${fileId}`);
       if (!got.ok) {
-        setCodeNotice(`文件正文读取被拒：${got.reason}`);
+        setCodeNotice(refusalLine("文件正文读取被拒", got.reason, got.facts));
         return;
       }
       const body = got.value as { content: string; sha256: string };
@@ -897,8 +946,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       const got = await getJson(`/api/v1/projects/${props.projectId}/evidence/${evidenceId}`);
       if (!got.ok) {
         setEvidence(null);
-        const facts = refusalFactsLine(got.facts);
-        setEvidenceNotice(facts === null ? `读取被拒：${got.reason}` : `读取被拒：${got.reason}（${facts}）`);
+        // This panel used to build `reason（facts）` by hand. `refusalLine` is the one owner of that
+        // sentence, so the evidence refusal cannot drift from what every other panel says.
+        setEvidenceNotice(refusalLine("读取被拒", got.reason, got.facts));
         return;
       }
       const view = got.value as { evidence: unknown; mediaType: string; byteLength: number; sha256: string | null };
@@ -1268,6 +1318,20 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       </section>
       <section aria-label="作业与清理" data-panel="jobs">
         <h2>作业（§8 line 277 的清单；每行按 §11 的状态决定给不给按钮）</h2>
+        <p data-jobs-limit-row>
+          <label htmlFor="jobs-limit">每页行数（§8 line 277 的 <code>limit</code>）</label>
+          {/* No min and no max: the ceiling is the door's (§11's page bound), and a page that clamped
+              the number itself could never show the refusal that names both numbers. */}
+          <input
+            id="jobs-limit"
+            data-jobs-limit
+            type="number"
+            step="1"
+            placeholder="门的默认"
+            value={jobsLimitInput}
+            onChange={(event) => setJobsLimitInput(event.target.value)}
+          />
+        </p>
         {jobs === null ? (
           <p data-jobs-empty>{jobsNotice ?? "正在读取作业清单…"}</p>
         ) : (
