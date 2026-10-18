@@ -1146,6 +1146,11 @@ describe("the job page route (§8 line 277 / issue #55)", () => {
     });
     expect(over.status, over.text).toBe(413);
     expect(over.text).toContain("jobs-limit");
+    // Issue #59's second half: the two numbers the read named, not only the reason. This is the same
+    // assertion the evidence face already holds, and it is what the 作业 panel now prints.
+    const details = (JSON.parse(over.text) as { error: { details: Record<string, unknown> } }).error.details;
+    expect(details["limit"]).toBe(JOB_LIST_MAX_LIMIT + 1);
+    expect(details["maxLimit"]).toBe(JOB_LIST_MAX_LIMIT);
   });
 
   it("relays a cursor this server never issued as a named refusal", async () => {

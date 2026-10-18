@@ -1920,7 +1920,45 @@ network namespace 实际拦截、真容器执行照旧未验证（T07/T14 仍待
 `sensitiveValues` 这个字段名 §8 line 299 不列，等你裁决；census 的顺序盲区（一轮只点一扇）；#58 第 4 框那句
 「每条新路由都在真浏览器点一次」仍差第廿二轮记的 6 条无调用方门。
 
+浏览器实测·第廿三轮（2026-10-18 09:21–09:39，**同一套三个真进程**：worker 4312＋`npm run web` 4313＋
+`next build` + `next start -p 4499`；这一轮读的是 #59 剩下那一框——作业清单被拒时那两个数字能不能真出现在页面上）：
+
+- **页面上真的读到了那两个数字**：在作业面板的「每页行数」框里输入 `201` →
+  `GET /api/v1/projects/53471838-…/jobs?limit=201` **413**，逐字回包
+  `{"error":{"code":"RESOURCE_LIMIT","message":"a job page is at most 200 rows","retryable":true,"details":{"reason":"jobs-limit","limit":201,"maxLimit":200},"requestId":"2200ae62-…"}}`，
+  面板 `data-jobs-line` 文本逐字 **「作业清单读取被拒：jobs-limit（limit 201 · maxLimit 200）」**。
+  这一行是本轮的目标：以前这条拒绝到操作者手上只剩 `jobs-limit` 三个字。
+- **页面不替门默认，这条也有读数**：配对后第一次读作业是 `GET …/jobs`（**没有 `limit`**）→ **200**。
+  框里留空＝"没说"，门自己的默认生效；页面上不再有这样一份 50 的副本（以前六处逐字写 `jobs?limit=50`）。
+- **不夹住这条也是活的读数**：同一框里输入 `1.5` → 页面把 `1.5` 原样发出去，回来的具名拒绝逐字显示为
+  「作业清单读取被拒：jobs-limit-malformed」（这条拒绝没有数字可报，句子就照没有数字的样子收口）。
+  客户端一旦加 `max=`/`min=`，这条与上面那条 413 都会被页面自己吞掉——这是那个控件不带边界属性的理由。
+- **一条没定性的观察**：这一轮整个页面的读序列出现了**两次**（`session`/`comparator-policies`/`health`/
+  `projects/:p`/`graph`/`audit`/`jobs` 全套两遍，两次都以 `jobs?limit=201` 的 413 收尾）。
+  我没查出为什么会重跑一次整页读取，**不把它写成"已知行为"**；它不影响上面三条读数。
+- 代码侧同时收掉的：`readJobs` 成为作业清单读取的唯一所有者（**五处**原先写 `if (page.ok) setJobs(...)`，
+  拒绝被整条丢掉——面板继续显示上一次读到的行却一句话不说），第六处（代码 Tab 的候选发现）原先只贴 `reason`；
+  候选文件清单、文件正文两处同样丢掉 `facts`；证据面板原先自己手拼 `reason（facts）`，现在走同一个 `refusalLine`。
+- 变异 **7 支：4 支被测试杀掉，3 支只有浏览器能杀**（本轮那三条读数就是它们的见证）：
+  T1 给控件加 `max="200"` → 红；T2 删掉整个控件 → 红；T4 `job-read` 的拒绝不报 `maxLimit` → 红；
+  T5 `fromWorker` 丢掉 `details` → **7 条**红（含证据面那条既有的「带数字」用例）。
+  **T3 页面替门默认（把 `jobsLimit` 写成常量 50）、T6 拒绝时页面不说话、T7 改页码不重读** 三支**在测试里全绿**——
+  静态渲染没有 fetch、没有 effect，这三条只能由真浏览器读；本轮逐条读到了（上面第二、第一、第三条）。
+  要把它们变成机器可证的，需要给这仓加一个 DOM 测试环境（现在 devDeps 里没有 jsdom/happy-dom），
+  那是一个依赖决定，**我没有替你做**，记在 #59 上。
+- 末态闸门：typecheck 0／lint **214 文件 0 条**／`review` 207 文件命中 **0**／`test:unit` **713/39** 未动／
+  `test:integration` **595 passed + 6 skipped / 29 files**（本轮 +1：那条控件用例）／`docs:check` exit 0
+  （设计锚点 410 处未变，源码引用 276 处／207 文件未变）。
+
+**这轮仍然没做的**：三条 RESOURCE_LIMIT 数字里，**证据面（`evidence-over-inline-limit`）本轮没在页面上读到**——
+它要一份超过 1 MiB 的 envelope，而这台机器的 REA 夹具答的是固定小信封，产线里也没有能产出大证据的执行者；
+HTTP 那一跳的两个数字早有断言钉着（`web-api.test.ts` 那条既有用例逐字断 `details.limit` 与 `details.byteLength`），
+页面这一侧它与作业面共用同一个 `refusalLine`，所以句子形状不会分叉，但**"真页面上读到"这件事本轮为未证**。
+另外两条待你决定：给这仓加 DOM 测试环境（把 T3/T6/T7 变成机器可杀）、以及 #122 那三种触发形状选哪一种
+（它决定 `ReaRetention` 的生产构造点长什么样，也因此压着 #14 的第 3、4 框）。
+
 ## 还没有的东西
+
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配
 自己（解析 `WB_*`、拿写锁、跑迁移、开本机 RPC，并把配对码只打在终端）；`npm run web` 是
 API 进程本体（DESIGN §14 给 web 的只有 `WB_HOST`/`WB_PORT`/`WB_DATA_DIR` 三个字段，它不碰文件
@@ -1962,9 +2000,11 @@ seq 投递，事件流在转发层是**流过去**而不是缓冲（`tests/unit/
   但那一行没有可重排的 owned 清理，所以时间字段照旧 `null`）、请求验证（比较器三档逐字、未选被挡下）。
 - 「被拒」那一格有一条真浏览器读数了（第廿一轮）：一次预算耗尽的生成在左栏逐字显示
   「本次任务被拒：RESOURCE_LIMIT / generation-budget-exhausted（attempt 2 · maxAttempts 1）」，且同一格 `任务`
-  显示的就是那条 `failed` 行的 id。同族另两条只完成一半：`jobs-limit` 的 `{limit:999, maxLimit:200}` 在页面同源
-  `fetch` 的 **413 回包**里读到，但页面永远请求 `limit=50`，所以**没有任何控件会把它显示出来**——那一半要的是
-  一个页大小控件，不是又一扇门；`evidence-over-inline-limit` 的 `{byteLength, limit}` 本轮**没有**浏览器读数。
+  显示的就是那条 `failed` 行的 id。同族另两条：`jobs-limit` 的两个数字**第廿三轮起在真页面上读到了**——
+  作业面板有一个不夹住、不替门默认的「每页行数」框（留空＝没说，门自己的默认生效），输入 `201` 后面板逐字显示
+  「作业清单读取被拒：jobs-limit（limit 201 · maxLimit 200）」；`evidence-over-inline-limit` 的 `{byteLength, limit}`
+  到这一轮仍**没有**浏览器读数（这台机器的 REA 夹具答的是固定小信封，产线上也没有能产出大证据的执行者），
+  HTTP 那一跳的两个数字早有断言钉着，页面这一侧它与作业面共用同一个 `refusalLine`。
 - 上传之后那条链还欠两次真门读数（issue #108 文末同段）：**HTTP 门到 runner 的端到端一条用例**——
   `POST /projects/:p/imports` 经 Next 中继进来、runner 把它跑到 `succeeded`、再 `GET .../evidence/:e` 回 200，
   这条今天是由 `worker.dispatch`（命令门）证的，不是由那道 HTTP 门；以及**页面里点出「来源 N」**的读数——

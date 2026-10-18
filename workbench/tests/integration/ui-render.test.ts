@@ -118,6 +118,22 @@ describe("the left column says what a refused task said (issue #59)", () => {
     expect(render({ mode: "list" })).not.toContain("data-job-failure");
     expect(render({ mode: "list" })).not.toContain("被拒");
   });
+
+  // The other half of issue #59: an operator who cannot ask for a page the door refuses can never be
+  // told the cap. First paint only - whether the typed number reaches the panel is a browser question
+  // and is recorded from the browser pass, not claimed here.
+  it("offers the page size the door bounds, un-defaulted and un-clamped", () => {
+    const html = renderToStaticMarkup(createElement(Workbench, { projectId: "00000000-0000-4000-8000-000000000000" }));
+    expect(html).toMatch(/<input[^>]*data-jobs-limit[^>]*type="number"/);
+    // No `max` and no `min`: the ceiling is the door's, and a page that clamped the number itself
+    // would replace the refusal that names both figures with its own guess.
+    const control = /<input[^>]*data-jobs-limit[^>]*\/>/.exec(html)?.[0] ?? "";
+    expect(control).not.toContain("max=");
+    expect(control).not.toContain("min=");
+    // Empty means "not stated", so no copy of the server's default lives in this file.
+    expect(control).toContain('value=""');
+    expect(control).toContain("placeholder=");
+  });
 });
 
 describe("the rendered three columns (PRD F04)", () => {
