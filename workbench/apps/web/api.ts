@@ -493,12 +493,23 @@ async function createProject(ctx: Context, deps: ApiDependencies, key: string): 
   });
 }
 
+// §8's package record, named once. Both export doors answer it by picking these fields out of the
+// service's commit, which also carries the artifact's length and the row's instant - real facts, not
+// the document's answer.
+const EXPORT_RECORD_FIELDS = ["id", "label", "downloadUrl", "sha256", "manifest"] as const;
+
 async function listExports(ctx: Context, deps: ApiDependencies): Promise<ApiResponse> {
   const projectId = projectFromPath(ctx);
   if (projectId === null) return unknownProject(ctx);
   const outcome = await deps.worker.call("export.list", { projectId, limit: 50 }, ctx.actor);
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
-  const listed = parseStrict(exportListSchema, outcome.value);
+  // `exportRecordSchema` is strict, so this door used to fail parsing its own answer as soon as a
+  // project had a package: the extra two fields arrived, and the only listing any test had ever
+  // driven was an empty one. Project each entry the way the create door does - a reply that is not
+  // an array still lands in the parse below and is refused by the same name.
+  const listed = parseStrict(exportListSchema, Array.isArray(outcome.value)
+    ? outcome.value.map((entry) => pickFields(entry, EXPORT_RECORD_FIELDS))
+    : outcome.value);
   if (!listed.ok) {
     return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "export-list-shape", "the worker did not answer with a list of exports", ctx.declaration);
   }
@@ -1568,7 +1579,7 @@ async function createExport(ctx: Context, deps: ApiDependencies): Promise<ApiRes
   if (!outcome.ok) return fromWorker(ctx.requestId, outcome.error, ctx.declaration);
   // §8's 201 body is five named fields; the command's reply is checked against that
   // contract rather than forwarded as whatever the worker happened to return.
-  const created = parseStrict(exportRecordSchema, pickFields(outcome.value, ["id", "label", "downloadUrl", "sha256", "manifest"]));
+  const created = parseStrict(exportRecordSchema, pickFields(outcome.value, EXPORT_RECORD_FIELDS));
   if (!created.ok) {
     return refused(ctx.requestId, "REA_CONTRACT_MISMATCH", "export-shape", "the worker did not answer with a created export", ctx.declaration);
   }

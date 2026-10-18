@@ -424,23 +424,33 @@ export class ExportService {
       }),
     );
     if (!rows.ok) return gateFail("INVALID_INPUT", rows.error.code, rows.error.message);
-    return {
-      ok: true,
-      value: rows.value
-        .filter((entry) => entry.sha256 !== null)
-        .map((entry) => {
-          const manifest = exportManifestSchema.safeParse(entry.row.manifestJson);
-          return {
-            id: entry.row.id,
-            label: entry.row.label,
-            downloadUrl: downloadUrlFor(projectId, entry.row.id),
-            sha256: entry.sha256 as Digest,
-            byteLength: entry.byteLength,
-            createdAt: entry.row.createdAt,
-            manifest: (manifest.success ? manifest.data : {}) as unknown as ExportManifestContent,
-          };
-        }),
-    };
+    const commits: ExportCommit[] = [];
+    for (const entry of rows.value) {
+      if (entry.sha256 === null) continue;
+      const manifest = exportManifestSchema.safeParse(entry.row.manifestJson);
+      if (!manifest.success) {
+        // An unparseable manifest used to become `{}` here, which the door's own contract then
+        // refused - a caller got a contract mismatch naming nothing. Say which row instead.
+        return gateFail(
+          "REA_CONTRACT_MISMATCH",
+          "export-manifest-unreadable",
+          "a stored package manifest does not parse as the manifest it claims to be",
+          { exportId: entry.row.id },
+        );
+      }
+      commits.push({
+        id: entry.row.id,
+        label: entry.row.label,
+        downloadUrl: downloadUrlFor(projectId, entry.row.id),
+        sha256: entry.sha256,
+        byteLength: entry.byteLength,
+        createdAt: entry.row.createdAt,
+        // The wire parse strips the `Id` brands the content type carries, so this restates what the
+        // row already stored rather than re-deriving it.
+        manifest: manifest.data as unknown as ExportManifestContent,
+      });
+    }
+    return { ok: true, value: commits };
   }
 
   private async readArtifact(projectId: Id, artifactId: Id): Promise<Result<Uint8Array, GateFailure>> {
