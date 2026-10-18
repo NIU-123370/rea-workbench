@@ -19,6 +19,10 @@ import { decideProxy } from "./session-proxy.ts";
 // URL whose host is `0.0.11.184`, and this relay forwards `cookie`, so a typo would send a
 // live session to an address nobody typed.
 
+// RFC 9110: these statuses are terminated by the first CRLF, so a Response carrying any body -
+// including an empty one - is an invalid construction, not an empty reply.
+const STATUSES_WITHOUT_BODY = new Set([101, 204, 304]);
+
 const DEFAULT_ORIGINS = {
   WB_UI_ORIGIN: "http://localhost:3000",
   WB_API_ORIGIN: "http://127.0.0.1:4310",
@@ -170,6 +174,13 @@ export async function relay(request: Request, context: RelayContext): Promise<Re
   // above be copied after the bytes rather than around them.
   if ((headers.get("content-type") ?? "").startsWith("text/event-stream")) {
     return new Response(upstream.body, { status: upstream.status, headers });
+  }
+  // A status that may not carry a body must be relayed with `null`: the Response constructor throws
+  // on *any* body, an empty ArrayBuffer included, so §8 line 267's 204 came back to the browser as a
+  // 500. Nothing caught it before because nothing had ever pushed a 204 through this file - the revoke
+  // door was mounted and tested at the API, but had no caller on the page until issue #58's fourth box.
+  if (STATUSES_WITHOUT_BODY.has(upstream.status)) {
+    return new Response(null, { status: upstream.status, headers });
   }
   return new Response(await upstream.arrayBuffer(), { status: upstream.status, headers });
 }

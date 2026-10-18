@@ -51,6 +51,26 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+// The revoke door (§8 line 267) answers 204 with no body. This case exists because a browser click
+// found the relay turning that 204 into a 500: the door was mounted and API-tested, but nothing had
+// ever pushed a body-less status through this file.
+describe("a status that may not carry a body", () => {
+  it("relays the 204 as a 204 and keeps the clearing cookie", async () => {
+    stubUpstream({ status: 204, headers: { "set-cookie": "wb_session=; Path=/; HttpOnly" }, body: null });
+    const response = await relay(browserRequest("session", { method: "DELETE" }), paramsFor("session"));
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
+    expect(response.headers.get("set-cookie")).toContain("wb_session=");
+  });
+
+  it("still relays a 200 with its bytes, so the branch above is not a blanket null", async () => {
+    stubUpstream({ status: 200, headers: { "content-type": "application/json" }, body: '{"data":{"ok":true}}' });
+    const response = await relay(browserRequest("health"), paramsFor("health"));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"ok":true');
+  });
+});
+
 describe("the relay's refusals", () => {
   it("answers a dot-dot path with a named proxy reason and never reaches the API", async () => {
     const upstream = stubUpstream({ status: 200, headers: {}, body: "should-not-be-read" });

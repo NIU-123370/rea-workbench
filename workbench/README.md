@@ -1990,6 +1990,46 @@ HTTP 那一跳的两个数字早有断言钉着（`web-api.test.ts` 那条既有
   客户端接线那三支（挂载少读一次、没有候选时照样发、两种空态混用）**只有浏览器能杀**——
   与 #59 那轮同一形状：这仓没有 DOM 测试环境，所以本轮那两条逐字读数就是它们的见证。
 
+发布门禁·第三十八轮＋浏览器实测·第廿五轮（2026-10-18 10:31–10:56，**剩下那 4 条无调用方的门接上 3 条，并因此挖出一个真缺陷**）：
+
+- 接上的三条：`GET /projects/:p/jobs/:j`（每一行一个「读这一行」）、`GET /projects/:p/verifications/:v`
+  （「读这份验证报告」，只有从某一行的 resultRef 学到 id 才会说话）、`DELETE /session`（左栏一个「撤销本会话」）。
+  报告那一档还带一个 `label` 选择框：**verified-samples 不是不能选，是页面不会替你把 id 编出来**——
+  没读到 id 就点它，页面具名说「还读不出 verified-samples…它只能从某一行作业的 resultRef 读回来（§8 line 276）」，
+  同一句也在 `readReport` 那里；这一条不是客户端校验门的东西，是"页面不端出自己填不了的选项"。
+- **挖出来的缺陷（`apps/web/app/lib/relay.ts`）**：撤销那一下真按下去，浏览器收到的是 **500**，
+  Next 的日志里逐字 `TypeError: Response constructor: Invalid response status code 204`。
+  中继把每个非 SSE 回包都用 `new Response(await upstream.arrayBuffer(), {status})` 重造，
+  而 204（以及 101/304）**不允许带任何 body——空 ArrayBuffer 也算 body**。
+  更糟的一层：中继是在**已经把请求转给 API、会话已经被撤销之后**才构造响应时抛的，
+  所以那次操作在服务端成了、在页面上却显示成失败。
+  根因不是没人测这道门：`web-api.test.ts` 早就断过 API 本体回 204，
+  **是这条门在页面上没有调用方，所以从来没有人把一个 204 从这台中继推过去过**——
+  #58 第 4 框那句「每条路由都在真浏览器点一次」要防的正是这个，本轮第一次点到它。
+  修法：状态在 `{101,204,304}` 时以 `null` body 中继；回归用例两支（204 要带着清除 cookie 原样过去；
+  200 的字节仍然真是字节，证明那不是把 body 一律抹掉），
+  **把修掉的那个分支删掉，204 那条立刻红**（本轮实跑：1 条红），所以它是能杀东西的闸。
+- 真浏览器读数（三进程，同第册廿四轮那套；worker 换用**仓内**夹具路径而不是 /tmp 副本——
+  副本找不到自己那份 `rea-live-tools-shapes.json`，握手会以 `provider-handshake-failed` 失败，这也是一条读数）：
+  页面上传一份 HAR → `POST …/imports` **202** → 那一行跑到 `inspect｜succeeded｜清理 complete`；
+  点「读这一行」→ `GET …/jobs/1dc893dc-…` **200**，逐字
+  「作业 1dc893dc-59b2-48d3-861a-eb32ed09b41c：inspect｜succeeded｜清理 complete｜resultRef ev_aaa…aaa」；
+  配对后点「撤销本会话」→ 逐字「会话已撤销：这台工作台回到「还没有会话」，配对要重新用终端里打印的码。」，
+  头部状态同步成「会话：unpaired」（只有 2xx 才会渲染这一句；上一轮同一句位置显示的是「撤销会话被拒：session-unknown」，
+  那是一条具名拒绝，不是崩溃）。
+- 还剩 **1 条**无调用方的门：`GET /projects/:p/exports/:e/download`。
+  控件已经渲染（`<a download>` 用的就是清单门给的相对路由），但这个项目里没有一行包——
+  产出一行包要先有候选，而**页面无任何动作能造出候选**（`POST /vectors` 自己也不在这几条之外的那 6 条清单里），
+  所以本轮仍不把它算成"点过了"。
+- 模型侧变异 **7 支全杀**：不看 kind 就把 resultRef 当报告 id／拒绝只报 code 不报 `details.reason`／
+  时间字段无值也印／counts 缺字段不写「?」／报告句不写限制条数／两句合成一句／detail 行不写 resultRef，
+  每支各 1 条用例红。
+- 闸门：typecheck 0／lint **214 文件 0 条**／`review` 207 文件命中 **0**／`test:unit` **724/39**（本轮 +7：模型 5 条＋中继回归 2 条）／
+  `test:integration` **596 passed + 6 skipped / 29 files**（本轮 +1：撤销控件那条 SSR 用例）／
+  `docs:check` exit 0（设计锚点 413 → **420** 处，源码引用 276 处／207 文件未变）。
+  补一条过程读数：本轮第一次跑 lint 时是 **2 条警告**（测试里多余的 `\"` 转义，`no-useless-escape`），
+  清掉才到 0——不是"一开始就 0"。
+
 ## 还没有的东西
 
 `npm run worker`、`npm run web`、`npm run doctor` 与 `npm run ui:dev` 现在都存在：worker 装配

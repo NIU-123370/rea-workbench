@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalLine, relayData, EXPORTS_EMPTY_LINE, exportDownloadLine, exportReceiptLine, exportRowOf, exportsRowsOf, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalLine, relayData, EXPORTS_EMPTY_LINE, jobDetailLine, jobDetailOf, reportLine, reportOf, SESSION_SIGN_OUT_LINE, VERIFIED_SAMPLES_NEEDS_JOB_LINE, verificationIdOfJob, exportDownloadLine, exportReceiptLine, exportRowOf, exportsRowsOf, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
 import type { ExportRowView, CandidateDiscovery, CaptureActionRow, CaptureProfileOption, PlanExclusionRow, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
@@ -132,6 +132,15 @@ export async function postForm(
   return post(path, csrf, key, {}, form);
 }
 
+// §8 line 267's revoke. Same `post` as every write, so a DELETE cannot grow its own idea of what
+// headers a state change needs or what a refusal may put on screen.
+export async function deleteJson(
+  path: string,
+  csrf: string,
+): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
+  return post(path, csrf, null, {}, "", "DELETE");
+}
+
 // One owner for the request shape and the refusal parse of every write on this page: a second copy
 // would be a second chance to send a state change without the CSRF header, or to decide on its own
 // what a refusal is allowed to put on screen (§12.1, §14).
@@ -141,9 +150,10 @@ async function post(
   key: string | null,
   extraHeaders: Record<string, string>,
   body: BodyInit,
+  method: "POST" | "DELETE" = "POST",
 ): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string; facts: Record<string, number | boolean> }> {
   const response = await fetch(path, {
-    method: "POST",
+    method,
     credentials: "same-origin",
     headers: {
       "x-csrf-token": csrf,
@@ -319,6 +329,14 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   // yet"), and the panel says a different sentence for each.
   const [delivery, setDelivery] = useState<ExportRowView[] | null>(null);
   const [deliveryNotice, setDeliveryNotice] = useState<string | null>(null);
+  // What each row's single-job read (§8 line 276) answered with, keyed by job id: the page keeps the
+  // answers it got rather than re-deciding them, and the verification id is only ever learned this
+  // way - §8 gives no list route for verifications.
+  const [jobDetails, setJobDetails] = useState<Record<string, string>>({});
+  const [verificationId, setVerificationId] = useState<string | null>(null);
+  const [reportNotice, setReportNotice] = useState<string | null>(null);
+  const [exportLabel, setExportLabel] = useState<"draft" | "verified-samples">("draft");
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   // The page size this panel asks for, as typed. Empty means "say nothing and take the door's
   // default"; the number is what makes `jobs-limit` and the two figures it names reachable at all,
   // because an operator who cannot ask for too large a page can never be told the cap (issue #59).
@@ -428,6 +446,51 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     setDelivery(exportsRowsOf(got.value));
   }, [props.projectId]);
 
+  // The one read that turns a queued verification into something the page can name: §8 line 276's
+  // record carries `resultRef`, and for a `verify` job that is the verification id.
+  const readOneJob = useCallback(async (jobId: string): Promise<void> => {
+    const got = await getJson(`/api/v1/projects/${props.projectId}/jobs/${jobId}`);
+    if (!got.ok) {
+      setJobDetails((previous) => ({ ...previous, [jobId]: refusalLine("单条作业读取被拒", got.reason, got.facts) }));
+      return;
+    }
+    const detail = jobDetailOf(relayData(got.value));
+    setJobDetails((previous) => ({ ...previous, [jobId]: jobDetailLine(detail) }));
+    const found = verificationIdOfJob(detail);
+    if (found !== null) setVerificationId(found);
+  }, [props.projectId]);
+
+  const readReport = useCallback(async (): Promise<void> => {
+    if (verificationId === null) {
+      setReportNotice(VERIFIED_SAMPLES_NEEDS_JOB_LINE);
+      return;
+    }
+    const got = await getJson(`/api/v1/projects/${props.projectId}/verifications/${verificationId}`);
+    if (!got.ok) {
+      setReportNotice(refusalLine("验证报告读取被拒", got.reason, got.facts));
+      return;
+    }
+    setReportNotice(reportLine(reportOf(relayData(got.value))));
+  }, [props.projectId, verificationId]);
+
+  // §8 line 267's revoke: the page drops what it was holding, because after a 204 the cookie is gone
+  // and any row still on screen would be a fact this session can no longer re-read.
+  const signOut = useCallback(async (): Promise<void> => {
+    const got = await deleteJson("/api/v1/session", csrf);
+    if (!got.ok) {
+      setSessionNotice(refusalLine("撤销会话被拒", got.reason, got.facts));
+      return;
+    }
+    setCsrf("");
+    setSession("unpaired");
+    setJobDetails({});
+    setVerificationId(null);
+    setReportNotice(null);
+    setDelivery(null);
+    setJobs(null);
+    setSessionNotice(SESSION_SIGN_OUT_LINE);
+  }, [csrf]);
+
   // §8 line 299's create, with the candidate this page *discovered* rather than one typed in. A draft
   // is what the page can honestly ask for on its own: `verified-samples` needs a verification id, and
   // the only door that names one is the single-job read (§8 line 276) - which is the next handle, not
@@ -442,9 +505,15 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       setDeliveryNotice(EXPORTS_EMPTY_LINE["no-candidate"]);
       return;
     }
+    if (exportLabel === "verified-samples" && verificationId === null) {
+      // The label is a claim about a report; the page will not send one it has no id for, and the id
+      // is only ever learned from a job row's resultRef.
+      setDeliveryNotice(VERIFIED_SAMPLES_NEEDS_JOB_LINE);
+      return;
+    }
     const got = await postJson(
       `/api/v1/projects/${props.projectId}/exports`,
-      { candidateId: candidate.id, verificationId: null, label: "draft" },
+      { candidateId: candidate.id, verificationId: exportLabel === "verified-samples" ? verificationId : null, label: exportLabel },
       csrf,
       crypto.randomUUID(),
     );
@@ -455,7 +524,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     }
     setDeliveryNotice(exportReceiptLine(exportRowOf(relayData(got.value))));
     await readDelivery();
-  }, [candidate, csrf, props.projectId, readDelivery]);
+  }, [candidate, csrf, exportLabel, props.projectId, readDelivery, verificationId]);
 
   const load = useCallback(async () => {
     const health = await getJson("/api/v1/session");
@@ -1274,8 +1343,17 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                 workbench is willing to hand over, nor the note that says which fact made it a draft. */}
             <section aria-label="交付" data-panel="delivery">
               <h3>交付包（§8 lines 299-300：一包一摘要一相对下载路由）</h3>
+              <label htmlFor="export-label">包的档位（§8 line 299 的 label）</label>
+              <select id="export-label" data-export-label value={exportLabel} onChange={(event) => setExportLabel(event.target.value as "draft" | "verified-samples")}>
+                <option value="draft">draft</option>
+                <option value="verified-samples">verified-samples</option>
+              </select>
+              <button type="button" data-report-read onClick={() => void readReport()}>
+                读这份验证报告
+              </button>
+              {reportNotice === null ? null : <p data-report-line>{reportNotice}</p>}
               <button type="button" data-export-create onClick={() => void requestPackage()}>
-                为当前候选打一个 draft 包
+                为当前候选打一个{exportLabel === "draft" ? " draft " : " verified-samples "}包
               </button>
               {deliveryNotice === null ? null : <p data-delivery-notice>{deliveryNotice}</p>}
               {delivery === null ? (
@@ -1399,6 +1477,12 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           )
         ) : null}
       </section>
+      <section aria-label="会话" data-panel="session">
+        <button type="button" data-session-sign-out onClick={() => void signOut()}>
+          撤销本机会话（§8 line 267）
+        </button>
+        {sessionNotice === null ? null : <p data-session-line>{sessionNotice}</p>}
+      </section>
       <section aria-label="作业与清理" data-panel="jobs">
         <h2>作业（§8 line 277 的清单；每行按 §11 的状态决定给不给按钮）</h2>
         <p data-jobs-limit-row>
@@ -1430,6 +1514,12 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
                     </button>
                   ) : (
                     <span data-job-cancel-note={job.id}>{actions.cancelNote}</span>
+                  )}
+                  <button type="button" data-job-read={job.id} onClick={() => void readOneJob(job.id)}>
+                    读这一行
+                  </button>
+                  {jobDetails[job.id] === undefined ? null : (
+                    <span data-job-detail={job.id}>{jobDetails[job.id]}</span>
                   )}
                   {actions.cleanupRetry ? (
                     <button type="button" data-job-cleanup-retry={job.id} onClick={() => void runJobAction(job, "cleanup-retry")}>

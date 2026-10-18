@@ -855,6 +855,96 @@ export function importReceiptLine(record: { targetId?: unknown; job?: Record<str
   return `已收下采集文件：目标 ${targetId}｜作业${kind} ${jobId}${state}`;
 }
 
+// §8 line 276's single-job read, and §8 line 298's report read. Both doors existed with no caller:
+// the page could list jobs and queue a verification but could never read the one thing a verify job
+// answers with - its resultRef, which is the verification id every later door needs. Reading it here
+// is what makes `verified-samples` an honest option instead of a label the operator types blind.
+
+export type JobDetail = {
+  id: string | null;
+  kind: string;
+  state: string;
+  cleanupState: string;
+  retryAt: string | null;
+  cleanupRetryAt: string | null;
+  resultRef: string | null;
+  errorReason: string | null;
+};
+
+function textOf(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+export function jobDetailOf(payload: unknown): JobDetail {
+  const record = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
+  const error = record["error"] !== null && typeof record["error"] === "object" ? (record["error"] as Record<string, unknown>) : null;
+  const details = error !== null && error["details"] !== null && typeof error["details"] === "object"
+    ? (error["details"] as Record<string, unknown>)
+    : null;
+  return {
+    id: textOf(record["id"]),
+    kind: textOf(record["kind"]) ?? "（回包没带 kind）",
+    state: textOf(record["state"]) ?? "（回包没带 state）",
+    cleanupState: textOf(record["cleanupState"]) ?? "（回包没带清理状态）",
+    retryAt: textOf(record["retryAt"]),
+    cleanupRetryAt: textOf(record["cleanupRetryAt"]),
+    resultRef: textOf(record["resultRef"]),
+    // The refusal's reason is the named key, not the message: the message is prose the service may
+    // reword, and `details.reason` is what §8's ApiError shape pins.
+    errorReason: error === null ? null : textOf(details?.["reason"]) ?? textOf(error["code"]),
+  };
+}
+
+export function jobDetailLine(detail: JobDetail): string {
+  const times = [
+    detail.retryAt === null ? null : `重试行于 ${detail.retryAt}`,
+    detail.cleanupRetryAt === null ? null : `清理重排于 ${detail.cleanupRetryAt}`,
+  ].filter((part): part is string => part !== null);
+  const result = detail.resultRef === null ? "" : `｜resultRef ${detail.resultRef}`;
+  const failure = detail.errorReason === null ? "" : `｜被拒：${detail.errorReason}`;
+  const timing = times.length === 0 ? "" : `｜${times.join("｜")}`;
+  return `作业 ${detail.id ?? "（回包没带 id）"}：${detail.kind}｜${detail.state}｜清理 ${detail.cleanupState}${timing}${result}${failure}`;
+}
+
+// The verification id only ever arrives through a job row's resultRef - there is no list route for
+// verifications in §8 - so this is the single place that decides whether the report door is offerable.
+export function verificationIdOfJob(detail: JobDetail): string | null {
+  return detail.kind === "verify" && detail.resultRef !== null ? detail.resultRef : null;
+}
+
+export type ReportView = {
+  id: string | null;
+  result: string;
+  currentness: string;
+  counts: string;
+  limitations: number;
+};
+
+export function reportOf(payload: unknown): ReportView {
+  const report = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
+  const counts = report["counts"] !== null && typeof report["counts"] === "object" ? (report["counts"] as Record<string, unknown>) : {};
+  const number = (value: unknown) => (typeof value === "number" ? String(value) : "?");
+  return {
+    id: textOf(report["id"]),
+    result: textOf(report["result"]) ?? "（回包没带 result）",
+    currentness: textOf(report["currentness"]) ?? "（回包没带 currentness）",
+    counts: `通过 ${number(counts["passed"])}／失败 ${number(counts["failed"])}／阻断 ${number(counts["blocked"])}／共 ${number(counts["total"])}`,
+    limitations: Array.isArray(report["limitations"]) ? report["limitations"].length : 0,
+  };
+}
+
+export function reportLine(view: ReportView): string {
+  return `验证报告 ${view.id ?? "（回包没带 id）"}：${view.result}｜${view.currentness}｜${view.counts}｜限制 ${String(view.limitations)} 条`;
+}
+
+export const SESSION_SIGN_OUT_LINE = "会话已撤销：这台工作台回到「还没有会话」，配对要重新用终端里打印的码。";
+
+// `verified-samples` is a claim about a report, and the report's id only ever arrives through a job
+// row's resultRef (§8 gives no list route for verifications). A page that sent the label anyway would
+// be asking the door to package a claim it cannot name the evidence of.
+export const VERIFIED_SAMPLES_NEEDS_JOB_LINE =
+  "还读不出 verified-samples：那一档要一个 verificationId，而它只能从某一行作业的 resultRef 读回来（§8 line 276）。";
+
 // The delivery surface (§8 lines 299-300, PRD F11, issue #58's fourth box). Until this round none of
 // the three export doors had a caller on the page: a package could only be made by a test, so the
 // operator never saw what the workbench is actually willing to hand over, nor the note that says why
