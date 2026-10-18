@@ -855,6 +855,59 @@ export function importReceiptLine(record: { targetId?: unknown; job?: Record<str
   return `已收下采集文件：目标 ${targetId}｜作业${kind} ${jobId}${state}`;
 }
 
+// The delivery surface (§8 lines 299-300, PRD F11, issue #58's fourth box). Until this round none of
+// the three export doors had a caller on the page: a package could only be made by a test, so the
+// operator never saw what the workbench is actually willing to hand over, nor the note that says why
+// a `draft` is a draft.
+
+export type ExportRowView = {
+  // A row that fails to parse is still a row: the panel names which field is missing rather than
+  // dropping it, because a listing that quietly gets shorter is worse than one that looks broken.
+  id: string | null;
+  label: string;
+  downloadUrl: string | null;
+  sha256: string;
+  statusNote: string | null;
+};
+
+export function exportRowOf(entry: unknown): ExportRowView {
+  const row = entry !== null && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
+  const manifest = row["manifest"] !== null && typeof row["manifest"] === "object" ? (row["manifest"] as Record<string, unknown>) : {};
+  return {
+    id: typeof row["id"] === "string" ? row["id"] : null,
+    label: typeof row["label"] === "string" ? row["label"] : "（回包没带 label）",
+    downloadUrl: typeof row["downloadUrl"] === "string" ? row["downloadUrl"] : null,
+    sha256: typeof row["sha256"] === "string" ? row["sha256"] : "（回包没带摘要）",
+    statusNote: typeof manifest["statusNote"] === "string" ? manifest["statusNote"] : null,
+  };
+}
+
+export function exportsRowsOf(payload: unknown): ExportRowView[] {
+  const listed = relayData(payload);
+  return Array.isArray(listed) ? listed.map(exportRowOf) : [];
+}
+
+export const EXPORTS_EMPTY_LINE: Record<"no-candidate" | "empty-page" | "unread", string> = {
+  "no-candidate": "还没有可打包的候选：作业清单里得有一行 build 作业，它的 resultRef 指着候选。",
+  "empty-page": "本项目还没有交付包：下面这一发按 §10 打一个 draft 包，它不声称已验证。",
+  unread: "交付清单没读回来：读回来了才会列出每一包的摘要与下载路由。",
+};
+
+// The receipt for one package that just landed. `statusNote` is the point of showing it: §10 lets a
+// draft be a draft, and the operator should read which fact made it one rather than guess from a label.
+export function exportReceiptLine(row: ExportRowView): string {
+  if (row.id === null) return "打包已被接受，但回包没带 id";
+  const note = row.statusNote === null ? "" : `｜${row.statusNote}`;
+  return `已打出交付包 ${row.id}｜${row.label}｜sha256 ${row.sha256}${note}`;
+}
+
+// What a download link may and may not be. §8 line 299 promises a *relative* route through this API,
+// and the door refuses a package that names anywhere else; the page repeats nothing it cannot read, so
+// a row without a route says that instead of rendering a dead anchor.
+export function exportDownloadLine(row: ExportRowView): string | null {
+  return row.downloadUrl === null ? `这一包的回包没带下载路由（id ${row.id ?? "未知"}）` : null;
+}
+
 // The form can tell before it sends that the `file` part is absent. This is not client-side
 // validation of what the door checks - the door still refuses an empty body by name - it is the
 // difference between "you have not picked a file yet" and a 400 that reads like a malfunction.

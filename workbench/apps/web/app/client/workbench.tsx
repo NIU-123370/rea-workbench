@@ -9,9 +9,9 @@ import "@xyflow/react/dist/style.css";
 import type { Edge, Node } from "@xyflow/react";
 
 import { WorkbenchColumns } from "../../ui/panels.tsx";
-import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalLine, relayData, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
+import { approvedContractIds, blueprintFreezeLine, buildMiddlePanel, buildLeftPanel, buildRightTabs, canvasEdges, captureDraftOf, captureProfileOptionsOf, captureSubjectLine, captureSubjectOf, CAPTURE_ACTION_OPTIONS, CAPTURE_LOCATOR_OPTIONS, CAPTURE_NETWORK_NOTE, CAPTURE_PROFILES_EMPTY_LINE, CAPTURE_PROFILES_UNREADABLE_LINE, CAPTURE_WAIT_STATE_OPTIONS, comparatorOptionsOf, directedInquiry, evidenceMetaLine, freezePanelOf, FREEZE_EMPTY_LINE, generatePanelOf, GENERATE_EMPTY_LINE, importReceiptLine, inspectClaimsNoteFor, inspectDraftOf, inspectSubjectLine, inspectSubjectOf, inspectTargetReadOf, inquiryQueueLine, INSPECT_CAPTURE_NOTE, INSPECT_SCOPE_OPTIONS, journalEntriesOf, PLAN_EXCLUSION_OPTIONS, PLAN_NO_CONTRACTS_LINE, PLAN_NO_JOURNAL_LINE, planBuildLine, planDraftOf, planSubjectLine, planSubjectOf, jobActionLine, jobActions, listView, pickCandidateSource, queuedJobLine, refusalLine, relayData, EXPORTS_EMPTY_LINE, exportDownloadLine, exportReceiptLine, exportRowOf, exportsRowsOf, SAMPLES_EMPTY_LINE, sampleDecisionLine, samplesPageOf, samplesRefusalLine, sampleIsDecidable, sampleLine, sessionGate, COMPARATOR_EMPTY_LINE, COMPARATOR_UNREADABLE_LINE, jobUpdateSignalOf, streamLineOf, targetDraftOf, targetReceiptLine, uploadDraftOf, verifyDraftOf } from "../../ui/view-model.ts";
 import type { SampleRow } from "../../ui/view-model.ts";
-import type { CandidateDiscovery, CaptureActionRow, CaptureProfileOption, PlanExclusionRow, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
+import type { ExportRowView, CandidateDiscovery, CaptureActionRow, CaptureProfileOption, PlanExclusionRow, ComparatorPolicyOption, DirectedInquiry, GraphEdgeView, GraphNodeView, InspectGraphFacts, InspectTargetRead, JobLifecycleRow, JournalEntryWire, LeftPanel, LifecycleAction, MiddleCell, RightTab } from "../../ui/view-model.ts";
 // `Id` is a brand, not a runtime check: every value cast here arrived from the API, whose
 // schemas validated the shape on the way out (§4). Importing `identity.ts` into a client
 // component would also drag `node:crypto` into the browser bundle.
@@ -314,6 +314,11 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
   const [samplesNotice, setSamplesNotice] = useState<string | null>(null);
   const [csrf, setCsrf] = useState("");
   const [jobsNotice, setJobsNotice] = useState<string | null>(null);
+  // What this project has already been packaged into (§8 line 299's list door). `null` is "the listing
+  // did not come back", which is a different answer from an empty array ("this project has no package
+  // yet"), and the panel says a different sentence for each.
+  const [delivery, setDelivery] = useState<ExportRowView[] | null>(null);
+  const [deliveryNotice, setDeliveryNotice] = useState<string | null>(null);
   // The page size this panel asks for, as typed. Empty means "say nothing and take the door's
   // default"; the number is what makes `jobs-limit` and the two figures it names reachable at all,
   // because an operator who cannot ask for too large a page can never be told the cap (issue #59).
@@ -411,6 +416,47 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     void readJobs(setJobsNotice);
   }, [jobsLimit, readJobs]);
 
+  // The delivery listing, read like every other panel: a refusal says which door refused it, with the
+  // facts that door published, and leaves the panel in its own "not read" state rather than an empty one.
+  const readDelivery = useCallback(async (): Promise<void> => {
+    const got = await getJson(`/api/v1/projects/${props.projectId}/exports`);
+    if (!got.ok) {
+      setDelivery(null);
+      setDeliveryNotice(refusalLine("交付清单读取被拒", got.reason, got.facts));
+      return;
+    }
+    setDelivery(exportsRowsOf(got.value));
+  }, [props.projectId]);
+
+  // §8 line 299's create, with the candidate this page *discovered* rather than one typed in. A draft
+  // is what the page can honestly ask for on its own: `verified-samples` needs a verification id, and
+  // the only door that names one is the single-job read (§8 line 276) - which is the next handle, not
+  // this one, so the select does not offer a label the page cannot fill.
+  const requestPackage = useCallback(async () => {
+    const gated = sessionGate(csrf);
+    if (!gated.ok) {
+      setDeliveryNotice(gated.line);
+      return;
+    }
+    if (candidate === null) {
+      setDeliveryNotice(EXPORTS_EMPTY_LINE["no-candidate"]);
+      return;
+    }
+    const got = await postJson(
+      `/api/v1/projects/${props.projectId}/exports`,
+      { candidateId: candidate.id, verificationId: null, label: "draft" },
+      csrf,
+      crypto.randomUUID(),
+    );
+    if (!got.ok) {
+      setDeliveryNotice(refusalLine("打包被拒", got.reason, got.facts));
+      await readDelivery();
+      return;
+    }
+    setDeliveryNotice(exportReceiptLine(exportRowOf(relayData(got.value))));
+    await readDelivery();
+  }, [candidate, csrf, props.projectId, readDelivery]);
+
   const load = useCallback(async () => {
     const health = await getJson("/api/v1/session");
     setSession(health.ok ? "paired" : "unpaired");
@@ -507,6 +553,9 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
       setJournal(null);
       setFreezeNotice(refusalLine("决策日志读取被拒", journalPage.reason, journalPage.facts));
     }
+    // Delivery rides the same mount read: the operator should be able to see what the workbench has
+    // already handed over without first clicking something that asks for it.
+    await readDelivery();
     // The candidate is discovered, not typed (§8 lines 277 + 294): the job page names the
     // build job whose resultRef is the candidate, and only then does the file list have an
     // address. A refusal here says which of those two steps did not happen.
@@ -535,7 +584,7 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
     setCandidate(files.value as CandidatePayload);
     // `jobsLimit` belongs to this list because this read is the one that fills the 作业 panel: a page
     // that changed the size and did not re-read would show the old page under the new number.
-  }, [jobsLimit, props.projectId]);
+  }, [jobsLimit, props.projectId, readDelivery]);
 
   useEffect(() => {
     void load();
@@ -1212,13 +1261,47 @@ export function Workbench(props: { projectId: string }): React.ReactElement {
           </>
         ) : null}
         {activeTab === "report" ? (
-          <ul>
-            {claimRows.map((claim) => (
-              <li key={String(claim.claimId)} data-coverage={String(claim.claimId)}>
-                {coverageLine(claim)}
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul>
+              {claimRows.map((claim) => (
+                <li key={String(claim.claimId)} data-coverage={String(claim.claimId)}>
+                  {coverageLine(claim)}
+                </li>
+              ))}
+            </ul>
+            {/* §8 lines 299-300's delivery surface, which had no caller on this page at all until now:
+                a package could only ever be made by a test, so the operator never read what the
+                workbench is willing to hand over, nor the note that says which fact made it a draft. */}
+            <section aria-label="交付" data-panel="delivery">
+              <h3>交付包（§8 lines 299-300：一包一摘要一相对下载路由）</h3>
+              <button type="button" data-export-create onClick={() => void requestPackage()}>
+                为当前候选打一个 draft 包
+              </button>
+              {deliveryNotice === null ? null : <p data-delivery-notice>{deliveryNotice}</p>}
+              {delivery === null ? (
+                <p data-delivery-empty>{EXPORTS_EMPTY_LINE.unread}</p>
+              ) : delivery.length === 0 ? (
+                <p data-delivery-empty>{EXPORTS_EMPTY_LINE["empty-page"]}</p>
+              ) : (
+                <ul>
+                  {delivery.map((row) => (
+                    <li key={row.id ?? row.sha256} data-export-row={row.id ?? "no-id"}>
+                      <span data-export-label>{row.label}</span>
+                      <span data-export-digest>{row.sha256}</span>
+                      {row.downloadUrl === null ? (
+                        <span data-export-broken>{exportDownloadLine(row)}</span>
+                      ) : (
+                        <a download href={row.downloadUrl} data-export-download>
+                          下载 ZIP
+                        </a>
+                      )}
+                      {row.statusNote === null ? null : <span data-export-note>{row.statusNote}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </>
         ) : null}
         {activeTab === "samples" ? (
           <>
